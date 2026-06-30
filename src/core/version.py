@@ -1,5 +1,3 @@
-__version__ = "1.4.2"
-
 import re
 import os
 import time
@@ -13,9 +11,6 @@ import httpx
 # ================================================================
 # 配置
 # ================================================================
-
-_DEFAULT_VERSION_FILE = Path(__file__).resolve().parent.parent.parent / "VERSION"
-VERSION_FILE = Path(os.getenv("ZENSERS_VERSION_FILE", str(_DEFAULT_VERSION_FILE)))
 
 GITHUB_OWNER = os.getenv("GITHUB_OWNER", "sunchaokun")
 GITHUB_REPO = os.getenv("GITHUB_REPO", "zensers")
@@ -74,13 +69,6 @@ def get_local_version() -> str:
     env_ver = os.getenv("ZENSERS_VERSION")
     if env_ver:
         return env_ver
-
-    try:
-        version = VERSION_FILE.read_text(encoding="utf-8").strip()
-        if re.match(r"^\d+\.\d+\.\d+", version):
-            return version
-    except (FileNotFoundError, OSError):
-        pass
 
     try:
         from src import __version__
