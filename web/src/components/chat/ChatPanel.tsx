@@ -210,7 +210,48 @@ export function ChatPanel() {
             return;
           }
         }
-        const updatableActions = ['analyzing', 'searching', 'writing'] as const;
+        const MERGEABLE_IDS = ['web_search', 'news_search', 'scrape_url'];
+        if (MERGEABLE_IDS.includes(data.agent_id) && data.action !== 'error') {
+          const msgs = useChatStore.getState().messages;
+          const existing = [...msgs].reverse().find(
+            m => m.role === 'agent' && m.agent?.id === data.agent_id && m.agent?.action !== 'heartbeat' && m.agent?.action !== 'error'
+          );
+          if (existing) {
+            const prevCompleted = existing.agent?.completedCount || 0;
+            const prevTotal = existing.agent?.totalCount || 0;
+            const isCompleted = data.action === 'completed';
+            const newCompleted = isCompleted ? prevCompleted + 1 : prevCompleted;
+            const newTotal = isCompleted ? Math.max(prevTotal, newCompleted) : prevTotal;
+            const displayAction = (isCompleted && newCompleted < newTotal) ? existing.agent!.action : data.action;
+            updateMessage(existing.id, {
+              content: data.content,
+              timestamp: data.timestamp,
+              agent: {
+                ...existing.agent!,
+                action: displayAction,
+                completedCount: newCompleted,
+                totalCount: newTotal,
+              },
+            });
+            return;
+          }
+          const isCompleted = data.action === 'completed';
+          addMessage({
+            id: nanoid(),
+            role: 'agent',
+            content: data.content,
+            timestamp: data.timestamp,
+            agent: {
+              id: data.agent_id,
+              name: data.agent_name,
+              action: data.action,
+              completedCount: isCompleted ? 1 : 0,
+              totalCount: isCompleted ? 1 : 0,
+            },
+          });
+          return;
+        }
+        const updatableActions = ['searching', 'writing'] as const;
         if (updatableActions.includes(data.action as any)) {
           const msgs = useChatStore.getState().messages;
           const lastSame = [...msgs].reverse().find(
@@ -267,6 +308,15 @@ export function ChatPanel() {
               : 'system') as ChatMessageType['role'],
             content: m.content,
             timestamp: m.timestamp || new Date().toISOString(),
+            ...(m.agent_id || m.agent_name || m.action ? {
+              agent: {
+                id: m.agent_id || '',
+                name: m.agent_name || '',
+                action: m.action || '',
+                completedCount: m.completedCount,
+                totalCount: m.totalCount,
+              },
+            } : {}),
           }));
         if (olderMsgs.length > 0) {
           useChatStore.getState().prependMessages(olderMsgs);

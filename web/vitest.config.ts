@@ -11,4 +11,7 @@ export default defineConfig({
       '@': path.resolve(__dirname, 'src'),
     },
   },
+  oxc: {
+    jsx: 'automatic' as any,
+  },
 });

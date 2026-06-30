@@ -479,6 +479,8 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
             return await self._handle_chat_mode(session_id, user_input)
 
         logger.info(f"User message during research: {user_input}")
+        self._cancel_existing_task(session_id)
+        self._background_task_gen[session_id] = self._background_task_gen.get(session_id, 0) + 1
         try:
             conv_result = await asyncio.wait_for(self._llm_converse(session_id, user_input), timeout=60)
         except asyncio.TimeoutError:
@@ -626,6 +628,8 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
         conv_machine = self._get_or_create_conv_machine(session)
         cancel_flag = self._loop_cancel_flags.get(session_id, 0) + 1
         self._loop_cancel_flags[session_id] = cancel_flag
+        self._cancel_existing_task(session_id)
+        self._background_task_gen[session_id] = self._background_task_gen.get(session_id, 0) + 1
 
         try:
             conv_result = await self._llm_converse(session_id, user_input, conv_machine.current_state)
@@ -1080,6 +1084,10 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
             result_summary = json.dumps({k: v for k, v in tool_result.items() if k not in ('success', 'message', 'error')}, ensure_ascii=False)
             accumulated_context += f"\n### Tool: {tool_name} (iteration {iteration + 1})\nArguments: {json.dumps(tool_args, ensure_ascii=False)}\nResult:\n```json\n{result_summary}\n```\n"
             tool_history.append({'iteration': iteration + 1, 'name': tool_name, 'args': tool_args})
+            if iteration == 0 and accumulated_context:
+                logger.info(f"[ASYNC] First tool_call completed, returning processing, continuing in background")
+                self._start_background_tool_chain(session_id, user_input, system_prompt, llm_config, accumulated_context, tool_history, parsed, last_thinking_content, cancel_flag)
+                return {'status': 'processing', 'message': parsed.get('message', 'Querying information, please wait...'), 'action': parsed.get('action', 'continue_chat'), 'topic': parsed.get('topic'), 'directions': parsed.get('directions', []), 'suggestions': parsed.get('suggestions', []), 'thinking_content': last_thinking_content}
         if not parsed or not parsed.get('action'):
             logger.error(f"LLM conversation failed: parsed content is empty after {MAX_ITERATIONS} iterations")
             return self._build_response({'message': '抱歉，系统暂时无法处理您的请求，请重新描述。', 'action': 'continue_chat', 'topic': None, 'directions': [], 'suggestions': []}, None, accumulated_context or None)
@@ -1190,94 +1198,135 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
         old_task.cancel()
         logger.info(f"Cancelled existing background task for {session_id}")
 
-    async def _do_execute_tool_background(self, session_id, generation, tool_name, tool_args, system_prompt, llm_config):
-        """Execute tool call chain in background: tool -> LLM synthesis -> SSE push"""
+    def _start_background_tool_chain(self, session_id, user_input, system_prompt, llm_config, accumulated_context, tool_history, parsed, last_thinking_content, cancel_flag):
+        """Launch the remaining tool chain as a background task after first tool_call returns processing."""
+        generation = self._background_task_gen.get(session_id, 0)
+        self._cancel_existing_task(session_id)
+        task = asyncio.create_task(
+            self._continue_tool_chain(session_id, user_input, system_prompt, llm_config, accumulated_context, tool_history, parsed, last_thinking_content, cancel_flag, generation),
+            name=f"tool_chain_{session_id}"
+        )
+        self._background_tasks[session_id] = task
+        task.add_done_callback(lambda _: self._background_tasks.pop(session_id, None))
+
+    async def _continue_tool_chain(self, session_id, user_input, system_prompt, llm_config, accumulated_context, tool_history, parsed, last_thinking_content, cancel_flag, generation):
+        """Continue the tool execution loop in background after first tool_call returns processing."""
         try:
             from src.core.progress_streamer import ProgressStreamer
+        except ImportError:
+            ProgressStreamer = None
+        try:
             from src.core.session_streamer import SessionStreamer
         except ImportError:
-            SessionStreamer, ProgressStreamer = None, None
-        if self._check_cancelled(session_id) or self._background_task_gen.get(session_id) != generation:
-            self._background_tasks.pop(session_id, None)
-            self._background_task_gen.pop(session_id, None)
-            return
-        tool_display_names = {'web_search': 'Web Search Agent', 'news_search': 'News Search Agent', 'scrape_url': 'Content Scraper Agent', 'get_current_datetime': 'Date/Time Agent'}
-        agent_name = tool_display_names.get(tool_name, f"Agent ({tool_name})")
-        query_display = tool_args.get('query', tool_args.get('url', ''))
-        if SessionStreamer:
-            SessionStreamer.push_agent_message(session_id, {'agent_id': tool_name, 'agent_name': agent_name, 'action': 'searching', 'content': f"Searching for: {query_display[:100]}"})
-        tool_result = await self._tool_set.execute_tool(tool_name, tool_args)
-        if self._check_cancelled(session_id) or self._background_task_gen.get(session_id) != generation:
-            self._background_tasks.pop(session_id, None)
-            self._background_task_gen.pop(session_id, None)
-            return
-        _session = session_manager.get(session_id)
-        _sess_lang = _session.get('language', '') if _session else ''
+            SessionStreamer = None
         try:
-            _lang_code = Language(_sess_lang) if _sess_lang else Language.ZH
-        except ValueError:
-            _lang_code = Language.ZH
-        _lang_instruction = get_language_instruction(_lang_code)
-        if tool_result.get('success'):
-            result_data = {k: v for k, v in tool_result.items() if k not in ('success', 'message', 'error')}
-            result_summary = json.dumps(result_data, ensure_ascii=False)
-            synthesis_prompt = f"{_lang_instruction}\n\nYou called the tool **{tool_name}** with query: `{query_display[:200]}`\n\nHere is the returned data:\n\n```json\n{result_summary}\n```\n\nPlease generate the final response based on the above data. Do not output tool_call anymore (set to null).\n IMPORTANT: Set action to \"continue_chat\". Output the final JSON response."
-        else:
-            error_msg = tool_result.get('error', 'Unknown error')
-            synthesis_prompt = f"{_lang_instruction}\n\nYou called the tool **{tool_name}** but execution failed: {error_msg}\n\nPlease respond to the user directly based on existing knowledge. Do not output tool_call anymore (set to null).\n IMPORTANT: Set action to \"continue_chat\". Output the final JSON response."
-        try:
-            from src.skills.llm_skill import LLMSkill
-            llm_skill = LLMSkill()
-        except ImportError:
-            import sys, pathlib
-            project_root = pathlib.Path(__file__).parent.parent.parent
-            if str(project_root) not in sys.path:
-                sys.path.insert(0, str(project_root))
-            from src.skills.llm_skill import LLMSkill
-            llm_skill = LLMSkill()
-        try:
-            from src.config.settings import settings as app_settings
-            model = llm_config.get('model', app_settings.llm.model)
-            result = await asyncio.wait_for(
-                llm_skill.execute(prompt=synthesis_prompt, system_prompt=system_prompt, model=model, max_tokens=llm_config.get('max_tokens', app_settings.llm.max_tokens)),
-                timeout=60)
+            await self._continue_tool_chain_body(session_id, user_input, system_prompt, llm_config, accumulated_context, tool_history, parsed, last_thinking_content, cancel_flag, generation, ProgressStreamer, SessionStreamer)
         except asyncio.CancelledError:
-            logger.info(f"Background task cancelled for {session_id}")
-            if ProgressStreamer:
-                ProgressStreamer.push_chat_response(session_id, {'message': 'Previous information query has been cancelled.', 'action': 'continue_chat', 'topic': None, 'directions': [], 'suggestions': []})
-            return None
+            logger.info(f"[BG] Tool chain cancelled: {session_id}")
         except Exception as e:
-            logger.error(f"Background tool execution failed: {e}", exc_info=True)
+            logger.error(f"[BG] Tool chain failed: {session_id}: {e}", exc_info=True)
             if ProgressStreamer:
-                ProgressStreamer.fail_task(session_id, str(e))
-                ProgressStreamer.push_chat_response(session_id, {'message': 'Sorry, encountered an issue while querying information. Please try again later.', 'action': 'continue_chat', 'topic': None, 'directions': [], 'suggestions': []})
-            return None
-        if not result or not result.get('success'):
-            content = result.get('content', '') if result else ''
-        else:
-            content = result.get('content', '')
-        json_str, thinking_content = self._extract_json_from_llm_content(content)
-        if json_str:
+                ProgressStreamer.push_chat_response(session_id, {'message': '抱歉，信息查询遇到问题，请重试。', 'action': 'continue_chat', 'topic': None, 'directions': [], 'suggestions': []})
+
+    async def _continue_tool_chain_body(self, session_id, user_input, system_prompt, llm_config, accumulated_context, tool_history, parsed, last_thinking_content, cancel_flag, generation, ProgressStreamer, SessionStreamer):
+
+        MAX_ITERATIONS = self._get_max_tool_iterations()
+        history_text = ''
+        dialogue_context = ''
+        session = session_manager.get(session_id)
+        context_summary = ''
+        if session:
+            context = session.get('research_context', {})
+            context_summary = context.get('topic', '')
+            hist = session.get('conversation_history', [])
+            history_text = '\n'.join(f"{'User' if h.get('role') == 'user' else 'Assistant'}: {h.get('content', '')[:200]}" for h in hist[-6:])
+
+        try:
+            from src.core.orchestrator.execution.coordinator.cancel_manager import get_cancel_manager
+        except ImportError:
+            get_cancel_manager = None
+
+        for iteration in range(len(tool_history), MAX_ITERATIONS):
+            if self._background_task_gen.get(session_id) != generation:
+                return
+            if get_cancel_manager and get_cancel_manager().is_cancelled(session_id):
+                return
+            if get_cancel_manager and get_cancel_manager().is_paused(session_id):
+                pause_result = await get_cancel_manager().wait_for_resume_or_cancel(session_id)
+                if pause_result == "cancelled":
+                    return
+
+            user_prompt = self._build_followup_prompt(accumulated_context, tool_history, user_input, history_text, dialogue_context)
+            try:
+                from src.config.settings import settings as app_settings
+                _model = llm_config.get('model', app_settings.llm.model)
+                _max_tokens = llm_config.get('max_tokens', app_settings.llm.max_tokens)
+                _temperature = llm_config.get('temperature', app_settings.llm.temperature)
+                _api_key = llm_config.get('api_key', app_settings.llm.api_key)
+                _base_url = llm_config.get('api_endpoint', app_settings.llm.base_url)
+                result = await asyncio.wait_for(
+                    call_llm(prompt=user_prompt, system_prompt=system_prompt,
+                             model=_model, max_tokens=_max_tokens, temperature=_temperature,
+                             api_key=_api_key, base_url=_base_url),
+                    timeout=60)
+                if not result.get('success'):
+                    break
+                full_content = result.get('content', '')
+            except asyncio.TimeoutError:
+                logger.warning(f"Background tool chain LLM timed out at iteration {iteration}")
+                break
+            except Exception as e:
+                logger.error(f"Background tool chain LLM failed at iteration {iteration}: {e}")
+                break
+
+            content = full_content
+            if not content or not content.strip():
+                break
+            json_str, _thinking = self._extract_json_from_llm_content(content)
+            if _thinking:
+                last_thinking_content = _thinking
+            if not json_str:
+                break
             try:
                 parsed = json.loads(json_str)
             except json.JSONDecodeError:
-                parsed = {'message': content[:500]}
-        else:
-            parsed = {'message': content[:500] if content else 'Sorry, could not generate a valid response.'}
-        response_data = {'message': parsed.get('message', ''), 'action': parsed.get('action', 'continue_chat'), 'topic': parsed.get('topic'), 'directions': parsed.get('directions', []), 'framework_sections': parsed.get('framework_sections'), 'clarification_questions': parsed.get('clarification_questions', []), 'identified_aspects': parsed.get('identified_aspects', []), 'is_composite': parsed.get('is_composite', False), 'suggestions': parsed.get('suggestions', []), 'inject_ops': parsed.get('inject_ops', [])}
-        if thinking_content:
-            response_data['thinking_content'] = thinking_content
-        session = session_manager.get(session_id)
+                break
+
+            tool_call = parsed.get('tool_call')
+            if not tool_call or not isinstance(tool_call, dict):
+                break
+            tool_name = tool_call.get('name', '')
+            tool_args = tool_call.get('arguments', {})
+            logger.info(f"[BG] Tool execution (iteration {iteration + 1}): {tool_name}({tool_args})")
+            tool_display_names = {'web_search': 'Web Search Agent', 'news_search': 'News Search Agent', 'scrape_url': 'Content Scraper Agent', 'get_current_datetime': 'Date/Time Agent'}
+            agent_name = tool_display_names.get(tool_name, f"Agent ({tool_name})")
+            query_display = tool_args.get('query', tool_args.get('url', ''))
+            if SessionStreamer:
+                SessionStreamer.push_agent_message(session_id, {'agent_id': tool_name, 'agent_name': agent_name, 'action': 'searching', 'content': f"Searching for: {query_display[:100]}"})
+            tool_result = await self._tool_set.execute_tool(tool_name, tool_args)
+            if SessionStreamer:
+                SessionStreamer.push_agent_message(session_id, {'agent_id': tool_name, 'agent_name': agent_name, 'action': 'completed', 'content': f"Completed: {tool_name}"})
+            result_summary = json.dumps({k: v for k, v in tool_result.items() if k not in ('success', 'message', 'error')}, ensure_ascii=False)
+            accumulated_context += f"\n### Tool: {tool_name} (iteration {iteration + 1})\nArguments: {json.dumps(tool_args, ensure_ascii=False)}\nResult:\n```json\n{result_summary}\n```\n"
+            tool_history.append({'iteration': iteration + 1, 'name': tool_name, 'args': tool_args})
+
+        if not parsed or not parsed.get('action'):
+            parsed = {'message': '抱歉，系统暂时无法处理您的请求，请重新描述。', 'action': 'continue_chat', 'topic': None, 'directions': [], 'suggestions': []}
+
+        response_data = {
+            'message': parsed.get('message', ''),
+            'action': parsed.get('action', 'continue_chat'),
+            'topic': parsed.get('topic'),
+            'directions': parsed.get('directions', []),
+            'suggestions': parsed.get('suggestions', []),
+        }
+        if last_thinking_content:
+            response_data['thinking_content'] = last_thinking_content
+
         if session:
             ctx = session.get('research_context', {})
-            current_mode = session.get('mode', 'chat')
             if response_data.get('topic'):
-                new_topic = response_data['topic']
-                if ctx.get('topic') != new_topic:
-                    ctx['topic'] = new_topic
-                    if current_mode in ('chat', None, ''):
-                        ctx['directions'] = []
-                        ctx['framework'] = None
+                ctx['topic'] = response_data['topic']
             if response_data.get('directions'):
                 existing = ctx.get('directions', [])
                 for d in response_data['directions']:
@@ -1287,16 +1336,17 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
             session['research_context'] = ctx
             self._update_intent_state_after_async(session)
             history = session.get('conversation_history', [])
-            history.append({'role': 'assistant', 'content': response_data['message'], 'timestamp': datetime.now().isoformat(), 'tool_used': tool_name})
+            history.append({'role': 'assistant', 'content': response_data['message'], 'timestamp': datetime.now().isoformat()})
             session['conversation_history'] = history
+
+        if tool_history:
+            tool_names = [t['name'] for t in tool_history]
+            tool_desc = '、'.join(tool_names)
+            logger.info(f"[BG] Tool chain completed: {len(tool_history)} calls ({tool_desc})")
+
         if ProgressStreamer:
             ProgressStreamer.push_chat_response(session_id, response_data)
-        logger.info(f"Background tool execution completed: {session_id}")
-        if self._background_task_gen.get(session_id) != generation:
-            self._background_tasks.pop(session_id, None)
-            self._background_task_gen.pop(session_id, None)
-            return
-        return 'completed'
+        logger.info(f"[BG] Background tool chain completed: {session_id}")
 
     def _fallback_response(self, session_id, context):
         """Safe fallback when LLM fails — acknowledges issue without alarming user"""

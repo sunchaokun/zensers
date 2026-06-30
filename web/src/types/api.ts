@@ -221,7 +221,7 @@ export interface AgentMessageData {
   session_id: string;
   agent_id: string;
   agent_name: string;
-  action: 'searching' | 'analyzing' | 'writing' | 'completed' | 'heartbeat' | 'error';
+  action: 'searching' | 'analyzing' | 'writing' | 'completed' | 'heartbeat' | 'error' | 'warning';
   content: string;
   progress?: number;
   timestamp: string;
@@ -420,5 +420,7 @@ export interface ChatMessage {
     id: string;
     name: string;
     action: string;
+    completedCount?: number;
+    totalCount?: number;
   };
 }

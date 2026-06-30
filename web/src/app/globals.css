@@ -111,6 +111,55 @@
   border-bottom-left-radius: 4px;
 }
 
+/* ============ Markdown Prose Overrides ============ */
+.prose-chat {
+  --tw-prose-body: hsl(var(--foreground));
+  --tw-prose-headings: hsl(var(--foreground));
+  --tw-prose-lead: hsl(var(--foreground));
+  --tw-prose-links: hsl(var(--primary));
+  --tw-prose-bold: hsl(var(--foreground));
+  --tw-prose-counters: hsl(var(--muted-foreground));
+  --tw-prose-bullets: hsl(var(--muted-foreground));
+  --tw-prose-hr: hsl(var(--border));
+  --tw-prose-quotes: hsl(var(--muted-foreground));
+  --tw-prose-quote-borders: hsl(var(--primary));
+  --tw-prose-captions: hsl(var(--muted-foreground));
+  --tw-prose-code: hsl(var(--foreground));
+  --tw-prose-pre-code: hsl(var(--foreground));
+  --tw-prose-pre-bg: hsl(var(--muted));
+  --tw-prose-th-borders: hsl(var(--border));
+  --tw-prose-td-borders: hsl(var(--border));
+}
+
+.prose-chat :where(code):not(:where(pre *)) {
+  background: hsl(var(--muted));
+  padding: 0.125rem 0.25rem;
+  border-radius: 0.25rem;
+  font-size: 0.75rem;
+}
+
+.prose-chat :where(pre) {
+  background: hsl(var(--muted));
+  border: 1px solid hsl(var(--border) / 0.5);
+  border-radius: 0.375rem;
+  padding: 0.75rem 1rem;
+  overflow-x: auto;
+}
+
+.prose-chat :where(blockquote) {
+  border-left-color: hsl(var(--primary));
+  color: hsl(var(--muted-foreground));
+}
+
+.prose-chat :where(a) {
+  color: hsl(var(--primary));
+  text-decoration: none;
+}
+
+.prose-chat :where(a):hover {
+  text-decoration: underline;
+}
+
 /* ============ Progress Bar ============ */
 .progress-bar {
   height: 6px;

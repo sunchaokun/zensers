@@ -86,6 +86,15 @@ export async function restoreSession(id: string): Promise<void> {
         : 'system') as ChatMessage['role'],
       content: m.content,
       timestamp: m.timestamp || new Date().toISOString(),
+      ...(m.agent_id || m.agent_name || m.action ? {
+        agent: {
+          id: m.agent_id || '',
+          name: m.agent_name || '',
+          action: m.action || '',
+          completedCount: m.completedCount,
+          totalCount: m.totalCount,
+        },
+      } : {}),
     }));
 
     const status = detail.status;

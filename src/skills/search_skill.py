@@ -126,52 +126,64 @@ class MultiSearchSkill(Skill):
         if min_quality_score != 40.0:
             self.quality_filter.min_quality_score = min_quality_score
 
+        is_cn = region and region.lower().startswith(("cn", "zh"))
+
+        search_tasks: Dict[str, asyncio.Task] = {}
+
+        if use_ddgs and DDGS_AVAILABLE:
+            search_tasks["duckduckgo"] = asyncio.create_task(
+                self._search_with_ddgs(query, max_results, time_range=time_range),
+                name="search_ddgs"
+            )
+
+        if is_cn:
+            search_tasks["baidu"] = asyncio.create_task(
+                self._search_with_baidu_api(query, max_results),
+                name="search_baidu"
+            )
+
+        if engines:
+            engines_to_use = [e for e in engines if e in SEARCH_ENGINES and e != "baidu"]
+        else:
+            engines_to_use = self._select_engines(region)
+
+        for engine_id in engines_to_use[:2]:
+            search_tasks[engine_id] = asyncio.create_task(
+                self._search_with_web_fetch(engine_id, query, max_results),
+                name=f"search_{engine_id}"
+            )
+
+        if not search_tasks:
+            return self._failure("No search engines available", "Search failed")
+
+        task_names = list(search_tasks.keys())
+        logger.info(f"Parallel search: {task_names}")
+
+        done, pending = await asyncio.wait(
+            search_tasks.values(),
+            timeout=self.timeout + 5,
+            return_when=asyncio.ALL_COMPLETED,
+        )
+
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
         all_results = []
         engines_used = []
-
-        # 1. DDGS (most reliable)
-        if use_ddgs and DDGS_AVAILABLE:
+        for eng_name, task in search_tasks.items():
+            if task not in done:
+                continue
             try:
-                ddgs_results = await self._search_with_ddgs(query, max_results, time_range=time_range)
-                if ddgs_results:
-                    all_results.extend(ddgs_results)
-                    engines_used.append("duckduckgo")
-                    logger.info(f"DDGS: {len(ddgs_results)} results")
+                results = task.result()
+                if results:
+                    all_results.extend(results)
+                    engines_used.append(eng_name)
+                    logger.info(f"{eng_name}: {len(results)} results")
             except Exception as e:
-                logger.warning(f"DDGS failed: {e}")
+                logger.warning(f"{eng_name} failed: {e}")
 
-        # 2. Baidu API (for CN queries)
-        is_cn = region and region.lower().startswith(("cn", "zh"))
-        if len(all_results) < max_results and is_cn:
-            try:
-                baidu_results = await self._search_with_baidu_api(query, max_results)
-                if baidu_results:
-                    all_results.extend(baidu_results)
-                    engines_used.append("baidu")
-                    logger.info(f"Baidu API: {len(baidu_results)} results")
-            except Exception as e:
-                logger.warning(f"Baidu API failed: {e}")
-
-        # 3. Web fetch engines (Google, Bing) as supplement
-        if len(all_results) < max_results:
-            if engines:
-                engines_to_use = [e for e in engines if e in SEARCH_ENGINES and e != "baidu"]
-            else:
-                engines_to_use = self._select_engines(region)
-
-            for engine_id in engines_to_use[:2]:
-                if len(all_results) >= max_results:
-                    break
-                try:
-                    results = await self._search_with_web_fetch(engine_id, query, max_results - len(all_results))
-                    if results:
-                        all_results.extend(results)
-                        if engine_id not in engines_used:
-                            engines_used.append(engine_id)
-                except Exception as e:
-                    logger.warning(f"Engine {engine_id} failed: {e}")
-
-        # Deduplicate
         seen_urls = set()
         unique_results = []
         for r in all_results:
@@ -184,7 +196,6 @@ class MultiSearchSkill(Skill):
         if not raw_results:
             return self._failure("All search engines unavailable", "Search failed")
 
-        # Quality filtering
         if enable_quality_filter and raw_results:
             filtered_results, quality_scores = self.quality_filter.filter_results(raw_results, query, context)
 
@@ -270,8 +281,12 @@ class MultiSearchSkill(Skill):
     async def _search_with_baidu_api(self, query: str, max_results: int) -> List[Dict[str, Any]]:
         """Search Baidu via baidu-serp-api (structured data, no HTML parsing)."""
         from baidu_serp_api import BaiduPc
-        searcher = BaiduPc()
-        raw = searcher.search(query, pn=1)
+
+        def sync_search():
+            searcher = BaiduPc()
+            return searcher.search(query, pn=1)
+
+        raw = await asyncio.to_thread(sync_search)
         items = raw.get("data", {}).get("results", [])
         results = []
         for item in items[:max_results]:

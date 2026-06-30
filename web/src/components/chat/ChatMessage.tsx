@@ -5,6 +5,8 @@
 import { cn } from '@/lib/utils';
 import type { ChatMessage as ChatMessageType } from '@/types/api';
 import { User, Bot, Search, Brain, FileText, CheckCircle2, Loader2, XCircle } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 interface ChatMessageProps {
   message: ChatMessageType;
@@ -17,6 +19,7 @@ const AGENT_ACTION_CONFIG: Record<string, { icon: typeof Search; color: string; 
   completed: { icon: CheckCircle2, color: 'text-green-600', bg: 'bg-green-50 border-green-200' },
   heartbeat: { icon: Loader2, color: 'text-blue-400', bg: 'bg-blue-50/50 border-transparent' },
   error:     { icon: XCircle, color: 'text-red-600', bg: 'bg-red-50 border-red-200' },
+  warning:   { icon: XCircle, color: 'text-amber-600', bg: 'bg-amber-50 border-amber-200' },
 };
 
 function AgentMessage({ message }: { message: ChatMessageType }) {
@@ -24,6 +27,9 @@ function AgentMessage({ message }: { message: ChatMessageType }) {
   const config = AGENT_ACTION_CONFIG[action] || AGENT_ACTION_CONFIG.searching;
   const Icon = config.icon;
   const isActive = action === 'searching' || action === 'analyzing';
+  const completedCount = message.agent?.completedCount || 0;
+  const totalCount = message.agent?.totalCount || 0;
+  const showCount = totalCount > 1;
 
   if (action === 'heartbeat') {
     return (
@@ -33,6 +39,16 @@ function AgentMessage({ message }: { message: ChatMessageType }) {
         </div>
       </div>
     );
+  }
+
+  let displayText = message.content;
+  if (showCount) {
+    const taskName = message.agent?.id || message.content.replace(/^Completed:\s*/, '').replace(/^completed\.?/i, '').trim() || 'tasks';
+    if (action === 'completed') {
+      displayText = `${completedCount}/${totalCount} ${taskName} completed`;
+    } else {
+      displayText = `${completedCount} ${taskName} completed, ${message.content}`;
+    }
   }
 
   return (
@@ -48,7 +64,7 @@ function AgentMessage({ message }: { message: ChatMessageType }) {
               {message.agent.name}:
             </span>
           )}
-          <span className="text-muted-foreground truncate">{message.content}</span>
+          <span className="text-muted-foreground truncate">{displayText}</span>
         </div>
       </div>
     </div>
@@ -113,9 +129,19 @@ export function ChatMessage({ message }: ChatMessageProps) {
           {message.metadata?.status === 'processing' && (
             <span className="h-4 w-4 mt-0.5 animate-spin rounded-full border-2 border-primary border-t-transparent flex-shrink-0" />
           )}
-          <p className="text-[14px] leading-relaxed whitespace-pre-wrap">
-            {message.content}
-          </p>
+          {isUser ? (
+            <p className="text-[14px] leading-relaxed whitespace-pre-wrap">
+              {message.content}
+            </p>
+          ) : (
+            <div className="prose prose-sm prose-chat max-w-none text-[14px] leading-relaxed
+              prose-p:my-1 prose-p:first:mt-0 prose-p:last:mb-0
+              prose-ul:my-1 prose-ol:my-1 prose-li:my-0.5
+              prose-headings:font-semibold
+            ">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+            </div>
+          )}
         </div>
         <p
           className={cn(
