@@ -970,6 +970,15 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
             if self._loop_cancel_flags.get(session_id, 0) != cancel_flag:
                 logger.info(f"Cancelling loop iteration {iteration} — new message detected")
                 break
+            if _cm5.is_cancelled(session_id):
+                logger.info(f"[CTRL] _llm_converse: cancelled at iteration {iteration}")
+                break
+            if _cm5.is_paused(session_id):
+                logger.info(f"[CTRL] _llm_converse: paused at iteration {iteration}, waiting...")
+                pause_result = await _cm5.wait_for_resume_or_cancel(session_id)
+                if pause_result == "cancelled":
+                    logger.info(f"[CTRL] _llm_converse: cancelled while paused at iteration {iteration}")
+                    break
             if iteration == 0:
                 rrc = self._build_research_running_context(session, session_id)
                 user_prompt = self._build_initial_prompt(current_date, current_time, current_year, history_text, context_summary, dialogue_context, paused_context, sections_context, post_research_hint, tools_section, domain_guard, user_input, rrc)

@@ -28,6 +28,7 @@ from src.core.storage import ResearchResultStore, ResearchStatus
 
 # Harness constraint layer for agent output validation
 from src.core.harness import check_agent_output
+from src.core.orchestrator.execution.task_utils import safe_create_task
 
 
 from .control import (
@@ -1946,6 +1947,93 @@ class ExecutionEngine:
         
         return quality_passed
     
+    async def _wait_for_completion_with_pause_check(
+        self,
+        task_ids: List[str],
+        session_id: str,
+        poll_interval: float = 2.0,
+        grace_timeout: float = 30.0,
+    ) -> Dict[str, Optional[Dict[str, Any]]]:
+        """
+        wait_for_completion 的暂停/取消感知版本。
+        每 poll_interval 秒检查一次暂停/取消标志。
+        检测到暂停/取消后，给正在运行的 agent grace_timeout 秒完成，
+        超时后返回部分结果（已完成的agent有结果，未完成的为None）。
+        """
+        if not task_ids:
+            return {}
+        
+        wait_task = safe_create_task(
+            self._coordinator.wait_for_completion(task_ids),
+            name="engine._wait_for_completion_with_pause_check"
+        )
+        
+        interrupted = False
+        interrupted_reason = ""
+        try:
+            while not wait_task.done():
+                if self._cancel_manager.is_cancelled(session_id):
+                    logger.info(f"[CTRL] _wait_for_completion: cancelled, returning partial results immediately")
+                    interrupted = True
+                    interrupted_reason = "cancelled"
+                    break
+                if self._cancel_manager.is_paused(session_id):
+                    logger.info(f"[CTRL] _wait_for_completion: paused, giving agents {grace_timeout}s to finish")
+                    interrupted = True
+                    interrupted_reason = "paused"
+                    break
+                await asyncio.sleep(poll_interval)
+            
+            if not interrupted and wait_task.done():
+                try:
+                    return wait_task.result()
+                except Exception:
+                    pass
+            
+            if interrupted:
+                if interrupted_reason == "paused":
+                    try:
+                        await asyncio.wait_for(asyncio.shield(wait_task), timeout=grace_timeout)
+                    except asyncio.TimeoutError:
+                        logger.info(f"[CTRL] _wait_for_completion: grace timeout exceeded, returning partial results")
+                        wait_task.cancel()
+                    except Exception:
+                        wait_task.cancel()
+                else:
+                    wait_task.cancel()
+                
+                if wait_task.done():
+                    try:
+                        return wait_task.result()
+                    except Exception:
+                        pass
+        except asyncio.CancelledError:
+            wait_task.cancel()
+        
+        partial_results: Dict[str, Optional[Dict[str, Any]]] = {}
+        for tid in task_ids:
+            active_task = self._coordinator._active_tasks.get(tid)
+            if active_task:
+                if active_task.result is not None:
+                    partial_results[tid] = active_task.result
+                elif active_task.error:
+                    partial_results[tid] = {
+                        "success": False,
+                        "error": active_task.error,
+                        "agent_id": active_task.agent.agent_id,
+                    }
+                else:
+                    partial_results[tid] = None
+            else:
+                partial_results[tid] = None
+        
+        logger.info(
+            f"[CTRL] _wait_for_completion: partial results — "
+            f"completed={sum(1 for v in partial_results.values() if v is not None)}, "
+            f"pending={sum(1 for v in partial_results.values() if v is None)}"
+        )
+        return partial_results
+    
     async def _execute_batch(
         self,
         agents: List["IAgent"],
@@ -2038,11 +2126,24 @@ class ExecutionEngine:
         # 确保协调器已初始化
         assert self._coordinator is not None
         
+        # 提取 session_id 用于暂停/取消检查
+        _session_id_for_pause = requirement.get("session_id") or requirement.get("task_id", "")
+        
         # 并行分发任务
         task_ids = []
         agent_task_map = {}
         
         for agent in agents:
+            # 暂停/取消检查：在分发每个agent前检查
+            if self._cancel_manager.is_cancelled(_session_id_for_pause):
+                logger.info(f"[CTRL] _execute_batch: cancelled before dispatching agent {agent.agent_id}")
+                break
+            if self._cancel_manager.is_paused(_session_id_for_pause):
+                logger.info(f"[CTRL] _execute_batch: paused before dispatching agent {agent.agent_id}, waiting...")
+                pause_result = await self._cancel_manager.wait_for_resume_or_cancel(_session_id_for_pause)
+                if pause_result == "cancelled":
+                    logger.info(f"[CTRL] _execute_batch: cancelled while paused, skipping remaining agents")
+                    break
             try:
                 # **关键修复**：根据Agent类型构建不同的任务
                 agent_category = self.classify_agent(agent)
@@ -2339,8 +2440,8 @@ class ExecutionEngine:
                 batch_results.append(error_result)
                 scheduler.mark_failed(agent.agent_id, str(e))
         
-        # 等待完成
-        results = await self._coordinator.wait_for_completion(task_ids)
+        # 等待完成（带暂停/取消检查）
+        results = await self._wait_for_completion_with_pause_check(task_ids, _session_id_for_pause)
         
         # Apply harness constraint checks on each agent result
         for task_id in task_ids:

@@ -213,7 +213,7 @@ export interface Phase {
 // ============ SSE Types ============
 
 export interface SSEMessage {
-  event: 'progress' | 'phase_start' | 'phase_complete' | 'error' | 'complete' | 'chat_response' | 'chat_token' | 'chat_thinking' | 'agent_message' | 'heartbeat' | 'connected' | 'message' | 'cancelled' | 'quality_result' | 'section_quality' | 'preview_refresh' | 'quality_confirmed';
+  event: 'progress' | 'phase_start' | 'phase_complete' | 'error' | 'complete' | 'chat_response' | 'chat_token' | 'chat_thinking' | 'agent_message' | 'heartbeat' | 'connected' | 'message' | 'cancelled' | 'paused' | 'resumed' | 'quality_result' | 'section_quality' | 'preview_refresh' | 'quality_confirmed';
   data: ProgressData | PhaseData | ErrorData | CompleteData | ChatResponseData | ChatTokenData | ChatThinkingData | AgentMessageData | QualityResultEventData | SectionQualityEventData | PreviewRefreshEventData | QualityConfirmedEventData;
 }
 

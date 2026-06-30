@@ -90,20 +90,26 @@ export function useProgress(taskId: string | null, options?: UseProgressOptions)
         case 'progress': {
           const d = message.data as ProgressData;
           setProgress(d.progress);
-          updatePhase(d.phase_id, { progress: d.progress });
+          if (useResearchStore.getState().status !== 'paused') {
+            updatePhase(d.phase_id, { progress: d.progress });
+          }
           break;
         }
         case 'phase_start': {
           const d = message.data as PhaseData;
-          updatePhase(d.phase_id, {
-            status: 'running',
-            name: d.phase_name || d.phase_id,
-            description: d.description || '',
-          });
+          if (useResearchStore.getState().status !== 'paused') {
+            updatePhase(d.phase_id, {
+              status: 'running',
+              name: d.phase_name || d.phase_id,
+              description: d.description || '',
+            });
+          }
           break;
         }
         case 'phase_complete':
-          updatePhase((message.data as PhaseData).phase_id, { status: 'completed', progress: 100 });
+          if (useResearchStore.getState().status !== 'paused') {
+            updatePhase((message.data as PhaseData).phase_id, { status: 'completed', progress: 100 });
+          }
           break;
         case 'complete': {
           const d = message.data as CompleteData;
@@ -113,14 +119,18 @@ export function useProgress(taskId: string | null, options?: UseProgressOptions)
           break;
         }
         case 'error':
-          // Guard against race: if status was already reset to 'idle' by handleSend,
-          // don't override with 'error' from a late SSE event
           if (useResearchStore.getState().status !== 'idle') {
             setStatus('error');
           }
           break;
         case 'cancelled':
           setStatus('idle');
+          break;
+        case 'paused':
+          setStatus('paused');
+          break;
+        case 'resumed':
+          setStatus('running');
           break;
         case 'agent_message':
           if (onAgentMessageRef.current) {
