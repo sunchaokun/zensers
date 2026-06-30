@@ -715,7 +715,7 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
             logger.info(f"LLM returned regenerate_report for {session_id}")
             return await self._regenerate_report(session_id)
 
-        return self._chat_response(session_id, conv_result.get('message', ''), conv_result.get('suggestions', []))
+        return self._chat_response(session_id, conv_result.get('message', ''), conv_result.get('suggestions', []), thinking_content=conv_result.get('thinking_content'))
 
     def _get_or_create_intent_state(self, session):
         """research_context"""
@@ -960,6 +960,7 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
         accumulated_context = ''
         tool_history = []
         parsed = {}
+        last_thinking_content = None
         MAX_ITERATIONS = self._get_max_tool_iterations()
         try:
             from src.core.session_streamer import SessionStreamer
@@ -981,31 +982,24 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
                 _model = llm_config.get('model', app_settings.llm.model)
                 _max_tokens = llm_config.get('max_tokens', app_settings.llm.max_tokens)
                 _temperature = temperature if temperature is not None else app_settings.llm.temperature
+                _api_key = llm_config.get('api_key', app_settings.llm.api_key)
+                _base_url = llm_config.get('api_endpoint', app_settings.llm.base_url)
 
                 if SessionStreamer and iteration == 0:
                     full_content = ""
-                    think_filter = _ThinkTagFilter()
                     try:
                         async for token in call_llm_stream(
                             prompt=user_prompt, system_prompt=system_prompt,
                             model=_model, max_tokens=_max_tokens, temperature=_temperature,
+                            api_key=_api_key, base_url=_base_url,
                         ):
                             full_content += token
-                            for typ, text in think_filter.feed(token):
-                                if typ == 'think':
-                                    SessionStreamer.push_chat_thinking(session_id, text)
-                                else:
-                                    SessionStreamer.push_chat_token(session_id, text)
-                        for typ, text in think_filter.flush():
-                            if typ == 'think':
-                                SessionStreamer.push_chat_thinking(session_id, text)
-                            else:
-                                SessionStreamer.push_chat_token(session_id, text)
                     except Exception as stream_err:
                         logger.warning(f"Stream failed (iteration {iteration}), degrading: {stream_err}")
                         result = await asyncio.wait_for(
                             call_llm(prompt=user_prompt, system_prompt=system_prompt,
-                                     model=_model, max_tokens=_max_tokens, temperature=_temperature),
+                                     model=_model, max_tokens=_max_tokens, temperature=_temperature,
+                                     api_key=_api_key, base_url=_base_url),
                             timeout=60)
                         if not result.get('success'):
                             raise ValueError(f"LLM call failed: {result.get('error', 'Unknown error')}")
@@ -1013,7 +1007,8 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
                 else:
                     result = await asyncio.wait_for(
                         call_llm(prompt=user_prompt, system_prompt=system_prompt,
-                                 model=_model, max_tokens=_max_tokens, temperature=_temperature),
+                                 model=_model, max_tokens=_max_tokens, temperature=_temperature,
+                                 api_key=_api_key, base_url=_base_url),
                         timeout=60)
                     if not result.get('success'):
                         raise ValueError(f"LLM call failed: {result.get('error', 'Unknown error')}")
@@ -1027,14 +1022,18 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
             content = full_content
             if not content or not content.strip():
                 raise ValueError('LLM returned empty content')
-            json_str = self._extract_json_from_llm_content(content)
+            json_str, _thinking = self._extract_json_from_llm_content(content)
+            if _thinking:
+                last_thinking_content = _thinking
             if not json_str:
                 logger.error(f"Could not extract JSON from LLM response (iteration {iteration}), content preview: {content[:200]}")
                 if iteration == 0:
                     retry_content = await self._retry_json_only(system_prompt, llm_config, session_id)
                     if retry_content:
                         content = retry_content
-                        json_str = self._extract_json_from_llm_content(content)
+                        json_str, _thinking = self._extract_json_from_llm_content(content)
+                        if _thinking:
+                            last_thinking_content = _thinking
                 if not json_str:
                     raise ValueError(f"LLM response contains no valid JSON: {content[:200]}")
             try:
@@ -1044,7 +1043,9 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
                 if iteration == 0:
                     retry_content = await self._retry_json_only(system_prompt, llm_config, session_id)
                     if retry_content:
-                        json_str = self._extract_json_from_llm_content(retry_content)
+                        json_str, _thinking = self._extract_json_from_llm_content(retry_content)
+                        if _thinking:
+                            last_thinking_content = _thinking
                         if json_str:
                             parsed = json.loads(json_str)
                 if not parsed:
@@ -1079,7 +1080,7 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
             final_message = f"I've performed {len(tool_history)} search operations ({tool_desc}) on your request."
         else:
             final_message = "I wasn't able to complete the search. Please try again or rephrase."
-        return self._build_response(parsed, None, accumulated_context or None)
+        return self._build_response(parsed, None, accumulated_context or None, thinking_content=last_thinking_content)
 
     def _get_max_tool_iterations(self):
         """Get max tool iterations from config, fallback to 10"""
@@ -1105,11 +1106,19 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
         return f"""## Tool Execution Results\n\nThe following tools have been executed:\n\n{tool_list}\n\n--- Tool Results ---\n{accumulated_context}\n{context_section}\n## Continue or Finish\n\nBased on the above results, determine if you have enough information to answer the user's original request.\n\nOriginal request: "{original_input}"\n\n- If you have enough information → set `tool_call: null` and provide the final answer\n- If you need MORE information → set `tool_call` to request another tool\n- You CAN call the same tool again with a different query if needed\n- If results are empty/failed → use your existing knowledge to answer\n\n{self._JSON_OUTPUT_SCHEMA}\n"""
 
     def _extract_json_from_llm_content(self, content):
-        """Extract JSON from LLM response content"""
+        """Extract JSON from LLM response content.
+
+        Returns (json_str, thinking_content) tuple.
+        thinking_content is the text inside <think>...</think> tags, or None.
+        """
         content = content.strip()
+        thinking_content = None
+        think_match = re.search(r'<think>([\s\S]*?)</think>', content)
+        if think_match:
+            thinking_content = think_match.group(1).strip()
         json_match = re.search(r'```json\s*([\s\S]*?)\s*```', content)
         if json_match:
-            return json_match.group(1).strip()
+            return json_match.group(1).strip(), thinking_content
         cleaned = re.sub(r'<think>[\s\S]*?</think>', '', content).strip()
         if cleaned.startswith('{') or cleaned.startswith('['):
             brace_count = 0
@@ -1119,11 +1128,11 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
                 elif ch in ('}', ']'):
                     brace_count -= 1
                 if brace_count == 0:
-                    return cleaned[:i + 1]
+                    return cleaned[:i + 1], thinking_content
         json_in_text = re.search(r'(\{[\s\S]*\}|\[[\s\S]*\])', cleaned)
         if json_in_text:
-            return json_in_text.group(1).strip()
-        return None
+            return json_in_text.group(1).strip(), thinking_content
+        return None, thinking_content
 
     async def _retry_json_only(self, system_prompt, llm_config, session_id):
         """Retry LLM call with stricter JSON-only instruction and lower temperature."""
@@ -1133,7 +1142,9 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
             result = await asyncio.wait_for(
                 call_llm(prompt=retry_prompt, system_prompt=system_prompt,
                          model=llm_config.get('model', app_settings.llm.model),
-                         max_tokens=llm_config.get('max_tokens', app_settings.llm.max_tokens), temperature=0.1),
+                         max_tokens=llm_config.get('max_tokens', app_settings.llm.max_tokens), temperature=0.1,
+                         api_key=llm_config.get('api_key', app_settings.llm.api_key),
+                         base_url=llm_config.get('api_endpoint', app_settings.llm.base_url)),
                 timeout=60)
             if not result.get('success'):
                 return None
@@ -1146,9 +1157,11 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
             logger.warning(f"JSON retry LLM call failed for session {session_id}: {e}")
             return None
 
-    def _build_response(self, parsed, tool_results, note):
+    def _build_response(self, parsed, tool_results, note, thinking_content=None):
         """Build standardized response dict from parsed LLM output"""
         response = {'status': 'done', 'message': parsed.get('message', ''), 'action': parsed.get('action', 'continue_chat'), 'topic': parsed.get('topic'), 'directions': parsed.get('directions', []), 'framework_sections': parsed.get('framework_sections'), 'framework_tree': parsed.get('framework_tree'), 'clarification_questions': parsed.get('clarification_questions', []), 'identified_aspects': parsed.get('identified_aspects', []), 'is_composite': parsed.get('is_composite', False), 'suggestions': parsed.get('suggestions', []), 'inject_ops': parsed.get('inject_ops', []), 'complexity': parsed.get('complexity', 'single'), 'research_types': parsed.get('research_types', []), 'hidden_requirements': parsed.get('hidden_requirements', [])}
+        if thinking_content:
+            response['thinking_content'] = thinking_content
         if note:
             response['_note'] = note
         return response
@@ -1234,7 +1247,7 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
             content = result.get('content', '') if result else ''
         else:
             content = result.get('content', '')
-        json_str = self._extract_json_from_llm_content(content)
+        json_str, thinking_content = self._extract_json_from_llm_content(content)
         if json_str:
             try:
                 parsed = json.loads(json_str)
@@ -1243,6 +1256,8 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
         else:
             parsed = {'message': content[:500] if content else 'Sorry, could not generate a valid response.'}
         response_data = {'message': parsed.get('message', ''), 'action': parsed.get('action', 'continue_chat'), 'topic': parsed.get('topic'), 'directions': parsed.get('directions', []), 'framework_sections': parsed.get('framework_sections'), 'clarification_questions': parsed.get('clarification_questions', []), 'identified_aspects': parsed.get('identified_aspects', []), 'is_composite': parsed.get('is_composite', False), 'suggestions': parsed.get('suggestions', []), 'inject_ops': parsed.get('inject_ops', [])}
+        if thinking_content:
+            response_data['thinking_content'] = thinking_content
         session = session_manager.get(session_id)
         if session:
             ctx = session.get('research_context', {})
@@ -1330,7 +1345,7 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
         if not result.get('success'):
             return {'action': 'modify', 'message': "I understand you'd like to adjust the framework. Please tell me what changes you'd like to make.", 'new_sections': None}
         content = result.get('content', '')
-        json_str = self._extract_json_from_llm_content(content)
+        json_str, _thinking = self._extract_json_from_llm_content(content)
         if not json_str:
             if content:
                 return {'action': 'modify', 'message': content[:500], 'new_sections': None}
@@ -1848,7 +1863,11 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
             session['conversation_history'] = history
         if suggestions is None:
             suggestions = []
-        return {'session_id': session_id, 'step': 0, 'mode': 'chat', 'message': message, 'instruction': '', 'suggestions': suggestions, 'next_step': 'continue_chat'}
+        thinking_content = kwargs.get('thinking_content')
+        response = {'session_id': session_id, 'step': 0, 'mode': 'chat', 'message': message, 'instruction': '', 'suggestions': suggestions, 'next_step': 'continue_chat'}
+        if thinking_content:
+            response['thinking_content'] = thinking_content
+        return response
 
     def _framework_response(self, session_id, message, suggestions=None):
         """Generate framework confirmation response and save assistant message to history"""
@@ -1863,12 +1882,17 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
             suggestions = []
         return {'session_id': session_id, 'step': 5, 'mode': 'framework', 'message': message, 'instruction': '', 'suggestions': suggestions, 'framework': framework_data, 'next_step': 'confirm_framework'}
 
-    async def handle_interact(self, session_id, step, response):
+    async def handle_interact(self, session_id, step, response, llm_config=None):
         """
         Handle interaction step response
         POST /api/research/interact
         """
         session = session_manager.get(session_id)
+        if llm_config and session:
+            existing = session.get('llm_config', {})
+            merged = {**existing, **{k: v for k, v in llm_config.items() if v is not None and v != ''}}
+            session['llm_config'] = merged
+            logger.info(f"Session {session_id} llm_config updated: model={merged.get('model', 'unchanged')}, provider={merged.get('provider', 'unchanged')}")
         clarification_id = response.get('clarification_id')
         if clarification_id:
             event = self._pending_clarifications.get(clarification_id)
@@ -1888,6 +1912,7 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
                     'user_input': user_message, 'state_machine': state_machine,
                     'clarifier': SmartClarifier(), 'created_at': datetime.now(),
                     'current_step': 0, 'mode': 'chat', 'language': detected_lang,
+                    'llm_config': llm_config or {},
                     'conversation_history': [],
                     'research_context': {'topic': None, 'directions': [], 'framework': None, 'details': {}}})
                 set_global_language(Language(detected_lang))

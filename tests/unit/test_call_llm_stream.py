@@ -290,3 +290,59 @@ class TestCallLlmStream:
                 async for token in call_llm_stream(prompt="test"):
                     tokens.append(token)
                 assert tokens == ["a", "b"]
+
+    @pytest.mark.asyncio
+    async def test_api_key_override(self):
+        ms = _mock_settings()
+        ms.llm.api_key = "default-key"
+        mock_gen = _make_stream_chunks(["ok"])
+        with patch("src.core.llm_client.settings", ms):
+            with patch("openai.AsyncOpenAI") as mock_client_cls:
+                mock_client = AsyncMock()
+                mock_client_cls.return_value = mock_client
+                mock_client.chat.completions.create.return_value = mock_gen()
+
+                from src.core.llm_client import call_llm_stream
+
+                async for _ in call_llm_stream(prompt="test", api_key="custom-key"):
+                    pass
+                init_kwargs = mock_client_cls.call_args[1]
+                assert init_kwargs["api_key"] == "custom-key"
+
+    @pytest.mark.asyncio
+    async def test_base_url_override(self):
+        ms = _mock_settings()
+        ms.llm.base_url = "https://default.example.com"
+        mock_gen = _make_stream_chunks(["ok"])
+        with patch("src.core.llm_client.settings", ms):
+            with patch("openai.AsyncOpenAI") as mock_client_cls:
+                mock_client = AsyncMock()
+                mock_client_cls.return_value = mock_client
+                mock_client.chat.completions.create.return_value = mock_gen()
+
+                from src.core.llm_client import call_llm_stream
+
+                async for _ in call_llm_stream(prompt="test", base_url="https://custom.example.com"):
+                    pass
+                init_kwargs = mock_client_cls.call_args[1]
+                assert init_kwargs["base_url"] == "https://custom.example.com"
+
+    @pytest.mark.asyncio
+    async def test_api_key_base_url_fallback_to_settings(self):
+        ms = _mock_settings()
+        ms.llm.api_key = "settings-key"
+        ms.llm.base_url = "https://settings.example.com"
+        mock_gen = _make_stream_chunks(["ok"])
+        with patch("src.core.llm_client.settings", ms):
+            with patch("openai.AsyncOpenAI") as mock_client_cls:
+                mock_client = AsyncMock()
+                mock_client_cls.return_value = mock_client
+                mock_client.chat.completions.create.return_value = mock_gen()
+
+                from src.core.llm_client import call_llm_stream
+
+                async for _ in call_llm_stream(prompt="test"):
+                    pass
+                init_kwargs = mock_client_cls.call_args[1]
+                assert init_kwargs["api_key"] == "settings-key"
+                assert init_kwargs["base_url"] == "https://settings.example.com"

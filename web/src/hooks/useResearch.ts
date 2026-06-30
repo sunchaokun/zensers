@@ -182,13 +182,14 @@ export function useResearch() {
         id: nanoid(),
         role: 'assistant',
         content: data.message,
+        ...(data.thinking_content ? { thinkingContent: data.thinking_content } : {}),
         timestamp: new Date().toISOString(),
       });
 
       return data;
     } catch (e) {
       setError(e as ApiError);
-      setIsWaitingForReply(false); // Clear waiting state on error (Issue 4)
+      setIsWaitingForReply(false);
       throw e;
     } finally {
       setIsNetworkBusy(false);
@@ -453,7 +454,17 @@ export function useResearch() {
       // Chat mode: send message
       try {
         setIsNetworkBusy(true);
-        const data = await api.sendChatMessage(sessionId, text);
+        const data = await api.sendChatMessage(sessionId, text, {
+          provider: llm.provider,
+          model: llm.model,
+          apiKey: llm.apiKey,
+          apiEndpoint: llm.apiEndpoint,
+          temperature: llm.temperature,
+          maxTokens: llm.maxTokens,
+          topP: llm.topP,
+          frequencyPenalty: llm.frequencyPenalty,
+          presencePenalty: llm.presencePenalty,
+        });
         
       // Async tool execution path: returns processing status, SSE pushes results later
         if ((data as any).status === 'processing') {
@@ -490,6 +501,7 @@ export function useResearch() {
           id: nanoid(),
           role: 'assistant',
           content: data.message,
+          ...(data.thinking_content ? { thinkingContent: data.thinking_content } : {}),
           timestamp: new Date().toISOString(),
         });
         
@@ -504,7 +516,7 @@ export function useResearch() {
     
     console.warn('sendMessage called at unexpected step:', currentStep);
     return null;
-  }, [sessionId, currentStep, startResearch, setSessionId, setStep, setTaskId, setStatus, addMessage]);
+  }, [sessionId, currentStep, startResearch, setSessionId, setStep, setTaskId, setStatus, addMessage, llm]);
 
   /**
    * Generic option handler - dispatches based on currentStep
@@ -533,7 +545,17 @@ export function useResearch() {
     if (currentStep === null || currentStep === 0) {
       try {
         setIsNetworkBusy(true);
-        const data = await api.clickSuggestion(sessionId!, optionId, exampleText);
+        const data = await api.clickSuggestion(sessionId!, optionId, exampleText, {
+          provider: llm.provider,
+          model: llm.model,
+          apiKey: llm.apiKey,
+          apiEndpoint: llm.apiEndpoint,
+          temperature: llm.temperature,
+          maxTokens: llm.maxTokens,
+          topP: llm.topP,
+          frequencyPenalty: llm.frequencyPenalty,
+          presencePenalty: llm.presencePenalty,
+        });
         
         // Update state based on returned mode
         const mode = data.mode || 'chat';
@@ -557,6 +579,7 @@ export function useResearch() {
             id: nanoid(),
             role: 'assistant',
             content: data.message,
+            ...(data.thinking_content ? { thinkingContent: data.thinking_content } : {}),
             timestamp: new Date().toISOString(),
           });
         }
@@ -582,7 +605,7 @@ export function useResearch() {
         return null;
     }
   }, [currentStep, sessionId, selectOutputType, selectTemplate, confirmResearch,
-      handleStartResearch, setSessionId, setStep, setTaskId, setStatus, addMessage]);
+      handleStartResearch, setSessionId, setStep, setTaskId, setStatus, addMessage, llm]);
 
   return {
     quickStartResearch,

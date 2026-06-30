@@ -72,6 +72,7 @@ export interface StartResearchResponse {
   clarification_questions?: string[];
   framework?: ResearchFramework;
   next_step: string;
+  thinking_content?: string;
 }
 
 /** POST /api/v1/research/interact response */
@@ -92,6 +93,7 @@ export interface InteractResponse {
   summary?: ResearchSummary;
   final_plan?: ResearchPlan;
   status?: 'running' | 'executing' | 'cancelled' | 'processing';
+  thinking_content?: string;
 }
 
 /** Suggestion option (chat mode) */
@@ -233,6 +235,7 @@ export interface ChatResponseData {
   directions?: string[];
   suggestions?: Array<{ id: string; label: string; example: string }>;
   timestamp: string;
+  thinking_content?: string;
 }
 
 export interface ChatTokenData {

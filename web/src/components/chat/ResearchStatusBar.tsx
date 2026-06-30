@@ -12,6 +12,7 @@ export function ResearchStatusBar() {
   if (status !== 'running') return null;
 
   const currentPhase = phases.find(p => p.status === 'running');
+  if (!currentPhase && progress === 0) return null;
   const completedCount = phases.filter(p => p.status === 'completed').length;
 
   return (
@@ -19,7 +20,7 @@ export function ResearchStatusBar() {
       <div className="flex items-center gap-3">
         <Loader2 className="h-4 w-4 animate-spin text-blue-500" />
         <span className="text-sm font-medium">
-          {currentPhase?.name || 'Processing...'}
+          {currentPhase?.name || (completedCount > 0 ? 'Generating analysis...' : 'Preparing...')}
         </span>
         <span className="text-xs text-muted-foreground ml-auto">
           {completedCount}/{phases.length} phases completed

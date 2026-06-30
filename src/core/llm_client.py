@@ -24,6 +24,8 @@ async def call_llm_stream(
     system_prompt: str = "",
     max_tokens: Optional[int] = None,
     temperature: Optional[float] = None,
+    api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
 ) -> AsyncGenerator[str, None]:
     """Streaming variant of call_llm. Yields content tokens as they arrive.
 
@@ -33,12 +35,14 @@ async def call_llm_stream(
     model = model or settings.llm.model
     max_tokens = max_tokens or settings.llm.max_tokens
     temperature = temperature or settings.llm.temperature
+    api_key = api_key or settings.llm.api_key
+    base_url = base_url or settings.llm.base_url
 
     if not prompt or not prompt.strip():
         return
 
     from openai import AsyncOpenAI
-    client = AsyncOpenAI(api_key=settings.llm.api_key, base_url=settings.llm.base_url)
+    client = AsyncOpenAI(api_key=api_key, base_url=base_url)
 
     messages = []
     if system_prompt:
@@ -70,6 +74,8 @@ async def call_llm(
     fallback_model: Optional[str] = None,
     max_tokens: Optional[int] = None,
     temperature: Optional[float] = None,
+    api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Call LLM (standalone utility, not a skill).
@@ -81,6 +87,8 @@ async def call_llm(
         fallback_model: Fallback model (default from settings.llm.cheap_model)
         max_tokens: Max generation tokens (default from settings.llm.max_tokens)
         temperature: Temperature (default from settings.llm.temperature)
+        api_key: API key (default from settings.llm.api_key)
+        base_url: API base URL (default from settings.llm.base_url)
 
     Returns:
         Dict with keys: success, content, model, usage
@@ -90,6 +98,8 @@ async def call_llm(
     fallback_model = fallback_model or settings.llm.cheap_model
     max_tokens = max_tokens or settings.llm.max_tokens
     temperature = temperature or settings.llm.temperature
+    api_key = api_key or settings.llm.api_key
+    base_url = base_url or settings.llm.base_url
 
     if not prompt or not prompt.strip():
         return {"success": False, "message": "prompt cannot be empty", "error": "empty_prompt"}
@@ -107,13 +117,15 @@ async def call_llm(
     # Try primary model
     try:
         response = await _call_llm_api(prompt=prompt, model=model, system_prompt=system_prompt,
-                                       max_tokens=max_tokens, temperature=temperature)
+                                       max_tokens=max_tokens, temperature=temperature,
+                                       api_key=api_key, base_url=base_url)
         return _parse_response(response, model)
     except Exception as primary_err:
         if fallback_model and fallback_model != model:
             try:
                 response = await _call_llm_api(prompt=prompt, model=fallback_model, system_prompt=system_prompt,
-                                               max_tokens=max_tokens, temperature=temperature)
+                                               max_tokens=max_tokens, temperature=temperature,
+                                               api_key=api_key, base_url=base_url)
                 result = _parse_response(response, fallback_model)
                 result["fallback_used"] = True
                 return result
@@ -132,11 +144,15 @@ async def _call_llm_api(
     system_prompt: str = "",
     max_tokens: int = 2048,
     temperature: float = 0.7,
+    api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Raw API call to OpenAI-compatible endpoint."""
     from openai import AsyncOpenAI
 
-    client = AsyncOpenAI(api_key=settings.llm.api_key, base_url=settings.llm.base_url)
+    _api_key = api_key or settings.llm.api_key
+    _base_url = base_url or settings.llm.base_url
+    client = AsyncOpenAI(api_key=_api_key, base_url=_base_url)
 
     messages = []
     if system_prompt:

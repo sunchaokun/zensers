@@ -1133,7 +1133,7 @@ class GenericAgent(
             aspect = context.get("aspect") or task.get("aspect", "")
             aspects = task.get("aspects", [])
 
-                # Normalise topic to string
+            # Normalise topic to string
             if hasattr(topic, 'topic'):
                 topic = topic.topic
             if not isinstance(topic, str):
@@ -1141,7 +1141,7 @@ class GenericAgent(
             if not isinstance(aspect, str):
                 aspect = str(aspect) if aspect else ""
 
-                # P0-3: Attempt search before pure LLM generation.
+            # P0-3: Attempt search before pure LLM generation.
             # Even though we reached the fallback path, the registry may
             # still have search_skill available — use it to get real data.
             search_results = None
@@ -1169,7 +1169,7 @@ class GenericAgent(
                         )
                         search_results = None
 
-                # Build prompt — enriched with search results if available
+            # Build prompt — enriched with search results if available
             if search_results and search_results.get("searches"):
                 prompt = self._build_research_prompt_with_data(
                     topic=topic,
@@ -1218,16 +1218,16 @@ class GenericAgent(
                     f"执行任务: {action}\n参数: {parameters}"
                 )
 
-                result = await call_llm(prompt=prompt)
+            result = await call_llm(prompt=prompt)
 
-                # 日期验证
+            # 日期验证
             if result.get("success") and result.get("content"):
                 validated = self._validate_output_dates(result["content"], self.agent_id)
                 if validated != result["content"]:
                     logger.warning(f"GenericAgent {self.agent_id}: fallback路径日期验证修正了年份")
                     result["content"] = validated
 
-                # P0-3: Attach search data to result so downstream
+            # P0-3: Attach search data to result so downstream
             # quality checks and synthesis agents can access sources.
             if search_results:
                 data_points = []

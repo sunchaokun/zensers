@@ -384,13 +384,41 @@ async def quick_start(user_input: str = Form(...), template_id: str = Form(...),
 
 
 @app.post("/api/v1/research/interact")
-async def interact(session_id: str = Form(...), step: int = Form(...), response: str = Form(...)):
+async def interact(session_id: str = Form(...), step: int = Form(...), response: str = Form(...),
+                   llm_provider: Optional[str] = Form(None), llm_model: Optional[str] = Form(None),
+                   llm_api_key: Optional[str] = Form(None), llm_api_endpoint: Optional[str] = Form(None),
+                   llm_temperature: Optional[float] = Form(None), llm_max_tokens: Optional[int] = Form(None),
+                   llm_top_p: Optional[float] = Form(None),
+                   llm_frequency_penalty: Optional[float] = Form(None),
+                   llm_presence_penalty: Optional[float] = Form(None)):
     import json
     try:
         response_dict = json.loads(response)
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="Invalid JSON in response")
-    return await research_api.handle_interact(session_id, step, response_dict)
+    llm_config: Dict[str, Any] = {}
+    if llm_provider:
+        llm_config["provider"] = llm_provider
+    if llm_model:
+        llm_config["model"] = llm_model
+    if llm_api_key:
+        llm_config["api_key"] = llm_api_key
+    if llm_api_endpoint:
+        llm_config["api_endpoint"] = llm_api_endpoint
+    if llm_temperature is not None:
+        llm_config["temperature"] = llm_temperature
+    if llm_max_tokens is not None:
+        llm_config["max_tokens"] = llm_max_tokens
+    if llm_top_p is not None:
+        llm_config["top_p"] = llm_top_p
+    if llm_frequency_penalty is not None:
+        llm_config["frequency_penalty"] = llm_frequency_penalty
+    if llm_presence_penalty is not None:
+        llm_config["presence_penalty"] = llm_presence_penalty
+    if llm_config:
+        from src.config.settings import settings
+        settings.update_from_request(llm_config)
+    return await research_api.handle_interact(session_id, step, response_dict, llm_config=llm_config)
 
 
 @app.post("/api/v1/research/quality/action")

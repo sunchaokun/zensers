@@ -3,7 +3,7 @@
 /**
  * LLM Provider
  */
-export type LLMProvider = 'openai' | 'anthropic' | 'deepseek' | 'azure' | 'local' | 'custom';
+export type LLMProvider = 'openai' | 'deepseek' | 'local' | 'custom';
 
 /**
  * LLM Model config
@@ -56,19 +56,9 @@ export const PRESET_MODELS: LLMModel[] = [
   { id: 'o1-preview', name: 'O1 Preview', provider: 'openai', maxTokens: 128000 },
   { id: 'o1-mini', name: 'O1 Mini', provider: 'openai', maxTokens: 128000 },
   
-  // Anthropic
-  { id: 'claude-3-5-sonnet-20241022', name: 'Claude 3.5 Sonnet', provider: 'anthropic', maxTokens: 200000, supportsVision: true },
-  { id: 'claude-3-opus-20240229', name: 'Claude 3 Opus', provider: 'anthropic', maxTokens: 200000, supportsVision: true },
-  { id: 'claude-3-sonnet-20240229', name: 'Claude 3 Sonnet', provider: 'anthropic', maxTokens: 200000, supportsVision: true },
-  { id: 'claude-3-haiku-20240307', name: 'Claude 3 Haiku', provider: 'anthropic', maxTokens: 200000, supportsVision: true },
-  
   // DeepSeek
   { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro', provider: 'deepseek', maxTokens: 128000 },
   { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', provider: 'deepseek', maxTokens: 128000 },
-  
-  // Azure OpenAI
-  { id: 'azure-gpt-4o', name: 'Azure GPT-4o', provider: 'azure', maxTokens: 128000 },
-  { id: 'azure-gpt-4', name: 'Azure GPT-4', provider: 'azure', maxTokens: 8192 },
   
   // Local models (Ollama)
   { id: 'llama3.1', name: 'LLaMA 3.1', provider: 'local', maxTokens: 128000 },
@@ -87,19 +77,9 @@ export const PROVIDER_DEFAULTS: Record<LLMProvider, Partial<LLMConfig>> = {
     model: 'gpt-4o',
     maxTokens: 4096,
   },
-  anthropic: {
-    apiEndpoint: 'https://api.anthropic.com/v1',
-    model: 'claude-3-5-sonnet-20241022',
-    maxTokens: 4096,
-  },
   deepseek: {
     apiEndpoint: 'https://api.deepseek.com/v1',
     model: 'deepseek-v4-pro',
-    maxTokens: 4096,
-  },
-  azure: {
-    apiEndpoint: '',
-    model: 'gpt-4o',
     maxTokens: 4096,
   },
   local: {
@@ -123,20 +103,10 @@ export const PROVIDER_INFO: Record<LLMProvider, { name: string; description: str
     description: 'GPT-4o, GPT-4, GPT-3.5 and other models',
     defaultEndpoint: 'https://api.openai.com/v1',
   },
-  anthropic: {
-    name: 'Anthropic',
-    description: 'Claude 3.5 Sonnet, Claude 3 Opus and other models',
-    defaultEndpoint: 'https://api.anthropic.com/v1',
-  },
   deepseek: {
     name: 'DeepSeek',
     description: 'DeepSeek V4 Pro, V4 Flash',
     defaultEndpoint: 'https://api.deepseek.com/v1',
-  },
-  azure: {
-    name: 'Azure OpenAI',
-    description: 'Azure deployed OpenAI models',
-    defaultEndpoint: '',
   },
   local: {
     name: 'Local Model',

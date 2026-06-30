@@ -864,10 +864,43 @@ class ReportOrchestrator:
                     break
 
         if raw_value is None:
+            enriched = ReportOrchestrator._try_enrich_from_skill_cache(
+                section_id, skill_registry,
+            )
+            if enriched is not None:
+                return enriched
             return {}, ""
 
         refined, raw_summary = ReportOrchestrator._split_chapter_data(raw_value, matched_key, layered_content)
         return refined, raw_summary
+
+    @staticmethod
+    def _try_enrich_from_skill_cache(
+        section_id: str, skill_registry,
+    ) -> Optional[Tuple[Dict[str, Any], str]]:
+        if not skill_registry:
+            return None
+        try:
+            stock_skill = skill_registry.get("stock_data") if hasattr(skill_registry, 'get') else None
+            if stock_skill is None:
+                return None
+            cache = getattr(stock_skill, '_memory_cache', None)
+            if not cache or not isinstance(cache, dict):
+                return None
+            all_data_points = []
+            for (_symbol, _action), cached_result in cache.items():
+                if not isinstance(cached_result, dict) or not cached_result.get("success"):
+                    continue
+                data = cached_result.get("data", [])
+                if isinstance(data, list):
+                    all_data_points.extend(data)
+            if not all_data_points:
+                return None
+            refined = {"upstream_data_points": all_data_points}
+            raw_summary = ReportOrchestrator._extract_raw_summary({"data_points": all_data_points})
+            return refined, raw_summary
+        except Exception:
+            return None
 
     @staticmethod
     def _split_chapter_data(
@@ -1056,6 +1089,31 @@ class ReportOrchestrator:
         return None
 
     @staticmethod
+    def _lookup_precise_value_in_chapter_data(
+        metric_core: str, chapter_data: Dict[str, Any],
+    ) -> Optional[str]:
+        if not chapter_data or not metric_core:
+            return None
+        upstream = chapter_data.get("upstream_data_points")
+        if isinstance(upstream, list):
+            for dp in upstream:
+                if not isinstance(dp, dict):
+                    continue
+                dp_metric = dp.get("metric", "")
+                if metric_core in dp_metric or dp_metric in metric_core:
+                    parts = [f"{dp.get('value', '')}{dp.get('unit', '')}"]
+                    src = dp.get("source", "")
+                    if src:
+                        parts.append(f"(来源: {src})")
+                    return " ".join(parts)
+        for k, v in chapter_data.items():
+            if k in ("content", "upstream_data_points", "raw_data_summary"):
+                continue
+            if metric_core in str(k) and isinstance(v, str):
+                return v
+        return None
+
+    @staticmethod
     def _build_anchor_patch_instructions(
         anchoring_issues: List, chapter_data: Dict[str, Any],
         raw_data_summary: str = "",
@@ -1070,6 +1128,16 @@ class ReportOrchestrator:
             omitted_data = ReportOrchestrator._extract_omitted_data(metric, raw_data_summary) if raw_data_summary else None
             if not omitted_data and keywords:
                 omitted_data = ReportOrchestrator._extract_omitted_data(keywords, raw_data_summary)
+            lookup_key = keywords if keywords else metric
+            precise_from_chapter = ReportOrchestrator._lookup_precise_value_in_chapter_data(
+                lookup_key, chapter_data,
+            )
+            if not precise_from_chapter and metric and metric != keywords:
+                precise_from_chapter = ReportOrchestrator._lookup_precise_value_in_chapter_data(
+                    metric, chapter_data,
+                )
+            if not omitted_data and precise_from_chapter:
+                omitted_data = precise_from_chapter
             if "编造" in desc or "无据" in desc or "未在" in desc:
                 instructions.append(
                     f"删除无据断言：{desc[:100]}。"

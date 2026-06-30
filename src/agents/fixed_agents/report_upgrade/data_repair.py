@@ -133,6 +133,8 @@ class ConflictResolver:
     async def resolve(
         self, conflict: DataConflict, topic: str,
     ) -> DataConflictResolution:
+        caliber_notes = self._detect_caliber_differences(conflict)
+
         scored = []
         for entry in conflict.entries:
             score = self._score_entry(entry)
@@ -146,16 +148,38 @@ class ConflictResolver:
                 for e in conflict.entries
                 if e.get("value") != best_entry.get("value")
             ]
+            reason = f"Source authority score {best_score}"
+            if caliber_notes:
+                reason += f"; {caliber_notes}"
             return DataConflictResolution(
                 conflict=conflict,
                 canonical_value=best_entry.get("value", ""),
                 canonical_unit=best_entry.get("unit", ""),
                 canonical_source=best_entry.get("source", ""),
-                reason=f"Source authority score {best_score}",
+                reason=reason,
                 chapters_to_update=chapters_to_update,
             )
 
-        return await self._resolve_by_search(conflict, topic)
+        resolution = await self._resolve_by_search(conflict, topic)
+        if caliber_notes:
+            resolution.reason += f"; {caliber_notes}"
+        return resolution
+
+    def _detect_caliber_differences(self, conflict: DataConflict) -> str:
+        caliber_keywords = ["调整", "调整后", "剔除", "扣非", "经调整", "非经常性", "一次性"]
+        caliber_entries = []
+        for entry in conflict.entries:
+            source = entry.get("source", "")
+            description = entry.get("description", "")
+            for kw in caliber_keywords:
+                if kw in source or kw in description:
+                    caliber_entries.append(
+                        f"{entry.get('value', '')}{entry.get('unit', '')}({kw}口径: {source})"
+                    )
+                    break
+        if not caliber_entries:
+            return ""
+        return f"口径差异: {'; '.join(caliber_entries)}"
 
     def _score_entry(self, entry: Dict) -> int:
         source = entry.get("source", "")

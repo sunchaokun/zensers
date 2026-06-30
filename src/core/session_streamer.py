@@ -180,15 +180,17 @@ class SessionStreamer:
     @classmethod
     def push_chat_response(cls, session_id: str, response_data: Dict[str, Any]):
         """Push a chat_response event to all session subscribers"""
-        cls._notify_subscribers(session_id, SessionSSEEventType.CHAT_RESPONSE, {
+        event_data = {
             "session_id": session_id,
             "message": response_data.get("message", ""),
             "action": response_data.get("action", "continue_chat"),
             "topic": response_data.get("topic"),
             "directions": response_data.get("directions", []),
             "suggestions": response_data.get("suggestions", []),
+            "thinking_content": response_data.get("thinking_content"),
             "timestamp": datetime.now().isoformat(),
-        })
+        }
+        cls._notify_subscribers(session_id, SessionSSEEventType.CHAT_RESPONSE, event_data)
         _ts = datetime.now().isoformat()
         cls._persist_event(session_id, SessionSSEEventType.CHAT_RESPONSE.value, {
             "session_id": session_id,
@@ -197,6 +199,7 @@ class SessionStreamer:
             "topic": response_data.get("topic"),
             "directions": response_data.get("directions", []),
             "suggestions": response_data.get("suggestions", []),
+            "thinking_content": response_data.get("thinking_content"),
             "timestamp": _ts,
         })
         logger.info(f"Session stream chat_response pushed: {session_id}")

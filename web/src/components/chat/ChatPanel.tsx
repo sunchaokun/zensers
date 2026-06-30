@@ -22,7 +22,7 @@ import { SearchIndicator } from './SearchIndicator';
 import { ResearchStatusBar } from './ResearchStatusBar';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
-import { ArrowDown, Zap } from 'lucide-react';
+import { ArrowDown } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { parseTemplateCommand, RESEARCH_TEMPLATES, formatTemplateMessage, formatTemplateList, formatTemplateNotFound, extractTemplateKeyword } from '@/lib/templates';
 
@@ -67,6 +67,8 @@ export function ChatPanel() {
 
   // Timer ref to prevent stale setTimeout race (Issue 3 fix: Oracle CRITICAL)
   const searchStateTimerRef = useRef<ReturnType<typeof setTimeout>>();
+  // Timeout guard for isWaitingForReply — auto-clear after 5 min if no chat_response arrives
+  const waitingTimeoutRef = useRef<ReturnType<typeof setTimeout>>();
 
   // Persistent session stream (stays alive, unaffected by task complete)
   // Receives chat_response + chat_token + agent_message events
@@ -77,22 +79,34 @@ export function ChatPanel() {
         || data.session_id === taskId
         || data.session_id === storeSessionId;
       if (!matches) return;
-      // Ignore late tokens after chat_response has finalized
       if (streamingDoneRef.current) return;
 
       if (!streamingMsgIdRef.current) {
         streamingMsgIdRef.current = nanoid();
+        const looksLikeJson = data.token.trimStart().startsWith('{') || data.token.trimStart().startsWith('```');
         addMessage({
           id: streamingMsgIdRef.current,
           role: 'assistant',
-          content: data.token,
+          content: looksLikeJson ? '' : data.token,
           timestamp: new Date().toISOString(),
+          metadata: {
+            status: looksLikeJson ? 'processing' : 'streaming',
+            ...(looksLikeJson ? { _rawContent: data.token } : {}),
+          },
         });
       } else {
         const currentMsg = useChatStore.getState().messages.find(m => m.id === streamingMsgIdRef.current);
         if (currentMsg) {
+          const newContent = currentMsg.metadata?._rawContent
+            ? currentMsg.metadata._rawContent + data.token
+            : currentMsg.content + data.token;
+          const looksLikeJson = newContent.trimStart().startsWith('{') || newContent.trimStart().startsWith('```');
           updateMessage(streamingMsgIdRef.current, {
-            content: currentMsg.content + data.token,
+            content: looksLikeJson ? '' : newContent,
+            metadata: {
+              status: looksLikeJson ? 'processing' : 'streaming',
+              ...(looksLikeJson ? { _rawContent: newContent } : {}),
+            },
           });
         }
       }
@@ -113,6 +127,7 @@ export function ChatPanel() {
           content: '',
           thinkingContent: data.token,
           timestamp: new Date().toISOString(),
+          metadata: { status: 'streaming' },
         });
       } else {
         const currentMsg = useChatStore.getState().messages.find(m => m.id === streamingMsgIdRef.current);
@@ -130,21 +145,34 @@ export function ChatPanel() {
         || data.session_id === storeSessionId;
       if (!matches) return;
 
-      const THINK_OPEN = '<think>';
-      const THINK_CLOSE = '</think>';
-      const thinkOpen = data.message.indexOf(THINK_OPEN);
-      const thinkClose = data.message.indexOf(THINK_CLOSE, thinkOpen + THINK_OPEN.length);
       let finalContent = data.message;
-      let finalThinking: string | undefined;
-      if (thinkOpen !== -1 && thinkClose !== -1) {
-        finalThinking = data.message.substring(thinkOpen + THINK_OPEN.length, thinkClose);
-        finalContent = data.message.substring(0, thinkOpen) + data.message.substring(thinkClose + THINK_CLOSE.length);
+      let finalThinking: string | undefined = data.thinking_content;
+      if (!finalThinking) {
+        const THINK_OPEN = '[';
+        const THINK_CLOSE = ']';
+        const thinkOpen = data.message.indexOf(THINK_OPEN);
+        const thinkClose = data.message.indexOf(THINK_CLOSE, thinkOpen + THINK_OPEN.length);
+        if (thinkOpen !== -1 && thinkClose !== -1) {
+          finalThinking = data.message.substring(thinkOpen + THINK_OPEN.length, thinkClose);
+          finalContent = data.message.substring(0, thinkOpen) + data.message.substring(thinkClose + THINK_CLOSE.length);
+        }
+      }
+
+      const trimmed = finalContent.trim();
+      if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+        try {
+          const parsed = JSON.parse(trimmed);
+          if (parsed.message && typeof parsed.message === 'string') {
+            finalContent = parsed.message;
+          }
+        } catch {}
       }
 
       if (streamingMsgIdRef.current) {
         updateMessage(streamingMsgIdRef.current, {
           content: finalContent,
           ...(finalThinking !== undefined ? { thinkingContent: finalThinking } : {}),
+          metadata: { status: 'done' },
         });
         streamingMsgIdRef.current = null;
         streamingDoneRef.current = true;
@@ -160,9 +188,12 @@ export function ChatPanel() {
       if (data.suggestions && data.suggestions.length > 0) {
         useResearchStore.getState().setStep(0, data.suggestions);
       }
-      // Clear search + waiting states on response (Issue 3, Issue 4)
       useResearchStore.getState().setSearchState('completed');
-      setIsWaitingForReply(false);
+      const rs = useResearchStore.getState();
+      if (rs.status !== 'running') {
+        setIsWaitingForReply(false);
+        clearTimeout(waitingTimeoutRef.current);
+      }
       clearTimeout(searchStateTimerRef.current);
       searchStateTimerRef.current = setTimeout(() => {
         useResearchStore.getState().setSearchState('idle');
@@ -179,6 +210,17 @@ export function ChatPanel() {
             return;
           }
         }
+        const updatableActions = ['analyzing', 'searching', 'writing'] as const;
+        if (updatableActions.includes(data.action as any)) {
+          const msgs = useChatStore.getState().messages;
+          const lastSame = [...msgs].reverse().find(
+            m => m.role === 'agent' && m.agent?.id === data.agent_id && m.agent?.action === data.action
+          );
+          if (lastSame) {
+            updateMessage(lastSame.id, { content: data.content, timestamp: data.timestamp });
+            return;
+          }
+        }
         addMessage({
           id: nanoid(),
           role: 'agent',
@@ -192,7 +234,10 @@ export function ChatPanel() {
 
   // Cleanup timer on unmount (Oracle MAJOR)
   useEffect(() => {
-    return () => clearTimeout(searchStateTimerRef.current);
+    return () => {
+      clearTimeout(searchStateTimerRef.current);
+      clearTimeout(waitingTimeoutRef.current);
+    };
   }, []);
 
   // Infinite scroll: load older messages on scroll-to-top
@@ -243,6 +288,8 @@ export function ChatPanel() {
   useEffect(() => {
     serverOffsetRef.current = 0;
     setHasMoreMessages(true);
+    streamingMsgIdRef.current = null;
+    streamingDoneRef.current = false;
   }, [activeSessionId]);
 
   const { containerRef, handleScroll, scrollToBottom, isAtBottom } = useChatScroll(
@@ -325,17 +372,51 @@ export function ChatPanel() {
         const data = await sendMessage(text);
         if (data && (data as any).status === 'processing') {
           useResearchStore.getState().setSearchState('searching');
+          clearTimeout(waitingTimeoutRef.current);
+          waitingTimeoutRef.current = setTimeout(() => {
+            setIsWaitingForReply(false);
+            useResearchStore.getState().setSearchState('idle');
+            if (streamingMsgIdRef.current) {
+              const msg = useChatStore.getState().messages.find(m => m.id === streamingMsgIdRef.current);
+              if (msg?.metadata?._rawContent) {
+                updateMessage(streamingMsgIdRef.current, {
+                  content: msg.metadata._rawContent,
+                  metadata: { status: 'done' },
+                });
+              }
+              streamingMsgIdRef.current = null;
+              streamingDoneRef.current = true;
+            }
+          }, 300000);
           return;
         }
       } else {
         const data = await startResearch(text, attachments, selectedModel);
         if (data && (data as any).status === 'processing') {
           useResearchStore.getState().setSearchState('searching');
+          clearTimeout(waitingTimeoutRef.current);
+          waitingTimeoutRef.current = setTimeout(() => {
+            setIsWaitingForReply(false);
+            useResearchStore.getState().setSearchState('idle');
+            if (streamingMsgIdRef.current) {
+              const msg = useChatStore.getState().messages.find(m => m.id === streamingMsgIdRef.current);
+              if (msg?.metadata?._rawContent) {
+                updateMessage(streamingMsgIdRef.current, {
+                  content: msg.metadata._rawContent,
+                  metadata: { status: 'done' },
+                });
+              }
+              streamingMsgIdRef.current = null;
+              streamingDoneRef.current = true;
+            }
+          }, 300000);
           return;
         }
       }
     } catch (error) {
       console.error('Failed to send message:', error);
+      setIsWaitingForReply(false);
+      clearTimeout(waitingTimeoutRef.current);
       addMessage({
         id: nanoid(),
         role: 'assistant',
@@ -348,7 +429,9 @@ export function ChatPanel() {
   const handleCancel = async () => {
     if (taskId && status === 'running') {
       try { await api.pauseResearch(taskId); } catch {}
-      useResearchStore.getState().setStatus('idle');
+      useResearchStore.getState().setStatus('paused');
+      setIsWaitingForReply(false);
+      clearTimeout(waitingTimeoutRef.current);
       addMessage({
         id: nanoid(),
         role: 'assistant',
@@ -357,10 +440,10 @@ export function ChatPanel() {
       });
       return;
     }
-    // Cancel background tool execution (chat processing/searching state)
     if (sessionId && isWaitingForReply) {
       try { await api.cancelResearch(sessionId); } catch {}
       setIsWaitingForReply(false);
+      clearTimeout(waitingTimeoutRef.current);
       useResearchStore.getState().setSearchState('idle');
       addMessage({
         id: nanoid(),
@@ -372,8 +455,10 @@ export function ChatPanel() {
     }
     if (taskId) {
       try { await api.cancelResearch(taskId); } catch {}
-      clearResearch();  // Clear research state without creating a new session
+      clearResearch();
     }
+    setIsWaitingForReply(false);
+    clearTimeout(waitingTimeoutRef.current);
     addMessage({
       id: nanoid(),
       role: 'assistant',
@@ -598,22 +683,6 @@ export function ChatPanel() {
               <p className="mt-1 text-sm text-muted-foreground">
                 Describe your research needs to start smart research
               </p>
-              <div className="mt-6 bg-card border rounded-xl shadow-sm p-4 text-left">
-                <div className="flex items-center gap-2 mb-3">
-                  <Zap className="h-3.5 w-3.5 text-primary" />
-                  <span className="text-xs font-medium text-foreground">Quick Templates</span>
-                </div>
-                <div className="space-y-1.5">
-                  {RESEARCH_TEMPLATES.slice(0, 4).map(t => (
-                    <div key={t.id} className="flex items-center gap-2 text-xs">
-                      <code className="px-1.5 py-0.5 bg-secondary rounded text-[11px]">
-                        /template {t.id}
-                      </code>
-                      <span className="text-muted-foreground">{t.name}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
             </div>
           </div>
         )}

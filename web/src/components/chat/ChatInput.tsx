@@ -132,7 +132,7 @@ export function ChatInput({
   }));
 
   // show stop when API loading, or research running with no input
-  const showStop = isLoading || (isRunning && !text.trim() && attachments.length === 0);
+  const showStop = isLoading || isWaitingForReply || (isRunning && !text.trim() && attachments.length === 0);
   const canSend = (text.trim() || attachments.length > 0) && !disabled;
   const currentModelName = availableModels.find(m => m.id === llm.model)?.name || PRESET_MODELS.find(m => m.id === llm.model)?.name || llm.model;
   const currentProviderName = PROVIDER_INFO[llm.provider]?.name || llm.provider;

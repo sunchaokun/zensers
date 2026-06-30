@@ -262,8 +262,35 @@ class ApiClient {
   /**
    * Send chat message (chat mode step=0)
    */
-  async sendChatMessage(sessionId: string, text: string): Promise<InteractResponse> {
-    return this.interact({ session_id: sessionId, step: 0, response: { text } });
+  async sendChatMessage(sessionId: string, text: string, llmConfig?: {
+    provider?: string;
+    model?: string;
+    apiKey?: string;
+    apiEndpoint?: string;
+    temperature?: number;
+    maxTokens?: number;
+    topP?: number;
+    frequencyPenalty?: number;
+    presencePenalty?: number;
+  }): Promise<InteractResponse> {
+    const formData = new FormData();
+    formData.append('session_id', sessionId);
+    formData.append('step', '0');
+    formData.append('response', JSON.stringify({ text }));
+    if (llmConfig?.provider) formData.append('llm_provider', llmConfig.provider);
+    if (llmConfig?.model) formData.append('llm_model', llmConfig.model);
+    if (llmConfig?.apiKey) formData.append('llm_api_key', llmConfig.apiKey);
+    if (llmConfig?.apiEndpoint) formData.append('llm_api_endpoint', llmConfig.apiEndpoint);
+    if (llmConfig?.temperature !== undefined) formData.append('llm_temperature', String(llmConfig.temperature));
+    if (llmConfig?.maxTokens !== undefined) formData.append('llm_max_tokens', String(llmConfig.maxTokens));
+    if (llmConfig?.topP !== undefined) formData.append('llm_top_p', String(llmConfig.topP));
+    if (llmConfig?.frequencyPenalty !== undefined) formData.append('llm_frequency_penalty', String(llmConfig.frequencyPenalty));
+    if (llmConfig?.presencePenalty !== undefined) formData.append('llm_presence_penalty', String(llmConfig.presencePenalty));
+
+    const { data } = await this.client.post('/api/v1/research/interact', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+    return data;
   }
 
   /**
@@ -271,12 +298,39 @@ class ApiClient {
    * Sends both the suggestion_id and the example text (in user's language) so the backend
    * can use the natural-language example as the user message instead of an English fallback.
    */
-  async clickSuggestion(sessionId: string, suggestionId: string, exampleText?: string): Promise<InteractResponse> {
+  async clickSuggestion(sessionId: string, suggestionId: string, exampleText?: string, llmConfig?: {
+    provider?: string;
+    model?: string;
+    apiKey?: string;
+    apiEndpoint?: string;
+    temperature?: number;
+    maxTokens?: number;
+    topP?: number;
+    frequencyPenalty?: number;
+    presencePenalty?: number;
+  }): Promise<InteractResponse> {
+    const formData = new FormData();
+    formData.append('session_id', sessionId);
+    formData.append('step', '0');
     const payload: Record<string, any> = { suggestion_id: suggestionId };
     if (exampleText) {
-      payload.text = exampleText;  // Natural-language query in user's language
+      payload.text = exampleText;
     }
-    return this.interact({ session_id: sessionId, step: 0, response: payload });
+    formData.append('response', JSON.stringify(payload));
+    if (llmConfig?.provider) formData.append('llm_provider', llmConfig.provider);
+    if (llmConfig?.model) formData.append('llm_model', llmConfig.model);
+    if (llmConfig?.apiKey) formData.append('llm_api_key', llmConfig.apiKey);
+    if (llmConfig?.apiEndpoint) formData.append('llm_api_endpoint', llmConfig.apiEndpoint);
+    if (llmConfig?.temperature !== undefined) formData.append('llm_temperature', String(llmConfig.temperature));
+    if (llmConfig?.maxTokens !== undefined) formData.append('llm_max_tokens', String(llmConfig.maxTokens));
+    if (llmConfig?.topP !== undefined) formData.append('llm_top_p', String(llmConfig.topP));
+    if (llmConfig?.frequencyPenalty !== undefined) formData.append('llm_frequency_penalty', String(llmConfig.frequencyPenalty));
+    if (llmConfig?.presencePenalty !== undefined) formData.append('llm_presence_penalty', String(llmConfig.presencePenalty));
+
+    const { data } = await this.client.post('/api/v1/research/interact', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+    return data;
   }
 
   /**
