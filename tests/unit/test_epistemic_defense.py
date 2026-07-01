@@ -234,6 +234,7 @@ class TestL4HypothesisVerification:
     """L4: Structured output hypothesis verification parsing."""
 
     def _parse(self, content, hypotheses):
+        import re as _re
         verified = []
         verification_section = ""
         markers = ["假设验证结果", "假设验证结果：", "验证结果"]
@@ -255,7 +256,7 @@ class TestL4HypothesisVerification:
             pattern = f"假设{i+1}"
             if pattern in verification_section:
                 matching_lines = [line for line in verification_section.split("\n")
-                                  if pattern in line and "|" in line]
+                                  if pattern in line and "|" in line and "(新)" not in line]
                 if matching_lines:
                     line = matching_lines[-1]
                     line_parts = line.split("|")
@@ -270,11 +271,38 @@ class TestL4HypothesisVerification:
                         h_copy["status"] = "refuted"
                     else:
                         h_copy["status"] = "unverified"
+                    for lp in line_parts:
+                        lp = lp.strip()
+                        if lp.startswith("反面假设可能性：") or lp.startswith("反面假设可能性:"):
+                            h_copy["counter_possibility"] = lp.split("：", 1)[-1].split(":", 1)[-1].strip()
                 else:
                     h_copy["status"] = "unverified"
             else:
                 h_copy["status"] = "unverified"
             verified.append(h_copy)
+        new_hyp_pattern = _re.compile(r'假设(\d+)\s*\(新\)\s*[：:]\s*(.+?)(?:\s*\||$)')
+        for line in verification_section.split("\n"):
+            m = new_hyp_pattern.search(line)
+            if m and "|" in line:
+                line_parts = line.split("|")
+                new_h = {"id": f"new_{m.group(1)}", "source": "agent_generated", "statement": m.group(2).strip()}
+                for lp in line_parts:
+                    lp = lp.strip()
+                    if lp.startswith("依据：") or lp.startswith("依据:"):
+                        new_h["evidence"] = lp.split("：", 1)[-1].split(":", 1)[-1].strip()
+                    elif lp.startswith("反面假设可能性：") or lp.startswith("反面假设可能性:"):
+                        new_h["counter_possibility"] = lp.split("：", 1)[-1].split(":", 1)[-1].strip()
+                full_line = line
+                if any(kw in full_line for kw in ["修正", "修订", "部分"]):
+                    new_h["status"] = "revised"
+                elif any(kw in full_line for kw in ["推翻", "否定", "不成立"]):
+                    new_h["status"] = "refuted"
+                elif any(kw in full_line for kw in ["验证", "证实"]):
+                    new_h["status"] = "verified"
+                else:
+                    new_h["status"] = "unverified"
+                if new_h.get("statement"):
+                    verified.append(new_h)
         return verified
 
     def test_verified_hypothesis(self):
@@ -321,6 +349,33 @@ class TestL4HypothesisVerification:
         result = self._parse("假设验证结果：\n假设1：验证 | 依据：数据", hypotheses)
         expected_id = hashlib.md5("政策收紧导致增速放缓".encode()).hexdigest()[:8]
         assert result[0]["id"] == expected_id
+
+    def test_counter_possibility_parsed(self):
+        content = "分析...\n假设验证结果：\n假设1：验证 | 依据：数据支撑 | 反面假设可能性：低"
+        hypotheses = [{"statement": "芯片供应紧张导致出货量下降"}]
+        result = self._parse(content, hypotheses)
+        assert result[0]["status"] == "verified"
+        assert result[0].get("counter_possibility") == "低"
+
+    def test_new_hypothesis_parsed(self):
+        content = "分析...\n假设验证结果：\n假设1：验证 | 依据：数据支撑\n假设2(新)：消费降级抑制换机需求 | 验证 | 依据：出货量下降 | 反面假设可能性：中"
+        hypotheses = [{"statement": "芯片供应紧张导致出货量下降"}]
+        result = self._parse(content, hypotheses)
+        assert len(result) == 2
+        assert result[0]["status"] == "verified"
+        assert result[1]["source"] == "agent_generated"
+        assert "消费降级" in result[1].get("statement", "")
+        assert result[1].get("counter_possibility") == "中"
+
+    def test_multiple_new_hypotheses(self):
+        content = "假设验证结果：\n假设1：验证 | 依据：数据\n假设2(新)：消费降级抑制换机 | 修正 | 依据：部分成立 | 反面假设可能性：中\n假设3(新)：AI换机潮对冲下滑 | 验证 | 依据：AI手机增长 | 反面假设可能性：低"
+        hypotheses = [{"statement": "芯片供应紧张导致出货量下降"}]
+        result = self._parse(content, hypotheses)
+        assert len(result) == 3
+        assert result[1]["source"] == "agent_generated"
+        assert result[1]["status"] == "revised"
+        assert result[2]["source"] == "agent_generated"
+        assert result[2]["status"] == "verified"
 
 
 # ==================== L5: _detect_claim_contradiction ====================

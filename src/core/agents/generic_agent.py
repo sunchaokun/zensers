@@ -709,8 +709,8 @@ class GenericAgent(
                             try:
                                 _hyp_data = "\n".join([f"- {dp.get('title','')}: {(dp.get('content','') or '')[:200]}" for dp in aggregated_data_points[:5]])
                                 _hyp_claims = "\n".join([f"- [{c.get('source_aspect','?')}] {c.get('statement','')}" for c in (cross_dimension_claims or [])]) if cross_dimension_claims else '暂无'
-                                hypothesis_prompt = f"""基于以下数据，生成2-3个关于「{aspect}」的因果假设。
-每个假设必须：1) 可被数据验证或反驳 2) 涉及跨维度因果传导 3) 不与已知事实矛盾
+                                hypothesis_prompt = f"""基于以下数据，生成3-5个关于「{aspect}」的因果假设。
+每个假设必须：1) 可被数据验证或反驳 2) 涉及跨维度因果传导 3) 不与已知事实矛盾 4) 包含反面假设
 
 数据摘要（前5条）：
 {_hyp_data}
@@ -719,7 +719,7 @@ class GenericAgent(
 {_hyp_claims}
 
 输出格式（每行一个假设）：
-假设：[因果陈述] | 验证数据：[需要什么数据] | 传导：[影响哪些维度]"""
+假设：[因果陈述] | 验证数据：[需要什么数据] | 传导：[影响哪些维度] | 反面假设：[对立因果陈述]"""
 
                                 hypothesis_result = await call_llm(
                                     prompt=hypothesis_prompt,
@@ -756,7 +756,7 @@ class GenericAgent(
                         if document_context or document_tables:
                             doc_injection = "\n\n## 年报原始数据（来自企业年报PDF解析）\n"
                             if document_context:
-                                truncated = self._truncate_by_paragraph(document_context, max_chars=8000)
+                                truncated = self._truncate_by_tokens(document_context, max_tokens=2000, preserve_tables=bool(document_tables))
                                 doc_injection += f"\n### 年报章节原文\n{truncated}\n"
                             if document_tables:
                                 doc_injection += "\n### 结构化财务数据\n"
@@ -1717,7 +1717,7 @@ class GenericAgent(
     def _parse_causal_hypotheses(self, content: str) -> List[Dict]:
         """Parse causal hypotheses from LLM output.
 
-        Expected format per line: 假设：[因果陈述] | 验证数据：[需要什么数据] | 传导：[影响哪些维度]
+        Expected format per line: 假设：[因果陈述] | 验证数据：[需要什么数据] | 传导：[影响哪些维度] | 反面假设：[对立因果陈述]
         """
         hypotheses = []
         for line in content.strip().split("\n"):
@@ -1734,21 +1734,24 @@ class GenericAgent(
                     h["verification_data"] = part.split("：", 1)[-1].split(":", 1)[-1].strip()
                 elif part.startswith("传导：") or part.startswith("传导:"):
                     h["transmission"] = part.split("：", 1)[-1].split(":", 1)[-1].strip()
+                elif part.startswith("反面假设：") or part.startswith("反面假设:"):
+                    h["counter_hypothesis"] = part.split("：", 1)[-1].split(":", 1)[-1].strip()
             if h.get("statement"):
                 h["status"] = "unverified"
                 hypotheses.append(h)
-        return hypotheses[:3]
+        return hypotheses[:5]
 
     def _parse_hypothesis_verification(self, content: str, hypotheses: List[Dict]) -> List[Dict]:
         """L4: Parse hypothesis verification results from analysis output.
         
-        Expected format (pipe-delimited, same pattern as _parse_causal_hypotheses):
+        Expected format (pipe-delimited):
         假设验证结果：
-        假设1：验证 | 依据：数据支撑...
-        假设2：修正 | 依据：部分成立 | 修正内容：...
-        假设3：推翻 | 依据：与数据矛盾
+        假设1：验证 | 依据：数据支撑... | 反面假设可能性：低
+        假设2：修正 | 依据：部分成立 | 修正内容：... | 反面假设可能性：中
+        假设3(新)：[陈述] | 验证|修正|推翻 | 依据：... | 反面假设可能性：高
         """
         import hashlib as _hashlib
+        import re as _re
         verified = []
         verification_section = ""
         
@@ -1774,7 +1777,7 @@ class GenericAgent(
             pattern = f"假设{i+1}"
             if pattern in verification_section:
                 matching_lines = [line for line in verification_section.split("\n")
-                                  if pattern in line and "|" in line]
+                                  if pattern in line and "|" in line and "(新)" not in line]
                 if matching_lines:
                     line = matching_lines[-1]
                     line_parts = line.split("|")
@@ -1790,12 +1793,44 @@ class GenericAgent(
                         h_copy["status"] = "refuted"
                     else:
                         h_copy["status"] = "unverified"
+                    
+                    for lp in line_parts:
+                        lp = lp.strip()
+                        if lp.startswith("反面假设可能性：") or lp.startswith("反面假设可能性:"):
+                            h_copy["counter_possibility"] = lp.split("：", 1)[-1].split(":", 1)[-1].strip()
                 else:
                     h_copy["status"] = "unverified"
             else:
                 h_copy["status"] = "unverified"
             
             verified.append(h_copy)
+        
+        new_hyp_pattern = _re.compile(r'假设(\d+)\s*\(新\)\s*[：:]\s*(.+?)(?:\s*\||$)')
+        for line in verification_section.split("\n"):
+            m = new_hyp_pattern.search(line)
+            if m and "|" in line:
+                line_parts = line.split("|")
+                new_h = {"id": f"new_{m.group(1)}", "source": "agent_generated", "statement": m.group(2).strip()}
+                for lp in line_parts:
+                    lp = lp.strip()
+                    if lp.startswith("依据：") or lp.startswith("依据:"):
+                        new_h["evidence"] = lp.split("：", 1)[-1].split(":", 1)[-1].strip()
+                    elif lp.startswith("反面假设可能性：") or lp.startswith("反面假设可能性:"):
+                        new_h["counter_possibility"] = lp.split("：", 1)[-1].split(":", 1)[-1].strip()
+                
+                full_line = line
+                if any(kw in full_line for kw in ["修正", "修订", "部分"]):
+                    new_h["status"] = "revised"
+                elif any(kw in full_line for kw in ["推翻", "否定", "不成立"]):
+                    new_h["status"] = "refuted"
+                elif any(kw in full_line for kw in ["验证", "证实"]):
+                    new_h["status"] = "verified"
+                else:
+                    new_h["status"] = "unverified"
+                
+                if new_h.get("statement"):
+                    verified.append(new_h)
+        
         return verified
 
     def _detect_claim_contradiction_precheck(self, claim_a: Dict, claim_b: Dict) -> bool:
@@ -4347,6 +4382,66 @@ class GenericAgent(
         
         return count
     
+    @staticmethod
+    def _count_tokens(text: str) -> int:
+        try:
+            import tiktoken
+            enc = tiktoken.get_encoding("cl100k_base")
+            return len(enc.encode(text))
+        except Exception:
+            pass
+        import re as _re
+        cjk = len(_re.findall(r"[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]", text))
+        ascii_chars = len(_re.findall(r"[a-zA-Z0-9\s]", text))
+        other = max(0, len(text) - cjk - ascii_chars)
+        return max(1, int(cjk * 1.5 + ascii_chars * 0.25 + other * 0.5))
+
+    def _truncate_by_tokens(self, text: str, max_tokens: int = 2000, preserve_tables: bool = False) -> str:
+        if not text:
+            return text
+        if self._count_tokens(text) <= max_tokens:
+            return text
+        if preserve_tables:
+            table_parts = []
+            text_parts = []
+            current = []
+            in_table = False
+            for line in text.split('\n'):
+                is_table_line = bool(line.strip()) and (
+                    line.strip().startswith('|') or line.strip().startswith('+') or
+                    line.strip().startswith('-') or set(line.strip()) <= {'|', '-', '+', ' ', ':'}
+                )
+                if is_table_line and not in_table:
+                    if current:
+                        text_parts.append('\n'.join(current))
+                        current = []
+                    in_table = True
+                    current.append(line)
+                elif not is_table_line and in_table:
+                    table_parts.append('\n'.join(current))
+                    current = []
+                    in_table = False
+                    current.append(line)
+                else:
+                    current.append(line)
+            if current:
+                if in_table:
+                    table_parts.append('\n'.join(current))
+                else:
+                    text_parts.append('\n'.join(current))
+            budget = max_tokens
+            for tp in table_parts:
+                budget -= self._count_tokens(tp)
+            budget = max(budget, max_tokens // 4)
+            truncated_text = self._truncate_by_paragraph('\n\n'.join(text_parts), max_chars=budget * 4)
+            result_parts = []
+            for tp in table_parts:
+                result_parts.append(tp)
+            if truncated_text.strip():
+                result_parts.append(truncated_text)
+            return '\n\n'.join(result_parts) + "\n\n[... 内容因Token限制已截断，完整数据见结构化财务数据部分 ...]"
+        return self._truncate_by_paragraph(text, max_chars=max_tokens * 4)
+
     def _truncate_by_paragraph(self, text: str, max_chars: int = 8000) -> str:
         if len(text) <= max_chars:
             return text
@@ -4660,10 +4755,20 @@ class GenericAgent(
                     parts.append(f"  {i}. {h.get('statement','')}")
                     parts.append(f"     验证数据需求：{h.get('verification_data','')}")
                     parts.append(f"     跨维度传导：{h.get('transmission','')}")
-                parts.append("\n**要求**：你的分析必须对每个假设给出「验证」「修正」或「推翻」的判断，并在分析末尾按以下格式输出验证结果：")
+                    if h.get('counter_hypothesis'):
+                        parts.append(f"     反面假设：{h['counter_hypothesis']}")
+                parts.append("\n**假设驱动分析要求**：")
+                parts.append("  1. 对每个给定假设，按以下格式逐一验证：")
+                parts.append("     【假设H1】陈述 → 【支持证据】→ 【验证结果：确认/修正/推翻】→ 【结论】")
+                parts.append("  2. 基于你掌握的数据，你必须额外提出至少2个新的因果假设，同样按上述格式验证")
+                parts.append("  3. 对每个关键假设（包括你提出的），评估其反面假设成立的可能性")
+                parts.append("  4. 最终结论必须基于假设验证结果推导，而非直接下判断")
+                parts.append("\n**输出格式**：在分析末尾按以下格式输出验证结果：")
                 parts.append("假设验证结果：")
                 for i, h in enumerate(causal_hypotheses, 1):
-                    parts.append(f"假设{i}：验证|修正|推翻 | 依据：... | 修正内容：...(仅修正时填写)")
+                    parts.append(f"假设{i}：验证|修正|推翻 | 依据：... | 修正内容：...(仅修正时填写) | 反面假设可能性：高/中/低")
+                parts.append(f"假设{len(causal_hypotheses)+1}(新)：[陈述] | 验证|修正|推翻 | 依据：... | 反面假设可能性：高/中/低")
+                parts.append(f"假设{len(causal_hypotheses)+2}(新)：[陈述] | 验证|修正|推翻 | 依据：... | 反面假设可能性：高/中/低")
             # B2.4: Inject cross-dimension claims (L3+: reasoning-driven injection)
             _ASPECT_SPECULATIVE_POLICY = {
                 "投资建议": "cautious_use",
