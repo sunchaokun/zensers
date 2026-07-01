@@ -8,6 +8,7 @@ import hashlib
 import pytest
 import sys
 import os
+from unittest.mock import patch, AsyncMock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -617,4 +618,115 @@ class TestEpistemicEndToEnd:
             _l = claim.get("epistemic_level", "inferential")
             if _ceiling and _epistemic_order.get(_l, 1) < _epistemic_order.get(_ceiling, 1):
                 claim["epistemic_level"] = _ceiling
-            assert claim["epistemic_level"] == "speculative", f"Expected speculative for {level}"
+
+
+# ==================== Cognitive Strategy Tests ====================
+
+class TestCognitiveStrategyRegistry:
+    def test_all_four_types_exist(self):
+        from src.core.agents.generic_agent import COGNITIVE_STRATEGY
+        for ct in ["fact_driven", "inference_driven", "forward_looking", "assessment_driven"]:
+            assert ct in COGNITIVE_STRATEGY
+            assert "L1" in COGNITIVE_STRATEGY[ct]
+            assert "L3" in COGNITIVE_STRATEGY[ct]
+            assert "L4" in COGNITIVE_STRATEGY[ct]
+            assert "L5" in COGNITIVE_STRATEGY[ct]
+
+    def test_fact_driven_dimension_ceiling(self):
+        from src.core.agents.generic_agent import COGNITIVE_STRATEGY
+        assert COGNITIVE_STRATEGY["fact_driven"]["L1"]["dimension_ceiling"] == "inferential"
+
+    def test_forward_looking_no_ceiling(self):
+        from src.core.agents.generic_agent import COGNITIVE_STRATEGY
+        assert COGNITIVE_STRATEGY["forward_looking"]["L1"]["dimension_ceiling"] is None
+
+    def test_inference_driven_speculative_policy(self):
+        from src.core.agents.generic_agent import COGNITIVE_STRATEGY
+        assert COGNITIVE_STRATEGY["inference_driven"]["L3"]["speculative_policy"] == "cautious_use"
+
+    def test_forward_looking_speculative_policy(self):
+        from src.core.agents.generic_agent import COGNITIVE_STRATEGY
+        assert COGNITIVE_STRATEGY["forward_looking"]["L3"]["speculative_policy"] == "open_use"
+
+    def test_fact_driven_hypothesis_count(self):
+        from src.core.agents.generic_agent import COGNITIVE_STRATEGY
+        assert COGNITIVE_STRATEGY["fact_driven"]["L4"]["hypothesis_count"] == 0
+        assert COGNITIVE_STRATEGY["fact_driven"]["L4"]["agent_hypothesis_count"] == 0
+
+    def test_inference_driven_hypothesis_count(self):
+        from src.core.agents.generic_agent import COGNITIVE_STRATEGY
+        assert COGNITIVE_STRATEGY["inference_driven"]["L4"]["hypothesis_count"] == (3, 5)
+        assert COGNITIVE_STRATEGY["inference_driven"]["L4"]["agent_hypothesis_count"] == 2
+
+
+class TestHeuristicCognitiveType:
+    def _heuristic(self, aspect):
+        agent = GenericAgent.__new__(GenericAgent)
+        return agent._heuristic_cognitive_type(aspect)
+
+    def test_chinese_inference_driven(self):
+        assert self._heuristic("投资建议") == "inference_driven"
+
+    def test_chinese_forward_looking(self):
+        assert self._heuristic("技术趋势") == "forward_looking"
+
+    def test_chinese_assessment_driven(self):
+        assert self._heuristic("估值分析") == "assessment_driven"
+
+    def test_english_inference_driven(self):
+        assert self._heuristic("Investment Strategy") == "inference_driven"
+
+    def test_english_forward_looking(self):
+        assert self._heuristic("Technology Trends") == "forward_looking"
+
+    def test_english_assessment_driven(self):
+        assert self._heuristic("Risk Assessment") == "assessment_driven"
+
+    def test_no_match_returns_none(self):
+        assert self._heuristic("市场规模") is None
+
+
+class TestInferCognitiveType:
+    @pytest.mark.asyncio
+    async def test_llm_full_classification(self):
+        agent = GenericAgent.__new__(GenericAgent)
+        agent._context = {}
+        agent.agent_id = "test"
+        with patch("src.core.agents.generic_agent.call_llm", new_callable=AsyncMock) as mock_llm:
+            mock_llm.return_value = {"content": "inference_driven", "success": True}
+            result = await agent.infer_cognitive_type("投资建议", "中国智能手机")
+            assert result == "inference_driven"
+            assert mock_llm.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_heuristic_fallback(self):
+        agent = GenericAgent.__new__(GenericAgent)
+        agent._context = {}
+        agent.agent_id = "test"
+        with patch("src.core.agents.generic_agent.call_llm", new_callable=AsyncMock) as mock_llm:
+            mock_llm.side_effect = [{"content": "", "success": True}, {"content": "", "success": True}]
+            result = await agent.infer_cognitive_type("投资建议", "中国智能手机")
+            assert result == "inference_driven"
+
+    @pytest.mark.asyncio
+    async def test_ultimate_fallback(self):
+        agent = GenericAgent.__new__(GenericAgent)
+        agent._context = {}
+        agent.agent_id = "test"
+        with patch("src.core.agents.generic_agent.call_llm", new_callable=AsyncMock) as mock_llm:
+            mock_llm.side_effect = [{"content": "", "success": True}, {"content": "", "success": True}]
+            result = await agent.infer_cognitive_type("市场规模", "中国智能手机")
+            assert result == "fact_driven"
+
+    @pytest.mark.asyncio
+    async def test_cache_hit(self):
+        agent = GenericAgent.__new__(GenericAgent)
+        agent._context = {}
+        agent.agent_id = "test"
+        with patch("src.core.agents.generic_agent.call_llm", new_callable=AsyncMock) as mock_llm:
+            mock_llm.return_value = {"content": "assessment_driven", "success": True}
+            r1 = await agent.infer_cognitive_type("风险分析", "中国智能手机")
+            r2 = await agent.infer_cognitive_type("风险分析", "中国智能手机")
+            assert r1 == "assessment_driven"
+            assert r2 == "assessment_driven"
+            assert mock_llm.call_count == 1

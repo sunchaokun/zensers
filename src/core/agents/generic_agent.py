@@ -85,6 +85,38 @@ def _load_quality_rubric() -> str:
     return _RUBRIC_CACHE
 
 
+COGNITIVE_STRATEGY = {
+    "fact_driven": {
+        "L1": {"dimension_ceiling": "inferential", "speculative_word_downgrade": "strict", "confidence_threshold": {"factual": "HIGH"}},
+        "L2": {"caliber_floor_for_citation": "llm_inference_factual", "same_caliber_resolution": "newer_timestamp", "speculative_write_policy": "never"},
+        "L3": {"speculative_policy": "reference_only", "reasoning_mode": "cross_validation", "inferential_instruction": "Verify with data; flag unsupported claims", "falsification_requirement": "all_inferential", "evidence_chain_template": "Data → Finding → Confirmation", "cross_dimension_instruction": "Cross-validate with other factual dimensions"},
+        "L4": {"hypothesis_type": "Descriptive", "hypothesis_count": 0, "hypothesis_template": "【Data Observation H1】 → 【Supporting Evidence】→ 【Confirmed/Disconfirmed】→ 【Finding】", "counter_hypothesis_required": False, "agent_hypothesis_count": 0, "verification_focus": "Data accuracy", "output_suffix": "数据验证结果："},
+        "L5": {"contradiction_resolution": "Data conflict resolution", "contradiction_instruction": "两项事实性主张冲突，请判断哪个数据源更可信并说明理由。", "auto_resolve_threshold": 0.8, "escalation_action": "Flag for human review"},
+    },
+    "inference_driven": {
+        "L1": {"dimension_ceiling": "speculative", "speculative_word_downgrade": "moderate", "confidence_threshold": {"factual": "MEDIUM"}},
+        "L2": {"caliber_floor_for_citation": "llm_inference_speculative", "same_caliber_resolution": "higher_source_count", "speculative_write_policy": "with_uncertainty_tag"},
+        "L3": {"speculative_policy": "cautious_use", "reasoning_mode": "causal_chain", "inferential_instruction": "Build causal chain; check premises", "falsification_requirement": "speculative_only", "evidence_chain_template": "Premise → Reasoning → Conclusion", "cross_dimension_instruction": "Trace causal transmission from other dimensions"},
+        "L4": {"hypothesis_type": "Causal", "hypothesis_count": (3, 5), "hypothesis_template": "【Causal Hypothesis H1】 → 【Supporting Evidence】→ 【Confirmed/Revised/Refuted】→ 【Conclusion】", "counter_hypothesis_required": True, "agent_hypothesis_count": 2, "verification_focus": "Logic completeness", "output_suffix": "假设验证结果："},
+        "L5": {"contradiction_resolution": "Premise re-examination", "contradiction_instruction": "两项结论冲突，请追溯哪个前提或推理步骤出现了分歧。", "auto_resolve_threshold": 0.6, "escalation_action": "Inject as reasoning challenge"},
+    },
+    "forward_looking": {
+        "L1": {"dimension_ceiling": None, "speculative_word_downgrade": "relaxed", "confidence_threshold": {"speculative": "LOW"}},
+        "L2": {"caliber_floor_for_citation": "llm_inference_speculative", "same_caliber_resolution": "wider_coverage", "speculative_write_policy": "with_falsification_condition"},
+        "L3": {"speculative_policy": "open_use", "reasoning_mode": "scenario_analysis", "inferential_instruction": "Map to scenarios; assign probabilities", "falsification_requirement": "all_claims", "evidence_chain_template": "Signal → Scenario → Probability", "cross_dimension_instruction": "Check consistency with other forward-looking claims"},
+        "L4": {"hypothesis_type": "Predictive", "hypothesis_count": (2, 3), "hypothesis_template": "【Predictive Hypothesis H1】 → 【Supporting Signals】→ 【Probability Assessment】→ 【Scenario】", "counter_hypothesis_required": True, "agent_hypothesis_count": 1, "verification_focus": "Falsification conditions", "output_suffix": "前瞻验证结果："},
+        "L5": {"contradiction_resolution": "Scenario reconciliation", "contradiction_instruction": "两项预测冲突，请分析在什么条件下各自成立，并给出情景分析。", "auto_resolve_threshold": 0.4, "escalation_action": "Present both scenarios"},
+    },
+    "assessment_driven": {
+        "L1": {"dimension_ceiling": "inferential", "speculative_word_downgrade": "strict", "confidence_threshold": {"factual": "HIGH", "inferential": "HIGH"}},
+        "L2": {"caliber_floor_for_citation": "llm_inference_factual", "same_caliber_resolution": "more_precise_data", "speculative_write_policy": "with_confidence_interval"},
+        "L3": {"speculative_policy": "reference_only", "reasoning_mode": "sensitivity_analysis", "inferential_instruction": "Quantify impact; define assumptions", "falsification_requirement": "all_key_assumptions", "evidence_chain_template": "Assumption → Model → Range", "cross_dimension_instruction": "Verify assumptions against factual dimension data"},
+        "L4": {"hypothesis_type": "Conditional", "hypothesis_count": (2, 3), "hypothesis_template": "【Conditional Hypothesis H1】 → 【Assumption Base】→ 【Sensitivity Test】→ 【Value Range】", "counter_hypothesis_required": True, "agent_hypothesis_count": 1, "verification_focus": "Assumption sensitivity", "output_suffix": "假设敏感性检验："},
+        "L5": {"contradiction_resolution": "Assumption divergence", "contradiction_instruction": "两项评估冲突，请识别哪个假设差异导致了分歧，并量化影响。", "auto_resolve_threshold": 0.7, "escalation_action": "Show sensitivity of each assumption"},
+    },
+}
+
+
 class GenericAgent(
     StateManagementMixin,
     CommunicationMixin
@@ -704,13 +736,19 @@ class GenericAgent(
                                         cross_dimension_claims.append(_claim_val)
                             _conflict_entries = {k: v for k, v in _all_canon.items() if k.startswith("conflict:claim:")}
                         # A2.1: Generate causal hypotheses before analysis
+                        _cog_type = await self.infer_cognitive_type(aspect, topic)
+                        _cog_strategy = COGNITIVE_STRATEGY.get(_cog_type, COGNITIVE_STRATEGY["fact_driven"])
+                        self._context[f"cog_strategy:{aspect}"] = _cog_strategy
                         causal_hypotheses = []
                         if aggregated_data_points and len(aggregated_data_points) >= 5:
                             try:
                                 _hyp_data = "\n".join([f"- {dp.get('title','')}: {(dp.get('content','') or '')[:200]}" for dp in aggregated_data_points[:5]])
                                 _hyp_claims = "\n".join([f"- [{c.get('source_aspect','?')}] {c.get('statement','')}" for c in (cross_dimension_claims or [])]) if cross_dimension_claims else '暂无'
-                                hypothesis_prompt = f"""基于以下数据，生成3-5个关于「{aspect}」的因果假设。
-每个假设必须：1) 可被数据验证或反驳 2) 涉及跨维度因果传导 3) 不与已知事实矛盾 4) 包含反面假设
+                                _l4_gen = _cog_strategy["L4"]
+                                _hcount = _l4_gen["hypothesis_count"]
+                                _hcount_str = f"{_hcount[0]}-{_hcount[1]}" if isinstance(_hcount, tuple) else str(_hcount)
+                                hypothesis_prompt = f"""基于以下数据，生成{_hcount_str}个关于「{aspect}」的{_l4_gen['hypothesis_type']}假设。
+每个假设必须：1) 可被数据验证或反驳 2) 涉及跨维度因果传导 3) 不与已知事实矛盾{'' if not _l4_gen['counter_hypothesis_required'] else ' 4) 包含反面假设'}
 
 数据摘要（前5条）：
 {_hyp_data}
@@ -1755,7 +1793,7 @@ class GenericAgent(
         verified = []
         verification_section = ""
         
-        markers = ["假设验证结果", "假设验证结果：", "验证结果"]
+        markers = ["假设验证结果", "假设验证结果：", "数据验证结果", "数据验证结果：", "前瞻验证结果", "前瞻验证结果：", "假设敏感性检验", "假设敏感性检验：", "验证结果"]
         for marker in markers:
             if marker in content:
                 idx = content.index(marker)
@@ -1832,6 +1870,96 @@ class GenericAgent(
                     verified.append(new_h)
         
         return verified
+
+    def _heuristic_cognitive_type(self, aspect: str):
+        _SIGNALS = {
+            "inference_driven": [
+                "投资", "战略", "建议", "策略", "研判", "意图", "决策", "配置",
+                "invest", "strateg", "advice", "recommend", "intent", "decision", "allocat",
+            ],
+            "forward_looking": [
+                "趋势", "前景", "技术", "政策", "法规", "展望", "预测", "路线", "演进",
+                "trend", "outlook", "forecast", "predict", "policy", "regulat", "roadmap", "evolution",
+            ],
+            "assessment_driven": [
+                "估值", "风险", "财务", "评分", "评级", "敏感性", "压力测试",
+                "valuat", "risk", "financ", "scor", "rat", "sensitiv", "stress",
+            ],
+        }
+        aspect_lower = aspect.lower()
+        scores = {}
+        for ctype, keywords in _SIGNALS.items():
+            scores[ctype] = sum(1 for kw in keywords if kw in aspect or kw in aspect_lower)
+        best = max(scores, key=scores.get)
+        return best if scores[best] > 0 else None
+
+    async def infer_cognitive_type(self, aspect: str, topic: str = "") -> str:
+        cache_key = f"cog_type:{aspect}:{topic}"
+        cached = self._context.get(cache_key)
+        if cached:
+            return cached
+
+        valid_types = {"fact_driven", "inference_driven", "forward_looking", "assessment_driven"}
+        inferred = None
+        method_used = "none"
+        import re as _re
+
+        try:
+            result = await call_llm(
+                prompt=f"""Classify the following research aspect into a cognitive type. Output ONLY the type name.
+
+Research Topic: {topic}
+Research Aspect: {aspect}
+
+Cognitive type definitions:
+- fact_driven: Describe current state, quantify facts (e.g., Market Size, Competitive Landscape, Industry Chain, 市场规模, 竞争格局, 产业链)
+- inference_driven: Derive conclusions, guide action (e.g., Investment Advice, Strategic Judgment, 投资建议, 战略研判)
+- forward_looking: Predict future, prospective analysis (e.g., Technology Trends, Policy & Regulation, 技术趋势, 政策法规)
+- assessment_driven: Quantify & evaluate under conditions (e.g., Valuation, Risk Analysis, 估值分析, 风险分析)
+
+Output ONE type name only: fact_driven / inference_driven / forward_looking / assessment_driven""",
+                system_prompt="You are a research methodology expert.",
+                max_tokens=50,
+                temperature=0.0,
+            )
+            content = result.get("content", "").strip().lower()
+            for vt in valid_types:
+                if _re.search(r'\b' + _re.escape(vt) + r'\b', content):
+                    inferred = vt
+                    method_used = "llm_full"
+                    break
+        except Exception as e:
+            logger.warning(f"GenericAgent {self.agent_id}: cognitive type LLM full attempt failed: {e}")
+
+        if inferred is None:
+            try:
+                result = await call_llm(
+                    prompt=f"Which cognitive type is '{aspect}'? Output only: fact_driven / inference_driven / forward_looking / assessment_driven",
+                    system_prompt="Output type name only.",
+                    max_tokens=30,
+                    temperature=0.0,
+                )
+                content = result.get("content", "").strip().lower()
+                for vt in valid_types:
+                    if _re.search(r'\b' + _re.escape(vt) + r'\b', content):
+                        inferred = vt
+                        method_used = "llm_retry"
+                        break
+            except Exception as e:
+                logger.warning(f"GenericAgent {self.agent_id}: cognitive type LLM retry failed: {e}")
+
+        if inferred is None:
+            inferred = self._heuristic_cognitive_type(aspect)
+            if inferred:
+                method_used = "heuristic"
+
+        if inferred is None:
+            inferred = "fact_driven"
+            method_used = "fallback"
+
+        logger.info(f"GenericAgent {self.agent_id}: cognitive type for '{aspect}' = {inferred} (method: {method_used})")
+        self._context[cache_key] = inferred
+        return inferred
 
     def _detect_claim_contradiction_precheck(self, claim_a: Dict, claim_b: Dict) -> bool:
         """L5 pre-check: Fast heuristic to identify candidate contradiction pairs.
@@ -4433,14 +4561,39 @@ class GenericAgent(
             for tp in table_parts:
                 budget -= self._count_tokens(tp)
             budget = max(budget, max_tokens // 4)
-            truncated_text = self._truncate_by_paragraph('\n\n'.join(text_parts), max_chars=budget * 4)
+            truncated_text = self._truncate_text_to_tokens('\n\n'.join(text_parts), budget)
             result_parts = []
             for tp in table_parts:
                 result_parts.append(tp)
             if truncated_text.strip():
                 result_parts.append(truncated_text)
             return '\n\n'.join(result_parts) + "\n\n[... 内容因Token限制已截断，完整数据见结构化财务数据部分 ...]"
-        return self._truncate_by_paragraph(text, max_chars=max_tokens * 4)
+        return self._truncate_text_to_tokens(text, max_tokens)
+
+    def _truncate_text_to_tokens(self, text: str, max_tokens: int) -> str:
+        if self._count_tokens(text) <= max_tokens:
+            return text
+        paragraphs = text.split('\n\n')
+        result = []
+        current_tokens = 0
+        for para in paragraphs:
+            para_tokens = self._count_tokens(para)
+            if current_tokens + para_tokens + 2 > max_tokens:
+                break
+            result.append(para)
+            current_tokens += para_tokens + 2
+        if not result:
+            lines = text.split('\n')
+            for line in lines:
+                line_tokens = self._count_tokens(line)
+                if current_tokens + line_tokens + 1 > max_tokens:
+                    break
+                result.append(line)
+                current_tokens += line_tokens + 1
+        truncated = '\n\n'.join(result) if '\n\n' in text[:500] else '\n'.join(result)
+        if len(truncated) < len(text):
+            truncated += "\n\n[... 内容因Token限制已截断，完整数据见结构化财务数据部分 ...]"
+        return truncated
 
     def _truncate_by_paragraph(self, text: str, max_chars: int = 8000) -> str:
         if len(text) <= max_chars:
@@ -4750,7 +4903,8 @@ class GenericAgent(
                     parts.append(f"  {idx}. {sa}")
             # A2.2: Inject causal hypotheses into analysis prompt
             if causal_hypotheses:
-                parts.append("\n### 因果假设（必须验证或修正）")
+                _l4 = _cog_strategy["L4"]
+                parts.append(f"\n### {_l4['hypothesis_type']}假设（必须验证或修正）")
                 for i, h in enumerate(causal_hypotheses, 1):
                     parts.append(f"  {i}. {h.get('statement','')}")
                     parts.append(f"     验证数据需求：{h.get('verification_data','')}")
@@ -4759,26 +4913,22 @@ class GenericAgent(
                         parts.append(f"     反面假设：{h['counter_hypothesis']}")
                 parts.append("\n**假设驱动分析要求**：")
                 parts.append("  1. 对每个给定假设，按以下格式逐一验证：")
-                parts.append("     【假设H1】陈述 → 【支持证据】→ 【验证结果：确认/修正/推翻】→ 【结论】")
-                parts.append("  2. 基于你掌握的数据，你必须额外提出至少2个新的因果假设，同样按上述格式验证")
-                parts.append("  3. 对每个关键假设（包括你提出的），评估其反面假设成立的可能性")
+                parts.append(f"     {_l4['hypothesis_template']}")
+                if _l4['agent_hypothesis_count'] > 0:
+                    parts.append(f"  2. 基于你掌握的数据，你必须额外提出至少{_l4['agent_hypothesis_count']}个新的{_l4['hypothesis_type']}假设，同样按上述格式验证")
+                if _l4['counter_hypothesis_required']:
+                    parts.append("  3. 对每个关键假设（包括你提出的），评估其反面假设成立的可能性")
                 parts.append("  4. 最终结论必须基于假设验证结果推导，而非直接下判断")
                 parts.append("\n**输出格式**：在分析末尾按以下格式输出验证结果：")
-                parts.append("假设验证结果：")
+                parts.append(_l4['output_suffix'])
                 for i, h in enumerate(causal_hypotheses, 1):
                     parts.append(f"假设{i}：验证|修正|推翻 | 依据：... | 修正内容：...(仅修正时填写) | 反面假设可能性：高/中/低")
-                parts.append(f"假设{len(causal_hypotheses)+1}(新)：[陈述] | 验证|修正|推翻 | 依据：... | 反面假设可能性：高/中/低")
-                parts.append(f"假设{len(causal_hypotheses)+2}(新)：[陈述] | 验证|修正|推翻 | 依据：... | 反面假设可能性：高/中/低")
+                if _l4['agent_hypothesis_count'] > 0:
+                    for j in range(1, _l4['agent_hypothesis_count'] + 1):
+                        parts.append(f"假设{len(causal_hypotheses)+j}(新)：[陈述] | 验证|修正|推翻 | 依据：... | 反面假设可能性：高/中/低")
             # B2.4: Inject cross-dimension claims (L3+: reasoning-driven injection)
-            _ASPECT_SPECULATIVE_POLICY = {
-                "投资建议": "cautious_use",
-                "投资策略": "cautious_use",
-                "战略研判": "cautious_use",
-                "战略意图": "cautious_use",
-                "战略意图推断": "cautious_use",
-                "前景展望": "cautious_use",
-            }
-            _aspect_policy = _ASPECT_SPECULATIVE_POLICY.get(aspect, "reference_only")
+            _cog_strategy = self._context.get(f"cog_strategy:{aspect}", COGNITIVE_STRATEGY["fact_driven"])
+            _aspect_policy = _cog_strategy["L3"]["speculative_policy"]
             if cross_dimension_claims:
                 _factual_claims = [c for c in cross_dimension_claims if c.get("epistemic_level") == "factual"]
                 _inferential_claims = [c for c in cross_dimension_claims if c.get("epistemic_level") == "inferential"]
@@ -4832,7 +4982,8 @@ class GenericAgent(
                         parts.append("  - 若推测性观点启发了你的分析方向，需说明启发路径")
             # L3-E: Evidence chain requirement
             parts.append("\n### 分析输出规范")
-            parts.append("  - 每个关键结论必须附带：支持证据 → 推理步骤 → 结论，标注每步的认知层级（事实/推断/前瞻）")
+            _ect = _cog_strategy["L3"]["evidence_chain_template"]
+            parts.append(f"  - 每个关键结论必须附带：{_ect}，标注每步的认知层级（事实/推断/前瞻）")
             parts.append("  - 若结论基于多个来源交叉验证，注明交叉验证过程")
             parts.append("  - 若存在反对证据，必须列出并解释为何仍得出该结论")
             # L3-D: Inject detected contradictions
@@ -4844,7 +4995,8 @@ class GenericAgent(
                         f"  - 矛盾类型: {_conf_val.get('contradiction', '未知')}"
                         f" | 涉及结论: {_conf_val.get('claims', [])}"
                     )
-                parts.append("\n**要求**: 如果你的分析与上述矛盾相关，必须给出你的判断和依据。")
+                _l5 = _cog_strategy["L5"]
+                parts.append(f"\n**要求**: {_l5['contradiction_instruction']}")
             framework_context = "\n".join(parts)
 
         if aspect:

@@ -201,6 +201,9 @@ class SharedMemory:
         metric: str,
         value: Any,
         caliber: str = "",
+        # TODO: L2 strategy integration — accept same_caliber_resolution and speculative_write_policy
+        # from COGNITIVE_STRATEGY. Currently uses default behavior for all types.
+        # See docs/superpowers/specs/2026-07-01-aspect-cognitive-strategy-design.md Section 4.3
         source: str = "",
         publisher: str = "",
     ) -> Optional[Any]:
