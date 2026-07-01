@@ -108,11 +108,11 @@ COGNITIVE_STRATEGY = {
         "L5": {"contradiction_resolution": "Scenario reconciliation", "contradiction_instruction": "两项预测冲突，请分析在什么条件下各自成立，并给出情景分析：(1)各预测成立的条件集 (2)当前数据更支持哪个条件集 (3)两个预测是否可以在不同时间尺度上同时成立", "auto_resolve_threshold": 0.4, "escalation_action": "Present both scenarios"},
     },
     "assessment_driven": {
-        "L1": {"dimension_ceiling": "inferential", "speculative_word_downgrade": "moderate", "confidence_threshold": {"factual": "HIGH", "inferential": "HIGH"}},
-        "L2": {"caliber_floor_for_citation": "llm_inference_factual", "same_caliber_resolution": "more_precise_data", "speculative_write_policy": "with_confidence_interval"},
-        "L3": {"speculative_policy": "cautious_use", "reasoning_mode": "sensitivity_analysis", "inferential_instruction": "Quantify impact; define assumptions", "falsification_requirement": "all_key_assumptions", "evidence_chain_template": "风险因素 → 影响路径 → 量化评估", "cross_dimension_instruction": "Verify assumptions against factual dimension data", "insight_instruction": "不要只列出风险清单——深入分析每个风险的作用机制和传导路径，识别风险间的关联和级联效应，这些系统性风险才是最关键的洞察"},
-        "L4": {"hypothesis_type": "条件性", "hypothesis_count": (1, 2), "hypothesis_template": "【条件性假设H1】 → 【假设基础】→ 【敏感性测试】→ 【影响范围】", "counter_hypothesis_required": False, "agent_hypothesis_count": 0, "verification_focus": "Assumption sensitivity", "output_suffix": "假设敏感性检验"},
-        "L5": {"contradiction_resolution": "Assumption divergence", "contradiction_instruction": "两项评估冲突，请识别导致分歧的假设差异，并：(1)明确列出两个评估各自依赖的关键假设 (2)用你掌握的数据检验这些假设的合理性 (3)给出基于更可靠假设的修正评估", "auto_resolve_threshold": 0.7, "escalation_action": "Show sensitivity of each assumption"},
+        "L1": {"dimension_ceiling": None, "speculative_word_downgrade": "relaxed", "confidence_threshold": {"factual": "HIGH", "inferential": "MEDIUM", "speculative": "LOW"}},
+        "L2": {"caliber_floor_for_citation": "llm_inference_speculative", "same_caliber_resolution": "wider_coverage", "speculative_write_policy": "with_falsification_condition"},
+        "L3": {"speculative_policy": "open_use", "reasoning_mode": "risk_scenario", "inferential_instruction": "Build risk scenarios from cross-dimension signals", "falsification_requirement": "key_risks_only", "evidence_chain_template": "风险触发条件 → 传导路径 → 影响评估 → 应对策略", "cross_dimension_instruction": "Map cross-dimension claims to risk scenarios", "insight_instruction": "不要只列出风险清单——深入分析每个风险的作用机制和传导路径，识别风险间的关联和级联效应，这些系统性风险才是最关键的洞察"},
+        "L4": {"hypothesis_type": "风险情景", "hypothesis_count": (2, 3), "hypothesis_template": "【风险情景H1】 → 【触发条件】→ 【传导路径】→ 【影响评估】", "counter_hypothesis_required": False, "agent_hypothesis_count": 1, "verification_focus": "Scenario plausibility", "output_suffix": "风险情景评估"},
+        "L5": {"contradiction_resolution": "Risk scenario reconciliation", "contradiction_instruction": "两项评估冲突，请分析：(1)各评估隐含的风险情景是什么 (2)当前数据更支持哪个风险情景 (3)两个情景是否可能在不同条件下先后发生", "auto_resolve_threshold": 0.5, "escalation_action": "Present both risk scenarios with probability"},
     },
 }
 
@@ -455,8 +455,10 @@ class GenericAgent(
                         self._report_progress(f"结构化数据库查询完成，获取 {len(data_points)} 条数据", "searching")
 
                         # Tier 2: web_search (search_skill, news_search) — supplement for structured gaps
+                        # Skip web search if annual report document_context is preloaded
+                        _has_doc_data_t2 = bool(self._context.get("document_context") or self._context.get("has_preloaded_data") or task.get("document_context"))
                         search_results = None
-                        if topic and tiered_skills.get("web_search"):
+                        if topic and tiered_skills.get("web_search") and not _has_doc_data_t2:
                             self._report_progress(f"Searching web sources for '{aspect or topic}'...", "searching")
                             web_skills = tiered_skills.get("web_search", [])
                             preloaded = task.get("preloaded_search_results")
@@ -494,7 +496,7 @@ class GenericAgent(
                                         })
                             self._report_progress(f"网络搜索完成，共 {len(data_points)} 条数据", "searching")
 
-                            if "news_search" in web_skills and skill_registry and topic:
+                            if "news_search" in web_skills and skill_registry and topic and not _has_doc_data_t2:
                                 news_skill = skill_registry.get("news_search")
                                 if news_skill:
                                     try:
@@ -673,7 +675,9 @@ class GenericAgent(
                         aggregated_data_points = task.get("aggregated_data_points", [])
                         aggregated_sources = task.get("aggregated_sources", [])
                         # P-FIX-DEEP: search fallback when no upstream data available
-                        if not aggregated_data_points and "search_skill" in self._available_skills and self._skill_registry:
+                        # Skip search if annual report document_context is preloaded
+                        _has_doc_data = bool(self._context.get("document_context") or self._context.get("has_preloaded_data") or task.get("document_context"))
+                        if not aggregated_data_points and not _has_doc_data and "search_skill" in self._available_skills and self._skill_registry:
                             logger.info(f"GenericAgent {self.agent_id}: 无上游数据，降级执行搜索")
                             _sr = await self._do_deep_research(
                                 topic=topic, aspect=aspect, aspects=aspects, skill_registry=self._skill_registry,
@@ -1164,7 +1168,8 @@ class GenericAgent(
                         }, action)
                     
                     # 深度研究：先搜索再分析
-                    if topic and "search_skill" in available_skills:
+                    _has_doc_data_dp = bool(self._context.get("document_context") or self._context.get("has_preloaded_data") or task.get("document_context"))
+                    if topic and "search_skill" in available_skills and not _has_doc_data_dp:
                         search_results = await self._do_deep_research(
                             topic=topic,
                             aspect=aspect,
@@ -1342,7 +1347,8 @@ class GenericAgent(
             # Even though we reached the fallback path, the registry may
             # still have search_skill available — use it to get real data.
             search_results = None
-            if topic and skill_registry:
+            _has_doc_data_fb = bool(self._context.get("document_context") or self._context.get("has_preloaded_data") or task.get("document_context"))
+            if topic and skill_registry and not _has_doc_data_fb:
                 search_skill = (
                     skill_registry.get("search_skill")
                     or skill_registry.get("web_search")
@@ -4943,9 +4949,13 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
                             f" 前提: {claim.get('前提条件','未指定')})"
                         )
                     parts.append("\n**推理要求**:")
-                    parts.append("  - 引用推断性结论时需注明'根据XX维度推断'")
+                    _infer_inst = _cog_strategy["L3"].get("inferential_instruction", "")
+                    _cross_inst = _cog_strategy["L3"].get("cross_dimension_instruction", "")
+                    if _infer_inst:
+                        parts.append(f"  - {_infer_inst}")
+                    if _cross_inst:
+                        parts.append(f"  - {_cross_inst}")
                     parts.append("  - 若推断前提在你掌握的数据中不成立，需指出并修正结论")
-                    parts.append("  - 尝试将多个推断性结论交叉验证，寻找因果链条")
                 if _speculative_claims:
                     if _aspect_policy == "open_use":
                         parts.append("\n### 其他维度前瞻性判断（本维度核心输出，需系统化处理）")
@@ -4990,9 +5000,6 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
             parts.append(f"  - 每个关键结论必须附带：{_ect}，标注每步的认知层级（事实/推断/前瞻）")
             parts.append("  - 若结论基于多个来源交叉验证，注明交叉验证过程")
             parts.append("  - 若存在反对证据，必须列出并解释为何仍得出该结论")
-            _insight_inst = _cog_strategy["L3"].get("insight_instruction")
-            if _insight_inst:
-                parts.append(f"  - 洞察发现：{_insight_inst}")
             # L3-D: Inject detected contradictions
             if conflict_entries:
                 parts.append("\n### 已检测到跨维度矛盾")
@@ -5004,6 +5011,12 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
                     )
                 _l5 = _cog_strategy["L5"]
                 parts.append(f"\n**要求**: {_l5['contradiction_instruction']}")
+            # Insight discovery section (placed last to counter template rigidity)
+            _insight_inst = _cog_strategy["L3"].get("insight_instruction")
+            if _insight_inst:
+                parts.append("\n### 洞察发现（独立于上述结构化要求）")
+                parts.append(f"  {_insight_inst}")
+                parts.append("  在报告末尾单独列出你发现的最重要的非常规洞察，标注为「核心洞察」")
             framework_context = "\n".join(parts)
 
         if aspect:
