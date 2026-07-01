@@ -4897,6 +4897,9 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
                 parts.append(f"你在报告中的角色：{role_in_report}")
             if sibling_str:
                 parts.append(f"协作维度：{sibling_str}")
+            # B2.4: Inject cross-dimension claims (L3+: reasoning-driven injection)
+            _cog_strategy = self._context.get(f"cog_strategy:{aspect}", COGNITIVE_STRATEGY["fact_driven"])
+            _aspect_policy = _cog_strategy["L3"]["speculative_policy"]
             if sub_aspects:
                 parts.append("子主题（必须按此结构输出分析）：")
                 for idx, sa in enumerate(sub_aspects, 1):
@@ -4927,8 +4930,6 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
                     for j in range(1, _l4['agent_hypothesis_count'] + 1):
                         parts.append(f"假设{len(causal_hypotheses)+j}(新)：[陈述] | 验证|修正|推翻 | 依据：... | 反面假设可能性：高/中/低")
             # B2.4: Inject cross-dimension claims (L3+: reasoning-driven injection)
-            _cog_strategy = self._context.get(f"cog_strategy:{aspect}", COGNITIVE_STRATEGY["fact_driven"])
-            _aspect_policy = _cog_strategy["L3"]["speculative_policy"]
             if cross_dimension_claims:
                 _factual_claims = [c for c in cross_dimension_claims if c.get("epistemic_level") == "factual"]
                 _inferential_claims = [c for c in cross_dimension_claims if c.get("epistemic_level") == "inferential"]
@@ -4956,7 +4957,20 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
                     parts.append("  - 若推断前提在你掌握的数据中不成立，需指出并修正结论")
                     parts.append("  - 尝试将多个推断性结论交叉验证，寻找因果链条")
                 if _speculative_claims:
-                    if _aspect_policy == "cautious_use":
+                    if _aspect_policy == "open_use":
+                        parts.append("\n### 其他维度前瞻性判断（本维度核心输出，需系统化处理）")
+                        for claim in _speculative_claims:
+                            parts.append(
+                                f"  - [{claim.get('source_aspect','?')}] {claim.get('statement','')}"
+                                f" (置信度: {claim.get('confidence','?')},"
+                                f" 证伪条件: {claim.get('falsification','未指定')})"
+                            )
+                        parts.append("\n**推理要求**:")
+                        parts.append("  - 前瞻性判断是本维度的核心输出，可直接作为结论基础")
+                        parts.append("  - 每个前瞻性判断必须包含：(1)证伪条件 (2)概率评估 (3)时间范围 (4)替代预测")
+                        parts.append("  - 若你掌握的数据可以证伪某前瞻性判断，必须明确指出并给出修正预测")
+                        parts.append("  - 对多个前瞻性判断给出情景分析（乐观/中性/悲观），并说明各情景的概率依据")
+                    elif _aspect_policy == "cautious_use":
                         parts.append("\n### 其他维度前瞻性判断（可作为方向性参考，但需明确标注不确定性）")
                         for claim in _speculative_claims:
                             parts.append(
