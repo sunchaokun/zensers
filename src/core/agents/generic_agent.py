@@ -782,7 +782,7 @@ class GenericAgent(
                                         _existing_claims = self._shared_memory.get_all_canonical()
                                         for _ek, _ev in _existing_claims.items():
                                             if _ek.startswith("claim:") and isinstance(_ev.get("value"), dict):
-                                                _contradiction = self._detect_claim_contradiction(_ev["value"], _claim)
+                                                _contradiction = await self._detect_claim_contradiction(_ev["value"], _claim)
                                                 if _contradiction:
                                                     logger.warning(
                                                         f"GenericAgent {self.agent_id}: CLAIM CONTRADICTION for "
@@ -1737,19 +1737,24 @@ class GenericAgent(
             verified.append(h_copy)
         return verified
 
-    def _detect_claim_contradiction(self, claim_a: Dict, claim_b: Dict) -> Optional[str]:
-        """L5: Detect direction contradiction between two dict-type claims.
+    def _detect_claim_contradiction_precheck(self, claim_a: Dict, claim_b: Dict) -> bool:
+        """L5 pre-check: Fast heuristic to identify candidate contradiction pairs.
         
-        Uses heuristic keyword rules with 2-gram subject matching.
-        No LLM call to avoid latency. Only detects opposite-direction contradictions.
+        Returns True if the pair MIGHT be contradictory (needs LLM confirmation).
+        Intentionally over-sensitive (high recall, low precision) to avoid missing
+        real contradictions. The LLM stage will filter false positives.
         """
         stmt_a = claim_a.get("statement", "")
         stmt_b = claim_b.get("statement", "")
         if not stmt_a or not stmt_b:
-            return None
+            return False
         
-        positive = {"增长", "上升", "扩张", "改善", "提升", "增加", "上涨", "回暖"}
-        negative = {"下降", "萎缩", "收缩", "恶化", "下滑", "减少", "下跌", "承压"}
+        positive = {"增长", "上升", "扩张", "改善", "提升", "增加", "上涨", "回暖",
+                    "普及", "加速", "领先", "突破", "恢复", "繁荣", "强劲", "乐观",
+                    "收紧", "趋严", "升级", "扩张", "扩张", "强化", "推进", "普及"}
+        negative = {"下降", "萎缩", "收缩", "恶化", "下滑", "减少", "下跌", "承压",
+                    "渗透率下滑", "放缓", "滞后", "受阻", "衰退", "疲软", "悲观",
+                    "放松", "趋缓", "降级", "收缩", "弱化", "停滞", "萎缩", "低迷"}
         a_pos = any(w in stmt_a for w in positive)
         a_neg = any(w in stmt_a for w in negative)
         b_pos = any(w in stmt_b for w in positive)
@@ -1768,10 +1773,67 @@ class GenericAgent(
             content_b = bigrams_b - dir_bigrams
             if content_a and content_b:
                 overlap = len(content_a & content_b) / max(len(content_a), 1)
-                if overlap > 0.2:
-                    return f"方向矛盾: '{stmt_a[:50]}' vs '{stmt_b[:50]}'"
+                if overlap > 0.15:
+                    return True
         
-        return None
+        return False
+
+    async def _detect_claim_contradiction(self, claim_a: Dict, claim_b: Dict) -> Optional[str]:
+        """L5: Detect semantic contradiction between two claims using LLM.
+        
+        Two-stage approach:
+        1. Fast heuristic pre-check (_detect_claim_contradiction_precheck) filters
+           obviously unrelated pairs with zero latency.
+        2. LLM semantic analysis confirms/rejects candidate pairs with high accuracy.
+        
+        Falls back to heuristic-only result on LLM failure.
+        """
+        stmt_a = claim_a.get("statement", "")
+        stmt_b = claim_b.get("statement", "")
+        if not stmt_a or not stmt_b:
+            return None
+        
+        if not self._detect_claim_contradiction_precheck(claim_a, claim_b):
+            return None
+        
+        prompt = (
+            "判断以下两条声明是否存在逻辑矛盾。两条声明讨论的是同一主体但方向相反才算矛盾；"
+            "讨论不同主体或不同方面不算矛盾。\n\n"
+            f"声明A: {stmt_a}\n"
+            f"声明B: {stmt_b}\n\n"
+            "请严格按以下JSON格式回答，不要添加任何其他内容:\n"
+            '{"contradiction": true/false, "type": "方向矛盾/因果矛盾/事实矛盾/无矛盾", '
+            '"confidence": 0.0-1.0, "explanation": "简短说明"}'
+        )
+        
+        try:
+            result = await call_llm(
+                prompt=prompt,
+                system_prompt="你是一个逻辑矛盾检测专家。只输出JSON，不输出任何其他内容。",
+                max_tokens=200,
+                temperature=0.0,
+            )
+            content = result.get("content", "").strip()
+            
+            import json as _json
+            json_match = re.search(r'\{[^}]+\}', content)
+            if json_match:
+                parsed = _json.loads(json_match.group())
+                is_contradiction = parsed.get("contradiction", False)
+                conf = parsed.get("confidence", 0.0)
+                ctype = parsed.get("type", "方向矛盾")
+                explanation = parsed.get("explanation", "")
+                
+                if is_contradiction and conf >= 0.6:
+                    return f"{ctype}: '{stmt_a[:50]}' vs '{stmt_b[:50]}' ({explanation})"
+                else:
+                    return None
+            
+            logger.debug(f"GenericAgent L5: LLM output not valid JSON, falling back to heuristic: {content[:100]}")
+        except Exception as e:
+            logger.debug(f"GenericAgent L5: LLM call failed, falling back to heuristic: {e}")
+        
+        return f"方向矛盾(启发式): '{stmt_a[:50]}' vs '{stmt_b[:50]}'"
 
     def _enforce_canonical_values(self, content: str, canonical_data: Dict) -> str:
         """

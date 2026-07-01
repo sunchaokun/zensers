@@ -10,6 +10,9 @@ import sys
 import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+
+from src.core.agents.generic_agent import GenericAgent
 
 
 # ==================== L1: _extract_claims_from_analysis ====================
@@ -37,7 +40,7 @@ class TestL1Truncation:
         assert "...[中间省略]..." in truncated
 
     def test_conclusion_section_preserved(self):
-        content = "概述部分" + "详细分析" * 500 + "结论：AI芯片国产化率已突破30%"
+        content = "概述部分" + "详细分析" * 800 + "结论：AI芯片国产化率已突破30%"
         assert len(content) > 3000
         truncated = content[:2500] + "\n\n...[中间省略]...\n\n" + content[-500:]
         assert "结论：AI芯片国产化率已突破30%" in truncated
@@ -322,16 +325,20 @@ class TestL4HypothesisVerification:
 
 # ==================== L5: _detect_claim_contradiction ====================
 
-class TestL5ContradictionDetection:
-    """L5: Direction contradiction detection with 2-gram matching."""
+class TestL5ContradictionPrecheck:
+    """L5 pre-check: Fast heuristic candidate filtering."""
 
-    def _detect(self, claim_a, claim_b):
+    def _precheck(self, claim_a, claim_b):
         stmt_a = claim_a.get("statement", "")
         stmt_b = claim_b.get("statement", "")
         if not stmt_a or not stmt_b:
-            return None
-        positive = {"增长", "上升", "扩张", "改善", "提升", "增加", "上涨", "回暖"}
-        negative = {"下降", "萎缩", "收缩", "恶化", "下滑", "减少", "下跌", "承压"}
+            return False
+        positive = {"增长", "上升", "扩张", "改善", "提升", "增加", "上涨", "回暖",
+                    "普及", "加速", "领先", "突破", "恢复", "繁荣", "强劲", "乐观",
+                    "收紧", "趋严", "升级", "扩张", "扩张", "强化", "推进", "普及"}
+        negative = {"下降", "萎缩", "收缩", "恶化", "下滑", "减少", "下跌", "承压",
+                    "渗透率下滑", "放缓", "滞后", "受阻", "衰退", "疲软", "悲观",
+                    "放松", "趋缓", "降级", "收缩", "弱化", "停滞", "萎缩", "低迷"}
         a_pos = any(w in stmt_a for w in positive)
         a_neg = any(w in stmt_a for w in negative)
         b_pos = any(w in stmt_b for w in positive)
@@ -349,45 +356,132 @@ class TestL5ContradictionDetection:
             content_b = bigrams_b - dir_bigrams
             if content_a and content_b:
                 overlap = len(content_a & content_b) / max(len(content_a), 1)
-                if overlap > 0.2:
-                    return f"方向矛盾: '{stmt_a[:50]}' vs '{stmt_b[:50]}'"
-        return None
+                if overlap > 0.15:
+                    return True
+        return False
 
-    def test_direction_contradiction_detected(self):
+    def test_direction_contradiction_candidate(self):
         a = {"statement": "市场规模持续增长"}
         b = {"statement": "市场规模面临萎缩"}
-        result = self._detect(a, b)
+        assert self._precheck(a, b) is True
+
+    def test_same_direction_not_candidate(self):
+        a = {"statement": "市场规模持续增长"}
+        b = {"statement": "行业收入快速提升"}
+        assert self._precheck(a, b) is False
+
+    def test_no_direction_words_not_candidate(self):
+        a = {"statement": "企业A占据主导地位"}
+        b = {"statement": "企业B市场份额领先"}
+        assert self._precheck(a, b) is False
+
+    def test_empty_statement_not_candidate(self):
+        a = {"statement": ""}
+        b = {"statement": "市场规模增长"}
+        assert self._precheck(a, b) is False
+
+    def test_different_subject_low_overlap_not_candidate(self):
+        a = {"statement": "出口额持续增长"}
+        b = {"statement": "内销利润面临萎缩"}
+        assert self._precheck(a, b) is False
+
+    def test_extended_keywords_candidate(self):
+        a = {"statement": "AI手机快速普及"}
+        b = {"statement": "AI手机渗透率下滑"}
+        assert self._precheck(a, b) is True
+
+    def test_english_keywords_not_candidate(self):
+        a = {"statement": "revenue increased significantly"}
+        b = {"statement": "revenue declined sharply"}
+        assert self._precheck(a, b) is False
+
+
+class TestL5ContradictionLLM:
+    """L5: LLM-based semantic contradiction detection (with mock)."""
+
+    @pytest.fixture
+    def agent(self):
+        agent = GenericAgent(agent_id="test_l5", config={})
+        agent._shared_memory = None
+        return agent
+
+    @pytest.mark.asyncio
+    async def test_llm_confirms_contradiction(self, agent, monkeypatch):
+        async def mock_call_llm(**kwargs):
+            return {"content": '{"contradiction": true, "type": "方向矛盾", "confidence": 0.9, "explanation": "增长与萎缩方向相反"}'}
+        monkeypatch.setattr("src.core.agents.generic_agent.call_llm", mock_call_llm)
+        a = {"statement": "市场规模持续增长"}
+        b = {"statement": "市场规模面临萎缩"}
+        result = await agent._detect_claim_contradiction(a, b)
         assert result is not None
         assert "方向矛盾" in result
 
-    def test_same_direction_no_contradiction(self):
-        a = {"statement": "市场规模持续增长"}
-        b = {"statement": "行业收入快速提升"}
-        result = self._detect(a, b)
-        assert result is None
-
-    def test_no_direction_words_no_contradiction(self):
-        a = {"statement": "企业A占据主导地位"}
-        b = {"statement": "企业B市场份额领先"}
-        result = self._detect(a, b)
-        assert result is None
-
-    def test_empty_statement_no_contradiction(self):
-        a = {"statement": ""}
-        b = {"statement": "市场规模增长"}
-        result = self._detect(a, b)
-        assert result is None
-
-    def test_different_subject_low_overlap_no_contradiction(self):
+    @pytest.mark.asyncio
+    async def test_llm_rejects_false_positive(self, agent, monkeypatch):
+        async def mock_call_llm(**kwargs):
+            return {"content": '{"contradiction": false, "type": "无矛盾", "confidence": 0.85, "explanation": "讨论不同主体"}'}
+        monkeypatch.setattr("src.core.agents.generic_agent.call_llm", mock_call_llm)
         a = {"statement": "出口额持续增长"}
         b = {"statement": "内销利润面临萎缩"}
-        result = self._detect(a, b)
+        result = await agent._detect_claim_contradiction(a, b)
         assert result is None
 
-    def test_english_keywords(self):
-        a = {"statement": "revenue increased significantly"}
-        b = {"statement": "revenue declined sharply"}
-        result = self._detect(a, b)
+    @pytest.mark.asyncio
+    async def test_llm_detects_domain_contradiction(self, agent, monkeypatch):
+        async def mock_call_llm(**kwargs):
+            return {"content": '{"contradiction": true, "type": "方向矛盾", "confidence": 0.88, "explanation": "普及与渗透率下滑方向相反"}'}
+        monkeypatch.setattr("src.core.agents.generic_agent.call_llm", mock_call_llm)
+        a = {"statement": "AI手机快速普及"}
+        b = {"statement": "AI手机渗透率下滑"}
+        result = await agent._detect_claim_contradiction(a, b)
+        assert result is not None
+        assert "方向矛盾" in result
+
+    @pytest.mark.asyncio
+    async def test_llm_failure_fallback_to_heuristic(self, agent, monkeypatch):
+        async def mock_call_llm(**kwargs):
+            raise Exception("LLM unavailable")
+        monkeypatch.setattr("src.core.agents.generic_agent.call_llm", mock_call_llm)
+        a = {"statement": "市场规模持续增长"}
+        b = {"statement": "市场规模面临萎缩"}
+        result = await agent._detect_claim_contradiction(a, b)
+        assert result is not None
+        assert "启发式" in result
+
+    @pytest.mark.asyncio
+    async def test_precheck_rejects_unrelated_pair(self, agent, monkeypatch):
+        call_count = [0]
+        async def mock_call_llm(**kwargs):
+            call_count[0] += 1
+            return {"content": '{"contradiction": false}'}
+        monkeypatch.setattr("src.core.agents.generic_agent.call_llm", mock_call_llm)
+        a = {"statement": "企业A占据主导地位"}
+        b = {"statement": "企业B市场份额领先"}
+        result = await agent._detect_claim_contradiction(a, b)
+        assert result is None
+        assert call_count[0] == 0
+
+    @pytest.mark.asyncio
+    async def test_empty_statement_skips_both_stages(self, agent, monkeypatch):
+        call_count = [0]
+        async def mock_call_llm(**kwargs):
+            call_count[0] += 1
+            return {"content": '{"contradiction": false}'}
+        monkeypatch.setattr("src.core.agents.generic_agent.call_llm", mock_call_llm)
+        a = {"statement": ""}
+        b = {"statement": "市场规模增长"}
+        result = await agent._detect_claim_contradiction(a, b)
+        assert result is None
+        assert call_count[0] == 0
+
+    @pytest.mark.asyncio
+    async def test_llm_low_confidence_rejected(self, agent, monkeypatch):
+        async def mock_call_llm(**kwargs):
+            return {"content": '{"contradiction": true, "type": "方向矛盾", "confidence": 0.4, "explanation": "不确定"}'}
+        monkeypatch.setattr("src.core.agents.generic_agent.call_llm", mock_call_llm)
+        a = {"statement": "市场规模持续增长"}
+        b = {"statement": "市场规模面临萎缩"}
+        result = await agent._detect_claim_contradiction(a, b)
         assert result is None
 
 

@@ -163,15 +163,19 @@ r = parse_hyp_ver('假设验证结果：\n假设1：验证 | 依据：数据', [
 expected_id = hashlib.md5('政策收紧导致增速放缓'.encode()).hexdigest()[:8]
 check('stable hash ID', r[0]['id'] == expected_id)
 
-print('\n=== L5: Contradiction detection ===')
+print('\n=== L5: Contradiction pre-check (heuristic) ===')
 
-def detect_contradiction(claim_a, claim_b):
+def detect_contradiction_precheck(claim_a, claim_b):
     stmt_a = claim_a.get('statement', '')
     stmt_b = claim_b.get('statement', '')
     if not stmt_a or not stmt_b:
-        return None
-    positive = {'增长', '上升', '扩张', '改善', '提升', '增加', '上涨', '回暖'}
-    negative = {'下降', '萎缩', '收缩', '恶化', '下滑', '减少', '下跌', '承压'}
+        return False
+    positive = {'增长', '上升', '扩张', '改善', '提升', '增加', '上涨', '回暖',
+                '普及', '加速', '领先', '突破', '恢复', '繁荣', '强劲', '乐观',
+                '收紧', '趋严', '升级', '扩张', '扩张', '强化', '推进', '普及'}
+    negative = {'下降', '萎缩', '收缩', '恶化', '下滑', '减少', '下跌', '承压',
+                '渗透率下滑', '放缓', '滞后', '受阻', '衰退', '疲软', '悲观',
+                '放松', '趋缓', '降级', '收缩', '弱化', '停滞', '萎缩', '低迷'}
     a_pos = any(w in stmt_a for w in positive)
     a_neg = any(w in stmt_a for w in negative)
     b_pos = any(w in stmt_b for w in positive)
@@ -189,15 +193,16 @@ def detect_contradiction(claim_a, claim_b):
         content_b = bigrams_b - dir_bigrams
         if content_a and content_b:
             overlap = len(content_a & content_b) / max(len(content_a), 1)
-            if overlap > 0.2:
+            if overlap > 0.15:
                 return True
-    return None
+    return False
 
-check('direction contradiction', detect_contradiction({'statement': '市场规模持续增长'}, {'statement': '市场规模面临萎缩'}) is True)
-check('same direction no contradiction', detect_contradiction({'statement': '市场规模持续增长'}, {'statement': '行业收入快速提升'}) is None)
-check('different subject no contradiction', detect_contradiction({'statement': '出口额持续增长'}, {'statement': '内销利润面临萎缩'}) is None)
-check('empty statement', detect_contradiction({'statement': ''}, {'statement': '市场规模增长'}) is None)
-check('no direction words', detect_contradiction({'statement': '企业A占据主导'}, {'statement': '企业B份额领先'}) is None)
+check('direction contradiction precheck', detect_contradiction_precheck({'statement': '市场规模持续增长'}, {'statement': '市场规模面临萎缩'}) is True)
+check('same direction no precheck', detect_contradiction_precheck({'statement': '市场规模持续增长'}, {'statement': '行业收入快速提升'}) is False)
+check('different subject no precheck', detect_contradiction_precheck({'statement': '出口额持续增长'}, {'statement': '内销利润面临萎缩'}) is False)
+check('empty statement no precheck', detect_contradiction_precheck({'statement': ''}, {'statement': '市场规模增长'}) is False)
+check('no direction words no precheck', detect_contradiction_precheck({'statement': '企业A占据主导'}, {'statement': '企业B份额领先'}) is False)
+check('extended keywords precheck (普及 vs 下滑)', detect_contradiction_precheck({'statement': 'AI手机快速普及'}, {'statement': 'AI手机渗透率下滑'}) is True)
 
 print('\n=== L3: Stratified injection ===')
 
