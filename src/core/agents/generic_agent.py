@@ -1902,7 +1902,6 @@ class GenericAgent(
         valid_types = {"fact_driven", "inference_driven", "forward_looking", "assessment_driven"}
         inferred = None
         method_used = "none"
-        import re as _re
 
         try:
             result = await call_llm(
@@ -1923,11 +1922,10 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
                 temperature=0.0,
             )
             content = result.get("content", "").strip().lower()
-            for vt in valid_types:
-                if _re.search(r'\b' + _re.escape(vt) + r'\b', content):
-                    inferred = vt
-                    method_used = "llm_full"
-                    break
+            _matches = [(content.rfind(vt), vt) for vt in valid_types if vt in content]
+            if _matches:
+                inferred = max(_matches, key=lambda x: x[0])[1]
+                method_used = "llm_full"
         except Exception as e:
             logger.warning(f"GenericAgent {self.agent_id}: cognitive type LLM full attempt failed: {e}")
 
@@ -1940,11 +1938,10 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
                     temperature=0.0,
                 )
                 content = result.get("content", "").strip().lower()
-                for vt in valid_types:
-                    if _re.search(r'\b' + _re.escape(vt) + r'\b', content):
-                        inferred = vt
-                        method_used = "llm_retry"
-                        break
+                _matches = [(content.rfind(vt), vt) for vt in valid_types if vt in content]
+                if _matches:
+                    inferred = max(_matches, key=lambda x: x[0])[1]
+                    method_used = "llm_retry"
             except Exception as e:
                 logger.warning(f"GenericAgent {self.agent_id}: cognitive type LLM retry failed: {e}")
 
