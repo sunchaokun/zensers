@@ -329,6 +329,46 @@ class GenericAgent(
                     # Phase 1: DATA_COLLECTION - priority-driven execution
                     # structured_db skills first, web_search as supplement, llm last
                     if agent_category == "research":
+                        # [P0-5] Preloaded annual report data delivery
+                        if self._context.get("preloaded"):
+                            annual_report_data = {}
+                            if self._shared_memory and hasattr(self._shared_memory, 'get'):
+                                annual_report_data = self._shared_memory.get("annual_report_data") or {}
+                            
+                            if annual_report_data:
+                                data_points = []
+                                for section in annual_report_data.get("sections", []):
+                                    data_points.append({
+                                        "title": section.get("title", ""),
+                                        "content": section.get("content", "")[:2000],
+                                        "source": "annual_report_pdf",
+                                        "type": "document",
+                                    })
+                                for table_type, rows in annual_report_data.get("financial_tables", {}).items():
+                                    for row in rows[:10]:
+                                        data_points.append({
+                                            "title": f"{table_type} - {row.get('科目', '')}",
+                                            "content": str(row),
+                                            "source": "annual_report_pdf_table",
+                                            "type": "structured_data",
+                                        })
+                                
+                                self._report_progress(f"Delivered {len(data_points)} preloaded data points", "data_delivery")
+                                return self._ensure_standard_result({
+                                    "success": True,
+                                    "content": json.dumps(data_points, ensure_ascii=False),
+                                    "data_points": data_points,
+                                    "sources": [{"title": "Annual Report PDF", "url": "", "type": "document"}],
+                                    "agent_id": self.agent_id,
+                                }, action)
+                            else:
+                                return self._ensure_standard_result({
+                                    "success": False,
+                                    "error": "No annual report data available in SharedMemory",
+                                    "content": "",
+                                    "agent_id": self.agent_id,
+                                }, action)
+                        
                         self._report_progress("Starting data collection...", "searching")
                         data_points = []
                         sources = []
@@ -710,6 +750,27 @@ class GenericAgent(
                                 role_in_report=role_in_report,
                                 sibling_aspects=sibling_aspects,
                             )
+                        # [P0-5] Inject annual report document context
+                        document_context = task.get("document_context", "") or self._context.get("document_context", "")
+                        document_tables = task.get("document_tables", []) or self._context.get("document_tables", [])
+                        if document_context or document_tables:
+                            doc_injection = "\n\n## 年报原始数据（来自企业年报PDF解析）\n"
+                            if document_context:
+                                truncated = self._truncate_by_paragraph(document_context, max_chars=8000)
+                                doc_injection += f"\n### 年报章节原文\n{truncated}\n"
+                            if document_tables:
+                                doc_injection += "\n### 结构化财务数据\n"
+                                if isinstance(document_tables, dict):
+                                    for table_type, rows in document_tables.items():
+                                        if rows:
+                                            doc_injection += f"\n#### {table_type}\n"
+                                            for row in rows:
+                                                doc_injection += f"- {row}\n"
+                                elif isinstance(document_tables, list):
+                                    for table in document_tables[:5]:
+                                        doc_injection += f"\n{table}\n"
+                            doc_injection += "\n**重要**: 以上数据来自企业年报原文，优先使用这些数据进行分析，无需重新搜索。\n"
+                            prompt = doc_injection + prompt
                         # S-FIX-3: inject canonical authority data into prompt
                         if canonical_data:
                             _canonical_section = "\n".join([
@@ -4286,6 +4347,29 @@ class GenericAgent(
         
         return count
     
+    def _truncate_by_paragraph(self, text: str, max_chars: int = 8000) -> str:
+        if len(text) <= max_chars:
+            return text
+        paragraphs = text.split('\n\n')
+        result = []
+        current_len = 0
+        for para in paragraphs:
+            if current_len + len(para) + 2 > max_chars:
+                break
+            result.append(para)
+            current_len += len(para) + 2
+        if not result:
+            lines = text.split('\n')
+            for line in lines:
+                if current_len + len(line) + 1 > max_chars:
+                    break
+                result.append(line)
+                current_len += len(line) + 1
+        truncated = '\n\n'.join(result) if '\n\n' in text[:max_chars] else '\n'.join(result)
+        if len(truncated) < len(text):
+            truncated += "\n\n[... 内容因长度限制已截断，完整数据见结构化财务数据部分 ...]"
+        return truncated
+
     def _get_professional_role_prompt(self, aspect: str) -> str:
         from src.core.prompt_manager import get_profile_name_for_aspect
         from src.core.i18n import get_language_instruction
@@ -4580,7 +4664,16 @@ class GenericAgent(
                 parts.append("假设验证结果：")
                 for i, h in enumerate(causal_hypotheses, 1):
                     parts.append(f"假设{i}：验证|修正|推翻 | 依据：... | 修正内容：...(仅修正时填写)")
-            # B2.4: Inject cross-dimension claims (L3: stratified by epistemic level)
+            # B2.4: Inject cross-dimension claims (L3+: reasoning-driven injection)
+            _ASPECT_SPECULATIVE_POLICY = {
+                "投资建议": "cautious_use",
+                "投资策略": "cautious_use",
+                "战略研判": "cautious_use",
+                "战略意图": "cautious_use",
+                "战略意图推断": "cautious_use",
+                "前景展望": "cautious_use",
+            }
+            _aspect_policy = _ASPECT_SPECULATIVE_POLICY.get(aspect, "reference_only")
             if cross_dimension_claims:
                 _factual_claims = [c for c in cross_dimension_claims if c.get("epistemic_level") == "factual"]
                 _inferential_claims = [c for c in cross_dimension_claims if c.get("epistemic_level") == "inferential"]
@@ -4603,16 +4696,40 @@ class GenericAgent(
                             f" (置信度: {claim.get('confidence','?')},"
                             f" 前提: {claim.get('前提条件','未指定')})"
                         )
-                    parts.append("\n**要求**: 引用推断性结论时需注明'根据XX维度推断'。")
+                    parts.append("\n**推理要求**:")
+                    parts.append("  - 引用推断性结论时需注明'根据XX维度推断'")
+                    parts.append("  - 若推断前提在你掌握的数据中不成立，需指出并修正结论")
+                    parts.append("  - 尝试将多个推断性结论交叉验证，寻找因果链条")
                 if _speculative_claims:
-                    parts.append("\n### 其他维度推测性观点（仅供参考，不得作为结论依据）")
-                    for claim in _speculative_claims:
-                        parts.append(
-                            f"  - [{claim.get('source_aspect','?')}] {claim.get('statement','')}"
-                            f" (置信度: {claim.get('confidence','?')},"
-                            f" 证伪条件: {claim.get('falsification','未指定')})"
-                        )
-                    parts.append("\n**要求**: 推测性观点不得作为你的结论依据，仅可作为分析思路参考。如果你掌握可以证伪某推测性观点的数据，必须在分析中明确指出。")
+                    if _aspect_policy == "cautious_use":
+                        parts.append("\n### 其他维度前瞻性判断（可作为方向性参考，但需明确标注不确定性）")
+                        for claim in _speculative_claims:
+                            parts.append(
+                                f"  - [{claim.get('source_aspect','?')}] {claim.get('statement','')}"
+                                f" (置信度: {claim.get('confidence','?')},"
+                                f" 证伪条件: {claim.get('falsification','未指定')})"
+                            )
+                        parts.append("\n**推理要求**:")
+                        parts.append("  - 引用前瞻性判断时必须标注「前瞻性判断，置信度XX，证伪条件：XX」")
+                        parts.append("  - 若你掌握的数据可以证伪某前瞻性判断，必须明确指出")
+                        parts.append("  - 可基于前瞻性判断推导情景分析（乐观/中性/悲观），但需说明各情景的概率依据")
+                    else:
+                        parts.append("\n### 其他维度推测性观点（仅供参考，不得作为结论依据）")
+                        for claim in _speculative_claims:
+                            parts.append(
+                                f"  - [{claim.get('source_aspect','?')}] {claim.get('statement','')}"
+                                f" (置信度: {claim.get('confidence','?')},"
+                                f" 证伪条件: {claim.get('falsification','未指定')})"
+                            )
+                        parts.append("\n**推理要求**:")
+                        parts.append("  - 推测性观点不得作为你的结论依据，仅可作为分析思路参考")
+                        parts.append("  - 如果你掌握可以证伪某推测性观点的数据，必须在分析中明确指出")
+                        parts.append("  - 若推测性观点启发了你的分析方向，需说明启发路径")
+            # L3-E: Evidence chain requirement
+            parts.append("\n### 分析输出规范")
+            parts.append("  - 每个关键结论必须附带：支持证据 → 推理步骤 → 结论，标注每步的认知层级（事实/推断/前瞻）")
+            parts.append("  - 若结论基于多个来源交叉验证，注明交叉验证过程")
+            parts.append("  - 若存在反对证据，必须列出并解释为何仍得出该结论")
             # L3-D: Inject detected contradictions
             if conflict_entries:
                 parts.append("\n### 已检测到跨维度矛盾")
