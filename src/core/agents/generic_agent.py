@@ -653,6 +653,43 @@ class GenericAgent(
                                     _skey_cur = _spk["currency"]
                                     if _skey_cur == _target_cur or not _skey_cur:
                                         canonical_data[_k] = _v
+                        # B2.3: Read cross-dimension claims from SharedMemory
+                        cross_dimension_claims = []
+                        if self._shared_memory and hasattr(self._shared_memory, 'get_all_canonical'):
+                            _all_canon = self._shared_memory.get_all_canonical()
+                            for _ck, _cv in _all_canon.items():
+                                if _ck.startswith("claim:") and _cv.get("publisher") != aspect:
+                                    _claim_val = _cv.get("value", {})
+                                    if isinstance(_claim_val, dict) and _claim_val.get("statement"):
+                                        cross_dimension_claims.append(_claim_val)
+                            _conflict_entries = {k: v for k, v in _all_canon.items() if k.startswith("conflict:claim:")}
+                        # A2.1: Generate causal hypotheses before analysis
+                        causal_hypotheses = []
+                        if aggregated_data_points and len(aggregated_data_points) >= 5:
+                            try:
+                                _hyp_data = "\n".join([f"- {dp.get('title','')}: {(dp.get('content','') or '')[:200]}" for dp in aggregated_data_points[:5]])
+                                _hyp_claims = "\n".join([f"- [{c.get('source_aspect','?')}] {c.get('statement','')}" for c in (cross_dimension_claims or [])]) if cross_dimension_claims else '暂无'
+                                hypothesis_prompt = f"""基于以下数据，生成2-3个关于「{aspect}」的因果假设。
+每个假设必须：1) 可被数据验证或反驳 2) 涉及跨维度因果传导 3) 不与已知事实矛盾
+
+数据摘要（前5条）：
+{_hyp_data}
+
+其他维度已有发现：
+{_hyp_claims}
+
+输出格式（每行一个假设）：
+假设：[因果陈述] | 验证数据：[需要什么数据] | 传导：[影响哪些维度]"""
+
+                                hypothesis_result = await call_llm(
+                                    prompt=hypothesis_prompt,
+                                    system_prompt="你是一位因果推断专家。只输出假设，不要分析。"
+                                )
+                                if hypothesis_result.get("success") and hypothesis_result.get("content"):
+                                    causal_hypotheses = self._parse_causal_hypotheses(hypothesis_result["content"])
+                                    self._context["causal_hypotheses"] = causal_hypotheses
+                            except Exception as _hyp_err:
+                                logger.warning(f"GenericAgent {self.agent_id}: causal hypothesis generation failed: {_hyp_err}")
                         system_prompt = self._get_professional_role_prompt(aspect)
                         if aggregated_data_points:
                             prompt = self._build_analysis_prompt_with_data(
@@ -662,6 +699,9 @@ class GenericAgent(
                                 role_in_report=role_in_report,
                                 sibling_aspects=sibling_aspects,
                                 sub_aspects=self._context.get("sub_aspects"),
+                                cross_dimension_claims=cross_dimension_claims,
+                                causal_hypotheses=causal_hypotheses,
+                                conflict_entries=_conflict_entries if self._shared_memory and hasattr(self._shared_memory, 'get_all_canonical') else {},
                             )
                         else:
                             prompt = self._build_basic_research_prompt(
@@ -710,7 +750,62 @@ class GenericAgent(
                             if validated != result["content"]:
                                 logger.warning(f"GenericAgent {self.agent_id}: 分析路径日期验证修正了年份")
                                 result["content"] = validated
-                        
+
+                        # L4: Parse hypothesis verification results from analysis output
+                        if result.get("success") and result.get("content") and causal_hypotheses:
+                            try:
+                                _verified = self._parse_hypothesis_verification(result["content"], causal_hypotheses)
+                                for _vh in _verified:
+                                    await self._shared_memory.write_canonical(
+                                        metric=f"hypothesis:{aspect}:{_vh.get('id', '')}",
+                                        value=_vh,
+                                        caliber="llm_inference",
+                                        source=self.agent_id,
+                                        publisher=aspect,
+                                    )
+                            except Exception as _hyp_err:
+                                logger.warning(f"GenericAgent {self.agent_id}: hypothesis verification parse failed: {_hyp_err}")
+
+                        # B2.1: Write cross-dimension claims to SharedMemory
+                        if result.get("success") and result.get("content") and self._shared_memory:
+                            try:
+                                _claims = await self._extract_claims_from_analysis(result["content"], aspect)
+                                _caliber_map = {
+                                    "factual": "llm_inference_factual",
+                                    "inferential": "llm_inference",
+                                    "speculative": "llm_inference_speculative",
+                                }
+                                for _claim in _claims:
+                                    _caliber = _caliber_map.get(_claim.get("epistemic_level", "inferential"), "llm_inference")
+                                    # L5: Pre-write contradiction detection (agent layer)
+                                    if hasattr(self._shared_memory, 'get_all_canonical'):
+                                        _existing_claims = self._shared_memory.get_all_canonical()
+                                        for _ek, _ev in _existing_claims.items():
+                                            if _ek.startswith("claim:") and isinstance(_ev.get("value"), dict):
+                                                _contradiction = self._detect_claim_contradiction(_ev["value"], _claim)
+                                                if _contradiction:
+                                                    logger.warning(
+                                                        f"GenericAgent {self.agent_id}: CLAIM CONTRADICTION for "
+                                                        f"'{_ek}': {_contradiction}"
+                                                    )
+                                                    from src.core.orchestrator.aggregation.result_aggregator import ConflictRecord, ConflictResolution
+                                                    await self._shared_memory.write_canonical(
+                                                        metric=f"conflict:{_ek}",
+                                                        value={"contradiction": _contradiction, "claims": [_ev["value"].get("statement",""), _claim.get("statement","")]},
+                                                        caliber="llm_inference",
+                                                        source=self.agent_id,
+                                                        publisher=aspect,
+                                                    )
+                                    await self._shared_memory.write_canonical(
+                                        metric=f"claim:{aspect}:{_claim['id']}",
+                                        value=_claim,
+                                        caliber=_caliber,
+                                        source=self.agent_id,
+                                        publisher=aspect,
+                                    )
+                            except Exception as _claim_err:
+                                logger.warning(f"GenericAgent {self.agent_id}: claim extraction failed: {_claim_err}")
+
                         # Iterative deepening: detect knowledge gaps and supplement
                         if result.get("success") and result.get("content") and skill_registry:
                             gaps = self._detect_knowledge_gaps(result["content"])
@@ -737,6 +832,9 @@ class GenericAgent(
                                         role_in_report=role_in_report,
                                         sibling_aspects=sibling_aspects,
                                         sub_aspects=self._context.get("sub_aspects"),
+                                        cross_dimension_claims=cross_dimension_claims,
+                                        causal_hypotheses=causal_hypotheses,
+                                        conflict_entries=_conflict_entries if self._shared_memory and hasattr(self._shared_memory, 'get_all_canonical') else {},
                                     )
                                     revised = await call_llm(prompt=prompt2, system_prompt=system_prompt)
 
@@ -1472,6 +1570,208 @@ class GenericAgent(
                 result["category"] = _cat
             
         return result
+
+    async def _extract_claims_from_analysis(
+        self, analysis_content: str, aspect: str
+    ) -> List[Dict]:
+        """Extract structured claims from analysis output for cross-dimension sharing.
+        
+        L1: Each claim is annotated with epistemic_level (factual/inferential/speculative)
+        and falsification condition. Rule-based validation enforces consistency.
+        L1-C: Head-tail truncation preserves conclusion section.
+        L1-D: Dimension-level epistemic ceiling prevents misclassification.
+        """
+        if len(analysis_content) > 3000:
+            _truncated = analysis_content[:2500] + "\n\n...[中间省略]...\n\n" + analysis_content[-500:]
+        else:
+            _truncated = analysis_content
+
+        claim_prompt = f"""从以下「{aspect}」分析中提取核心结论（claim）。
+每个 claim 必须包含：
+1. statement：一句话结论
+2. confidence：HIGH/MEDIUM/LOW
+3. 前提条件：什么条件下此结论成立
+4. 跨维度影响：此结论会影响哪些其他维度
+5. epistemic_level：事实性(factual)/推断性(inferential)/推测性(speculative)
+   - factual：有直接数据支撑的事实陈述，如"2025年Q1市场份额为32%"
+   - inferential：基于事实的逻辑推断，有间接支撑，如"份额下降趋势暗示竞争加剧"
+   - speculative：推测性判断，缺乏直接数据支撑，如"企业可能通过并购寻求突破"
+6. falsification：什么条件下此结论会被推翻
+
+示例：
+[{{"statement":"2025年Q1市场份额为32%", "confidence":"HIGH", "前提条件":"数据来源可靠", "cross_impact":["竞争格局"], "epistemic_level":"factual", "falsification":"数据源修正时"}}]
+[{{"statement":"份额下降趋势暗示竞争加剧", "confidence":"MEDIUM", "前提条件":"份额数据准确", "cross_impact":["战略意图"], "epistemic_level":"inferential", "falsification":"若份额下降由行业整体萎缩导致而非竞争加剧"}}]
+[{{"statement":"企业可能通过并购寻求突破", "confidence":"LOW", "前提条件":"行业整合趋势持续", "cross_impact":["投资建议"], "epistemic_level":"speculative", "falsification":"若未来6个月无并购公告则推断不成立"}}]
+
+分析内容：
+{_truncated}
+
+输出JSON数组，最多5个claim。格式：
+[{{"statement":"...", "confidence":"HIGH/MEDIUM/LOW", "前提条件":"...", "cross_impact":["维度1"], "epistemic_level":"factual/inferential/speculative", "falsification":"..."}}]"""
+
+        result = await call_llm(
+            prompt=claim_prompt,
+            system_prompt="你只输出JSON数组，不要其他文字。"
+        )
+        if result.get("success") and result.get("content"):
+            try:
+                import json as _json
+                content = result["content"]
+                match = re.search(r'\[.*\]', content, re.DOTALL)
+                if match:
+                    claims = _json.loads(match.group())
+                    ASPECT_EPISTEMIC_CEILING = {
+                        "strategic_intent": "speculative",
+                        "战略意图": "speculative",
+                        "战略意图推断": "speculative",
+                        "Strategic Intent": "speculative",
+                    }
+                    _epistemic_order = {"factual": 0, "inferential": 1, "speculative": 2}
+                    _ceiling = ASPECT_EPISTEMIC_CEILING.get(aspect, None)
+                    _speculative_words = {"可能", "预计", "或许", "也许", "大概", "猜测", "推测", "预期"}
+                    for i, c in enumerate(claims):
+                        c["id"] = str(i)
+                        c["source_aspect"] = aspect
+                        if "epistemic_level" not in c:
+                            c["epistemic_level"] = "inferential"
+                        _level = c.get("epistemic_level", "inferential")
+                        if _level not in _epistemic_order:
+                            c["epistemic_level"] = "inferential"
+                            _level = "inferential"
+                        if c.get("confidence") == "LOW" and c.get("前提条件") and _level == "factual":
+                            c["epistemic_level"] = "inferential"
+                            _level = "inferential"
+                        _stmt = c.get("statement", "")
+                        if _level == "factual" and any(w in _stmt for w in _speculative_words):
+                            c["epistemic_level"] = "inferential"
+                            _level = "inferential"
+                        if _ceiling and _epistemic_order.get(_level, 1) < _epistemic_order.get(_ceiling, 1):
+                            c["epistemic_level"] = _ceiling
+                        c.setdefault("falsification", "未指定证伪条件")
+                    return claims[:5]
+            except Exception:
+                pass
+        return []
+
+    def _parse_causal_hypotheses(self, content: str) -> List[Dict]:
+        """Parse causal hypotheses from LLM output.
+
+        Expected format per line: 假设：[因果陈述] | 验证数据：[需要什么数据] | 传导：[影响哪些维度]
+        """
+        hypotheses = []
+        for line in content.strip().split("\n"):
+            line = line.strip()
+            if not line or "|" not in line:
+                continue
+            parts = line.split("|")
+            h = {}
+            for part in parts:
+                part = part.strip()
+                if part.startswith("假设：") or part.startswith("假设:"):
+                    h["statement"] = part.split("：", 1)[-1].split(":", 1)[-1].strip()
+                elif part.startswith("验证数据：") or part.startswith("验证数据:"):
+                    h["verification_data"] = part.split("：", 1)[-1].split(":", 1)[-1].strip()
+                elif part.startswith("传导：") or part.startswith("传导:"):
+                    h["transmission"] = part.split("：", 1)[-1].split(":", 1)[-1].strip()
+            if h.get("statement"):
+                h["status"] = "unverified"
+                hypotheses.append(h)
+        return hypotheses[:3]
+
+    def _parse_hypothesis_verification(self, content: str, hypotheses: List[Dict]) -> List[Dict]:
+        """L4: Parse hypothesis verification results from analysis output.
+        
+        Expected format (pipe-delimited, same pattern as _parse_causal_hypotheses):
+        假设验证结果：
+        假设1：验证 | 依据：数据支撑...
+        假设2：修正 | 依据：部分成立 | 修正内容：...
+        假设3：推翻 | 依据：与数据矛盾
+        """
+        import hashlib as _hashlib
+        verified = []
+        verification_section = ""
+        
+        markers = ["假设验证结果", "假设验证结果：", "验证结果"]
+        for marker in markers:
+            if marker in content:
+                idx = content.index(marker)
+                verification_section = content[idx:]
+                break
+        
+        if not verification_section:
+            for h in hypotheses:
+                h_copy = dict(h)
+                h_copy["status"] = "unverified"
+                h_copy["id"] = _hashlib.md5(h.get("statement", "").encode()).hexdigest()[:8]
+                verified.append(h_copy)
+            return verified
+        
+        for i, h in enumerate(hypotheses):
+            h_copy = dict(h)
+            h_copy["id"] = _hashlib.md5(h.get("statement", "").encode()).hexdigest()[:8]
+            
+            pattern = f"假设{i+1}"
+            if pattern in verification_section:
+                matching_lines = [line for line in verification_section.split("\n")
+                                  if pattern in line and "|" in line]
+                if matching_lines:
+                    line = matching_lines[-1]
+                    line_parts = line.split("|")
+                    judgment_part = line_parts[0].strip()
+                    
+                    if any(kw in judgment_part for kw in ["验证", "证实", "verified", "confirmed"]):
+                        h_copy["status"] = "verified"
+                    elif any(kw in judgment_part for kw in ["修正", "修订", "revised", "modified", "部分"]):
+                        h_copy["status"] = "revised"
+                        if len(line_parts) > 2:
+                            h_copy["revision_note"] = line_parts[-1].strip().replace("修正内容：", "").replace("修正内容:", "")
+                    elif any(kw in judgment_part for kw in ["推翻", "否定", "refuted", "rejected", "不成立"]):
+                        h_copy["status"] = "refuted"
+                    else:
+                        h_copy["status"] = "unverified"
+                else:
+                    h_copy["status"] = "unverified"
+            else:
+                h_copy["status"] = "unverified"
+            
+            verified.append(h_copy)
+        return verified
+
+    def _detect_claim_contradiction(self, claim_a: Dict, claim_b: Dict) -> Optional[str]:
+        """L5: Detect direction contradiction between two dict-type claims.
+        
+        Uses heuristic keyword rules with 2-gram subject matching.
+        No LLM call to avoid latency. Only detects opposite-direction contradictions.
+        """
+        stmt_a = claim_a.get("statement", "")
+        stmt_b = claim_b.get("statement", "")
+        if not stmt_a or not stmt_b:
+            return None
+        
+        positive = {"增长", "上升", "扩张", "改善", "提升", "增加", "上涨", "回暖"}
+        negative = {"下降", "萎缩", "收缩", "恶化", "下滑", "减少", "下跌", "承压"}
+        a_pos = any(w in stmt_a for w in positive)
+        a_neg = any(w in stmt_a for w in negative)
+        b_pos = any(w in stmt_b for w in positive)
+        b_neg = any(w in stmt_b for w in negative)
+        
+        if (a_pos and b_neg) or (a_neg and b_pos):
+            def _bigrams(text):
+                return {text[i:i+2] for i in range(len(text)-1)}
+            bigrams_a = _bigrams(stmt_a)
+            bigrams_b = _bigrams(stmt_b)
+            dir_bigrams = set()
+            for w in positive | negative:
+                for i in range(len(w)-1):
+                    dir_bigrams.add(w[i:i+2])
+            content_a = bigrams_a - dir_bigrams
+            content_b = bigrams_b - dir_bigrams
+            if content_a and content_b:
+                overlap = len(content_a & content_b) / max(len(content_a), 1)
+                if overlap > 0.2:
+                    return f"方向矛盾: '{stmt_a[:50]}' vs '{stmt_b[:50]}'"
+        
+        return None
 
     def _enforce_canonical_values(self, content: str, canonical_data: Dict) -> str:
         """
@@ -2334,6 +2634,7 @@ class GenericAgent(
             iteration = 0
             best_quality_score = 0.0
             stagnation_count = 0
+            seen_urls = set()
             
             # 持续搜索直到满足条件
             while True:
@@ -2424,12 +2725,21 @@ class GenericAgent(
                                     results_to_store = enriched_results
                                     logger.info(f"GenericAgent {self.agent_id}: 爬取了 {len(enriched_results)} 个URL的完整内容")
                             
+                            unique_results = []
+                            for r in results_to_store:
+                                url = r.get("href", "") or r.get("url", "")
+                                if url and url in seen_urls:
+                                    continue
+                                if url:
+                                    seen_urls.add(url)
+                                unique_results.append(r)
+
                             all_results["searches"].append({
                                 "query": query,
-                                "results": results_to_store,
+                                "results": unique_results,
                                 "quality_stats": quality_stats,
                             })
-                            all_results["total_sources"] += len(results_to_store)
+                            all_results["total_sources"] = len(seen_urls)
                             
                     except asyncio.TimeoutError:
                         logger.warning(f"GenericAgent {self.agent_id}: 搜索 '{query}' 超时")
@@ -3322,8 +3632,8 @@ class GenericAgent(
                 expertise_str = expertise[0] if isinstance(expertise, list) else expertise
                 queries.append(f"{search_topic} {expertise_str} {current_year}")
         
-        # v3.4 R2: Hardcoded logic - execute when data_focus is generic, irrelevant, or queries insufficient
-        if is_generic_data_focus or is_data_focus_irrelevant_to_aspect or not queries:
+        # v3.4 R2: Hardcoded logic - only fallback when no queries generated
+        if not queries:
             if aspect:
                 aspect_lower = aspect.lower()
                 
@@ -3714,14 +4024,6 @@ class GenericAgent(
         if query.isdigit() or all(not c.isalnum() for c in query):
             return False
         
-        # 禁止词汇检查（避免搜索现成报告）
-        forbidden_words = [
-            "报告", "分析", "研究", "预测", "趋势分析",
-            "report", "analysis", "research", "forecast"
-        ]
-        if any(fw in query.lower() for fw in forbidden_words):
-            return False
-        
         # 重复检查
         if existing_queries and query in existing_queries:
             return False
@@ -3811,12 +4113,18 @@ class GenericAgent(
         
         # 构建系统提示
         system_prompt = f"""你是一位{role}，擅长：{', '.join(expertise)}。
-你的任务是生成搜索原始数据的查询词，用于收集：{', '.join(data_focus)}。
+你的任务是生成精准的搜索查询词，用于收集：{', '.join(data_focus)}。
 
-**核心原则**：
-1. 搜索原始数据（新闻、公告、统计数据、政策文件），而非现成报告
-2. 禁止使用：报告、分析、研究、预测、趋势分析
-3. 应该搜索：销量、产量、数据、统计、新闻、公告、政策、融资、企业动态
+**查询设计原则**：
+1. 精准优于泛泛：
+   - 差：新能源汽车 数据
+   - 好：新能源汽车 渗透率 2025 乘联会
+2. 指定来源类型提高精度：
+   - 新能源汽车 销量 中汽协 2025
+   - 比亚迪 年报 营收 2024
+   - 新能源汽车 券商研报 市场份额 2025
+3. 优先搜索原始数据源（新闻、公告、统计），也搜索高质量报告（券商研报、咨询报告、行业协会报告）
+4. 中英文分别设计查询
 
 **输出格式**：每行一个查询词，不要编号，不要说明文字。"""
 
@@ -3862,7 +4170,7 @@ class GenericAgent(
     
     def _evaluate_data_quality(self, results: Dict[str, Any]) -> float:
         """
-        评估数据质量分数
+        评估数据质量分数（权威度加权平均）
         
         Args:
             results: 搜索结果
@@ -3870,19 +4178,23 @@ class GenericAgent(
         Returns:
             质量分数 (0-100)
         """
-        if not results.get("searches"):
-            return 0.0
-        
-        total_score = 0.0
-        total_results = 0
-        
-        for search in results["searches"]:
+        CREDIBILITY_WEIGHT = {
+            "tier1_authority": 4.0,
+            "tier2_professional": 3.0,
+            "tier3_reputable": 2.0,
+            "tier4_general": 1.0,
+            "tier5_low_quality": 0.2,
+        }
+        weighted_sum = 0.0
+        weight_sum = 0.0
+        for search in results.get("searches", []):
             for result in search.get("results", []):
                 quality_score = result.get("quality_score", 30)
-                total_score += quality_score
-                total_results += 1
-        
-        return total_score / total_results if total_results > 0 else 0.0
+                credibility = result.get("credibility", "tier4_general")
+                weight = CREDIBILITY_WEIGHT.get(credibility, 1.0)
+                weighted_sum += quality_score * weight
+                weight_sum += weight
+        return weighted_sum / weight_sum if weight_sum > 0 else 0.0
     
     def _count_high_quality_sources(
         self,
@@ -4119,6 +4431,9 @@ class GenericAgent(
         role_in_report: str = "",
         sibling_aspects: Optional[List[str]] = None,
         sub_aspects: Optional[List[str]] = None,
+        cross_dimension_claims: Optional[List[Dict]] = None,
+        causal_hypotheses: Optional[List[Dict]] = None,
+        conflict_entries: Optional[Dict[str, Dict]] = None,
     ) -> str:
         """Build analysis prompt using pre-collected data points.
         
@@ -4180,7 +4495,7 @@ class GenericAgent(
         lang_inst = get_language_instruction()
         sibling_str = "、".join(sibling_aspects) if sibling_aspects else ""
         framework_context = ""
-        if core_question or role_in_report or sibling_str or sub_aspects:
+        if core_question or role_in_report or sibling_str or sub_aspects or causal_hypotheses or cross_dimension_claims:
             parts = ["\n\n## 研究框架"]
             if core_question:
                 parts.append(f"核心问题：{core_question}")
@@ -4192,6 +4507,60 @@ class GenericAgent(
                 parts.append("子主题（必须按此结构输出分析）：")
                 for idx, sa in enumerate(sub_aspects, 1):
                     parts.append(f"  {idx}. {sa}")
+            # A2.2: Inject causal hypotheses into analysis prompt
+            if causal_hypotheses:
+                parts.append("\n### 因果假设（必须验证或修正）")
+                for i, h in enumerate(causal_hypotheses, 1):
+                    parts.append(f"  {i}. {h.get('statement','')}")
+                    parts.append(f"     验证数据需求：{h.get('verification_data','')}")
+                    parts.append(f"     跨维度传导：{h.get('transmission','')}")
+                parts.append("\n**要求**：你的分析必须对每个假设给出「验证」「修正」或「推翻」的判断，并在分析末尾按以下格式输出验证结果：")
+                parts.append("假设验证结果：")
+                for i, h in enumerate(causal_hypotheses, 1):
+                    parts.append(f"假设{i}：验证|修正|推翻 | 依据：... | 修正内容：...(仅修正时填写)")
+            # B2.4: Inject cross-dimension claims (L3: stratified by epistemic level)
+            if cross_dimension_claims:
+                _factual_claims = [c for c in cross_dimension_claims if c.get("epistemic_level") == "factual"]
+                _inferential_claims = [c for c in cross_dimension_claims if c.get("epistemic_level") == "inferential"]
+                _speculative_claims = [c for c in cross_dimension_claims if c.get("epistemic_level") == "speculative"]
+                _no_level_claims = [c for c in cross_dimension_claims if c.get("epistemic_level") not in ("factual", "inferential", "speculative")]
+                if _no_level_claims:
+                    _inferential_claims.extend(_no_level_claims)
+                if _factual_claims:
+                    parts.append("\n### 其他维度已确认发现（可直接引用）")
+                    for claim in _factual_claims:
+                        parts.append(
+                            f"  - [{claim.get('source_aspect','?')}] {claim.get('statement','')}"
+                            f" (置信度: {claim.get('confidence','?')})"
+                        )
+                if _inferential_claims:
+                    parts.append("\n### 其他维度推断结论（需验证后引用）")
+                    for claim in _inferential_claims:
+                        parts.append(
+                            f"  - [{claim.get('source_aspect','?')}] {claim.get('statement','')}"
+                            f" (置信度: {claim.get('confidence','?')},"
+                            f" 前提: {claim.get('前提条件','未指定')})"
+                        )
+                    parts.append("\n**要求**: 引用推断性结论时需注明'根据XX维度推断'。")
+                if _speculative_claims:
+                    parts.append("\n### 其他维度推测性观点（仅供参考，不得作为结论依据）")
+                    for claim in _speculative_claims:
+                        parts.append(
+                            f"  - [{claim.get('source_aspect','?')}] {claim.get('statement','')}"
+                            f" (置信度: {claim.get('confidence','?')},"
+                            f" 证伪条件: {claim.get('falsification','未指定')})"
+                        )
+                    parts.append("\n**要求**: 推测性观点不得作为你的结论依据，仅可作为分析思路参考。如果你掌握可以证伪某推测性观点的数据，必须在分析中明确指出。")
+            # L3-D: Inject detected contradictions
+            if conflict_entries:
+                parts.append("\n### 已检测到跨维度矛盾")
+                for _ck, _cv in conflict_entries.items():
+                    _conf_val = _cv.get("value", {})
+                    parts.append(
+                        f"  - 矛盾类型: {_conf_val.get('contradiction', '未知')}"
+                        f" | 涉及结论: {_conf_val.get('claims', [])}"
+                    )
+                parts.append("\n**要求**: 如果你的分析与上述矛盾相关，必须给出你的判断和依据。")
             framework_context = "\n".join(parts)
 
         if aspect:

@@ -369,35 +369,36 @@ class TestE2EDataConflictResolution:
         assert entry["value"] == "技术领先", "search_result 应优先于 llm_inference"
 
     @pytest.mark.asyncio
-    async def test_same_priority_allows_update(self):
+    async def test_same_priority_same_source_allows_update(self):
         from src.core.communication import SharedMemory
 
         sm = SharedMemory()
 
         await sm.write_canonical("营收", 6800.28, caliber="structured_source", source="akshare_q2", publisher="agent_0")
-        await sm.write_canonical("营收", 7200.50, caliber="structured_source", source="akshare_q3", publisher="agent_0")
+        await sm.write_canonical("营收", 7200.50, caliber="structured_source", source="akshare_q2", publisher="agent_0")
         entry = await sm.get_canonical("营收")
-        assert entry["value"] == 7200.50, "同优先级应允许更新（取最新值）"
+        assert entry["value"] == 7200.50, "同优先级同source应允许更新"
 
     @pytest.mark.asyncio
-    async def test_non_numeric_value_no_crash(self):
+    async def test_non_numeric_value_same_caliber_different_source_blocked(self):
         from src.core.communication import SharedMemory
 
         sm = SharedMemory()
         await sm.write_canonical("竞争优势", "技术领先", caliber="search_result", source="web", publisher="a0")
         result = await sm.write_canonical("竞争优势", "成本优势", caliber="search_result", source="web2", publisher="a1")
         entry = await sm.get_canonical("竞争优势")
-        assert entry["value"] == "成本优势"
+        assert entry["value"] == "技术领先"
+        assert result is not None
 
     @pytest.mark.asyncio
-    async def test_numeric_conflict_detection(self):
+    async def test_numeric_same_caliber_different_source_blocked(self):
         from src.core.communication import SharedMemory
 
         sm = SharedMemory()
         await sm.write_canonical("营收", 6800.28, caliber="search_result", source="web1", publisher="a0")
-        await sm.write_canonical("营收", 130.0, caliber="search_result", source="web2", publisher="a1")
+        result = await sm.write_canonical("营收", 130.0, caliber="search_result", source="web2", publisher="a1")
         entry = await sm.get_canonical("营收")
-        assert entry["value"] == 130.0, "同优先级允许覆盖"
+        assert entry["value"] == 6800.28, "同caliber不同source不覆盖"
 
 
 # ============================================================

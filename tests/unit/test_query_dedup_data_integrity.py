@@ -607,11 +607,21 @@ class TestWriteCanonicalPriorityE2E:
         assert entry["value"] == 6800.28
 
     @pytest.mark.asyncio
-    async def test_same_priority_allows_update(self):
+    async def test_same_priority_same_caliber_different_source_blocked(self):
         from src.core.communication import SharedMemory
         sm = SharedMemory()
         await sm.write_canonical("营收", 6800.0, caliber="search_result", source="web1", publisher="agent_0")
         conflict = await sm.write_canonical("营收", 6420.0, caliber="search_result", source="web2", publisher="agent_1")
+        entry = await sm.get_canonical("营收")
+        assert entry["value"] == 6800.0
+        assert conflict is not None
+
+    @pytest.mark.asyncio
+    async def test_same_priority_same_caliber_same_source_allowed(self):
+        from src.core.communication import SharedMemory
+        sm = SharedMemory()
+        await sm.write_canonical("营收", 6800.0, caliber="search_result", source="web1", publisher="agent_0")
+        conflict = await sm.write_canonical("营收", 6420.0, caliber="search_result", source="web1", publisher="agent_0")
         entry = await sm.get_canonical("营收")
         assert entry["value"] == 6420.0
 

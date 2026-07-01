@@ -117,7 +117,9 @@ class MessageBus:
 SOURCE_PRIORITY = {
     "structured_source": 100,
     "search_result": 50,
+    "llm_inference_factual": 15,
     "llm_inference": 10,
+    "llm_inference_speculative": 5,
 }
 
 
@@ -227,12 +229,40 @@ class SharedMemory:
             if existing:
                 existing_priority = SOURCE_PRIORITY.get(existing.get("caliber", ""), 0)
                 new_priority = SOURCE_PRIORITY.get(caliber, 0)
-                if new_priority <= existing_priority and new_priority != existing_priority:
-                    if conflict:
-                        logger.info(f"SharedMemory: canonical '{metric}' conflict - keeping higher-priority source "
-                                    f"({existing.get('caliber', '?')}={existing['value']} vs {caliber}={value})")
-                        conflict = None
-                    return conflict
+                if new_priority <= existing_priority:
+                    if new_priority != existing_priority:
+                        if conflict:
+                            logger.info(f"SharedMemory: canonical '{metric}' conflict - keeping higher-priority source "
+                                        f"({existing.get('caliber', '?')}={existing['value']} vs {caliber}={value})")
+                            conflict = None
+                        return conflict
+                    else:
+                        if source == existing.get("source", ""):
+                            pass
+                        elif caliber == existing.get("caliber", ""):
+                            logger.info(
+                                f"SharedMemory: canonical '{metric}' same-caliber write blocked "
+                                f"({caliber}, keeping existing from {existing.get('source','')})"
+                            )
+                            if not conflict:
+                                conflict = ConflictRecord(
+                                    key=metric,
+                                    values=[existing["value"], value],
+                                    sources=[existing.get("source", ""), source],
+                                    resolution=ConflictResolution.MANUAL,
+                                    resolved_value=None,
+                                )
+                            return conflict
+                        else:
+                            if not conflict:
+                                conflict = ConflictRecord(
+                                    key=metric,
+                                    values=[existing["value"], value],
+                                    sources=[existing.get("source", ""), source],
+                                    resolution=ConflictResolution.MANUAL,
+                                    resolved_value=None,
+                                )
+                            return conflict
             self._data[key] = {
                 "value": value, "caliber": caliber, "source": source,
                 "publisher": publisher,
