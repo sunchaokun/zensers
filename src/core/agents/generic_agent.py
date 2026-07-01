@@ -89,30 +89,30 @@ COGNITIVE_STRATEGY = {
     "fact_driven": {
         "L1": {"dimension_ceiling": "inferential", "speculative_word_downgrade": "strict", "confidence_threshold": {"factual": "HIGH"}},
         "L2": {"caliber_floor_for_citation": "llm_inference_factual", "same_caliber_resolution": "newer_timestamp", "speculative_write_policy": "never"},
-        "L3": {"speculative_policy": "reference_only", "reasoning_mode": "cross_validation", "inferential_instruction": "Verify with data; flag unsupported claims", "falsification_requirement": "all_inferential", "evidence_chain_template": "Data → Finding → Confirmation", "cross_dimension_instruction": "Cross-validate with other factual dimensions"},
-        "L4": {"hypothesis_type": "Descriptive", "hypothesis_count": 0, "hypothesis_template": "【Data Observation H1】 → 【Supporting Evidence】→ 【Confirmed/Disconfirmed】→ 【Finding】", "counter_hypothesis_required": False, "agent_hypothesis_count": 0, "verification_focus": "Data accuracy", "output_suffix": "数据验证结果："},
-        "L5": {"contradiction_resolution": "Data conflict resolution", "contradiction_instruction": "两项事实性主张冲突，请判断哪个数据源更可信并说明理由。", "auto_resolve_threshold": 0.8, "escalation_action": "Flag for human review"},
+        "L3": {"speculative_policy": "reference_only", "reasoning_mode": "cross_validation", "inferential_instruction": "Verify with data; flag unsupported claims", "falsification_requirement": "all_inferential", "evidence_chain_template": "数据 → 发现 → 确认", "cross_dimension_instruction": "Cross-validate with other factual dimensions", "insight_instruction": "在数据验证之外，主动寻找数据中隐含的非常规模式或反直觉发现，这些洞察往往比数据本身更有价值"},
+        "L4": {"hypothesis_type": "描述性", "hypothesis_count": 0, "hypothesis_template": "【数据观察H1】 → 【支持证据】→ 【确认/否定】→ 【发现】", "counter_hypothesis_required": False, "agent_hypothesis_count": 0, "verification_focus": "Data accuracy", "output_suffix": "数据验证结果"},
+        "L5": {"contradiction_resolution": "Data conflict resolution", "contradiction_instruction": "两项事实性主张冲突，请：(1)判断哪个数据源更可信并说明理由 (2)解释矛盾产生的可能原因（数据口径差异、统计时间窗口不同、样本偏差等）(3)说明该矛盾对本维度结论的影响程度", "auto_resolve_threshold": 0.8, "escalation_action": "Flag for human review"},
     },
     "inference_driven": {
         "L1": {"dimension_ceiling": "speculative", "speculative_word_downgrade": "moderate", "confidence_threshold": {"factual": "MEDIUM"}},
         "L2": {"caliber_floor_for_citation": "llm_inference_speculative", "same_caliber_resolution": "higher_source_count", "speculative_write_policy": "with_uncertainty_tag"},
-        "L3": {"speculative_policy": "cautious_use", "reasoning_mode": "causal_chain", "inferential_instruction": "Build causal chain; check premises", "falsification_requirement": "speculative_only", "evidence_chain_template": "Premise → Reasoning → Conclusion", "cross_dimension_instruction": "Trace causal transmission from other dimensions"},
-        "L4": {"hypothesis_type": "Causal", "hypothesis_count": (3, 5), "hypothesis_template": "【Causal Hypothesis H1】 → 【Supporting Evidence】→ 【Confirmed/Revised/Refuted】→ 【Conclusion】", "counter_hypothesis_required": True, "agent_hypothesis_count": 2, "verification_focus": "Logic completeness", "output_suffix": "假设验证结果："},
-        "L5": {"contradiction_resolution": "Premise re-examination", "contradiction_instruction": "两项结论冲突，请追溯哪个前提或推理步骤出现了分歧。", "auto_resolve_threshold": 0.6, "escalation_action": "Inject as reasoning challenge"},
+        "L3": {"speculative_policy": "cautious_use", "reasoning_mode": "causal_chain", "inferential_instruction": "Build causal chain; check premises", "falsification_requirement": "speculative_only", "evidence_chain_template": "前提 → 推理 → 结论", "cross_dimension_instruction": "Trace causal transmission from other dimensions", "insight_instruction": "在假设验证之外，关注假设之间的关联和涌现模式——多个假设的交叉验证可能揭示比单个假设更深层的关系"},
+        "L4": {"hypothesis_type": "因果性", "hypothesis_count": (3, 5), "hypothesis_template": "【因果假设H1】 → 【支持证据】→ 【确认/修正/推翻】→ 【结论】", "counter_hypothesis_required": True, "agent_hypothesis_count": 2, "verification_focus": "Logic completeness", "output_suffix": "假设验证结果"},
+        "L5": {"contradiction_resolution": "Premise re-examination", "contradiction_instruction": "两项结论冲突，请追溯哪个前提或推理步骤出现了分歧，并分析：(1)分歧前提的具体内容 (2)各前提的支撑证据强度 (3)修正前提后结论如何变化", "auto_resolve_threshold": 0.6, "escalation_action": "Inject as reasoning challenge"},
     },
     "forward_looking": {
         "L1": {"dimension_ceiling": None, "speculative_word_downgrade": "relaxed", "confidence_threshold": {"speculative": "LOW"}},
         "L2": {"caliber_floor_for_citation": "llm_inference_speculative", "same_caliber_resolution": "wider_coverage", "speculative_write_policy": "with_falsification_condition"},
-        "L3": {"speculative_policy": "open_use", "reasoning_mode": "scenario_analysis", "inferential_instruction": "Map to scenarios; assign probabilities", "falsification_requirement": "all_claims", "evidence_chain_template": "Signal → Scenario → Probability", "cross_dimension_instruction": "Check consistency with other forward-looking claims"},
-        "L4": {"hypothesis_type": "Predictive", "hypothesis_count": (2, 3), "hypothesis_template": "【Predictive Hypothesis H1】 → 【Supporting Signals】→ 【Probability Assessment】→ 【Scenario】", "counter_hypothesis_required": True, "agent_hypothesis_count": 1, "verification_focus": "Falsification conditions", "output_suffix": "前瞻验证结果："},
-        "L5": {"contradiction_resolution": "Scenario reconciliation", "contradiction_instruction": "两项预测冲突，请分析在什么条件下各自成立，并给出情景分析。", "auto_resolve_threshold": 0.4, "escalation_action": "Present both scenarios"},
+        "L3": {"speculative_policy": "open_use", "reasoning_mode": "scenario_analysis", "inferential_instruction": "Map to scenarios; assign probabilities", "falsification_requirement": "all_claims", "evidence_chain_template": "信号 → 情景 → 概率", "cross_dimension_instruction": "Check consistency with other forward-looking claims", "insight_instruction": "在情景推演之外，关注不同情景之间的转折信号——什么条件变化会导致从一种情景切换到另一种，这些转折点往往是最有价值的洞察"},
+        "L4": {"hypothesis_type": "预测性", "hypothesis_count": (2, 3), "hypothesis_template": "【预测性假设H1】 → 【支持信号】→ 【概率评估】→ 【情景】", "counter_hypothesis_required": True, "agent_hypothesis_count": 1, "verification_focus": "Falsification conditions", "output_suffix": "前瞻验证结果"},
+        "L5": {"contradiction_resolution": "Scenario reconciliation", "contradiction_instruction": "两项预测冲突，请分析在什么条件下各自成立，并给出情景分析：(1)各预测成立的条件集 (2)当前数据更支持哪个条件集 (3)两个预测是否可以在不同时间尺度上同时成立", "auto_resolve_threshold": 0.4, "escalation_action": "Present both scenarios"},
     },
     "assessment_driven": {
-        "L1": {"dimension_ceiling": "inferential", "speculative_word_downgrade": "strict", "confidence_threshold": {"factual": "HIGH", "inferential": "HIGH"}},
+        "L1": {"dimension_ceiling": "inferential", "speculative_word_downgrade": "moderate", "confidence_threshold": {"factual": "HIGH", "inferential": "HIGH"}},
         "L2": {"caliber_floor_for_citation": "llm_inference_factual", "same_caliber_resolution": "more_precise_data", "speculative_write_policy": "with_confidence_interval"},
-        "L3": {"speculative_policy": "reference_only", "reasoning_mode": "sensitivity_analysis", "inferential_instruction": "Quantify impact; define assumptions", "falsification_requirement": "all_key_assumptions", "evidence_chain_template": "Assumption → Model → Range", "cross_dimension_instruction": "Verify assumptions against factual dimension data"},
-        "L4": {"hypothesis_type": "Conditional", "hypothesis_count": (2, 3), "hypothesis_template": "【Conditional Hypothesis H1】 → 【Assumption Base】→ 【Sensitivity Test】→ 【Value Range】", "counter_hypothesis_required": True, "agent_hypothesis_count": 1, "verification_focus": "Assumption sensitivity", "output_suffix": "假设敏感性检验："},
-        "L5": {"contradiction_resolution": "Assumption divergence", "contradiction_instruction": "两项评估冲突，请识别哪个假设差异导致了分歧，并量化影响。", "auto_resolve_threshold": 0.7, "escalation_action": "Show sensitivity of each assumption"},
+        "L3": {"speculative_policy": "cautious_use", "reasoning_mode": "sensitivity_analysis", "inferential_instruction": "Quantify impact; define assumptions", "falsification_requirement": "all_key_assumptions", "evidence_chain_template": "风险因素 → 影响路径 → 量化评估", "cross_dimension_instruction": "Verify assumptions against factual dimension data", "insight_instruction": "不要只列出风险清单——深入分析每个风险的作用机制和传导路径，识别风险间的关联和级联效应，这些系统性风险才是最关键的洞察"},
+        "L4": {"hypothesis_type": "条件性", "hypothesis_count": (1, 2), "hypothesis_template": "【条件性假设H1】 → 【假设基础】→ 【敏感性测试】→ 【影响范围】", "counter_hypothesis_required": False, "agent_hypothesis_count": 0, "verification_focus": "Assumption sensitivity", "output_suffix": "假设敏感性检验"},
+        "L5": {"contradiction_resolution": "Assumption divergence", "contradiction_instruction": "两项评估冲突，请识别导致分歧的假设差异，并：(1)明确列出两个评估各自依赖的关键假设 (2)用你掌握的数据检验这些假设的合理性 (3)给出基于更可靠假设的修正评估", "auto_resolve_threshold": 0.7, "escalation_action": "Show sensitivity of each assumption"},
     },
 }
 
@@ -4912,20 +4912,13 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
                     if h.get('counter_hypothesis'):
                         parts.append(f"     反面假设：{h['counter_hypothesis']}")
                 parts.append("\n**假设驱动分析要求**：")
-                parts.append("  1. 对每个给定假设，按以下格式逐一验证：")
-                parts.append(f"     {_l4['hypothesis_template']}")
+                parts.append("  1. 对每个给定假设进行验证，给出支持/反对证据和验证结果（确认/修正/推翻）")
                 if _l4['agent_hypothesis_count'] > 0:
-                    parts.append(f"  2. 基于你掌握的数据，你必须额外提出至少{_l4['agent_hypothesis_count']}个新的{_l4['hypothesis_type']}假设，同样按上述格式验证")
+                    parts.append(f"  2. 基于你掌握的数据，额外提出至少{_l4['agent_hypothesis_count']}个新的{_l4['hypothesis_type']}假设并验证")
                 if _l4['counter_hypothesis_required']:
-                    parts.append("  3. 对每个关键假设（包括你提出的），评估其反面假设成立的可能性")
+                    parts.append("  3. 对关键假设评估其反面假设成立的可能性")
                 parts.append("  4. 最终结论必须基于假设验证结果推导，而非直接下判断")
-                parts.append("\n**输出格式**：在分析末尾按以下格式输出验证结果：")
-                parts.append(_l4['output_suffix'])
-                for i, h in enumerate(causal_hypotheses, 1):
-                    parts.append(f"假设{i}：验证|修正|推翻 | 依据：... | 修正内容：...(仅修正时填写) | 反面假设可能性：高/中/低")
-                if _l4['agent_hypothesis_count'] > 0:
-                    for j in range(1, _l4['agent_hypothesis_count'] + 1):
-                        parts.append(f"假设{len(causal_hypotheses)+j}(新)：[陈述] | 验证|修正|推翻 | 依据：... | 反面假设可能性：高/中/低")
+                parts.append(f"\n**输出格式**：在分析末尾标注「{_l4['output_suffix']}」，列出每个假设的验证结论")
             # B2.4: Inject cross-dimension claims (L3+: reasoning-driven injection)
             if cross_dimension_claims:
                 _factual_claims = [c for c in cross_dimension_claims if c.get("epistemic_level") == "factual"]
@@ -4997,6 +4990,9 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
             parts.append(f"  - 每个关键结论必须附带：{_ect}，标注每步的认知层级（事实/推断/前瞻）")
             parts.append("  - 若结论基于多个来源交叉验证，注明交叉验证过程")
             parts.append("  - 若存在反对证据，必须列出并解释为何仍得出该结论")
+            _insight_inst = _cog_strategy["L3"].get("insight_instruction")
+            if _insight_inst:
+                parts.append(f"  - 洞察发现：{_insight_inst}")
             # L3-D: Inject detected contradictions
             if conflict_entries:
                 parts.append("\n### 已检测到跨维度矛盾")
