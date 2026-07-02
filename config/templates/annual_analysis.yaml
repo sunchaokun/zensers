@@ -4,7 +4,7 @@
 id: annual_analysis_standard
 name: Annual Report Analysis
 description: Comprehensive analysis of listed company annual performance, including in-depth financial review, strategic assessment, and governance evaluation
-output_type: annual_analysis
+output_type: company_research
 estimated_pages: 20-50 pages
 suitable_for:
   - Annual Evaluation

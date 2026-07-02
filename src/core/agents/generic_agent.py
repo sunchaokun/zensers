@@ -372,27 +372,10 @@ class GenericAgent(
 
                                 # [P0-5c] Filter sections by agent's section_type if available
                                 own_section_types = set()
+                                from src.core.decomposition.section_type_map import resolve_section_types as _resolve_st
                                 section_id = self._context.get("section_id", "")
                                 if section_id:
-                                    SECTION_TYPE_MAP_AGENT = {
-                                        "industry_overview": ["overview", "business"],
-                                        "market_size": ["business", "financial"],
-                                        "competitive_landscape": ["business"],
-                                        "value_chain": ["business"],
-                                        "growth_drivers": ["business", "strategy"],
-                                        "policy": ["governance"],
-                                        "technology": ["strategy", "business"],
-                                        "key_company": ["financial", "business"],
-                                        "financial_forecast": ["financial", "cashflow", "investment"],
-                                        "risk_analysis": ["risk"],
-                                        "strategic_intent": ["strategy", "investment"],
-                                        "rating": ["investment", "financial"],
-                                    }
-                                    sid_lower = section_id.lower()
-                                    for key_part, types in SECTION_TYPE_MAP_AGENT.items():
-                                        if key_part in sid_lower:
-                                            own_section_types.update(types)
-                                            break
+                                    own_section_types.update(_resolve_st(section_id))
 
                                 if own_section_types:
                                     filtered_sections = [
@@ -834,7 +817,7 @@ class GenericAgent(
                         if document_context or document_tables:
                             doc_injection = "\n\n## 年报原始数据（来自企业年报PDF解析）\n"
                             if document_context:
-                                truncated = self._truncate_by_tokens(document_context, max_tokens=2000, preserve_tables=bool(document_tables))
+                                truncated = self._truncate_by_tokens(document_context, max_tokens=6000, preserve_tables=bool(document_tables))
                                 doc_injection += f"\n### 年报章节原文\n{truncated}\n"
                             if document_tables:
                                 doc_injection += "\n### 结构化财务数据\n"

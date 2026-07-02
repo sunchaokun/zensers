@@ -378,6 +378,10 @@ ASPECT_NAME_MAP = {
     "研究结论": "conclusion_role",
     "数据验证": "validation",
     "综合分析": "general",
+    "战略意图": "strategic_intent",
+    "战略意图推断": "strategic_intent",
+    "Strategic Intent": "strategic_intent",
+    "Strategic Intent Inference": "strategic_intent",
 }
 
 

@@ -64,6 +64,9 @@ ASPECT_SKILL_MAP = {
     "Research Conclusion": ["llm_skill"],
     "Data Validation": ["llm_skill"],
     "Comprehensive Analysis": ["llm_skill"],
+    "Strategic Intent": ["llm_skill", "market_analysis"],
+    "战略意图": ["llm_skill", "market_analysis"],
+    "战略意图推断": ["llm_skill", "market_analysis"],
 }
 
 # Default skills for fallback when aspect not found in map
@@ -443,6 +446,9 @@ class IndustryResearchStrategy(TaskDecompositionStrategy):
         "key_findings", "insights",
         # Chinese
         "synthesis_analysis", "core_findings", "key_discoveries",
+        # Strategic Intent (dependent on all analysis)
+        "strategic_intent", "strategic intent",
+        "战略意图", "战略意图推断",
     }
     
     def decompose(
@@ -471,6 +477,16 @@ class IndustryResearchStrategy(TaskDecompositionStrategy):
         
         aspects = requirement.aspects
         topic = requirement.topic
+        
+        # [P0-4] Annual report mode: use dynamic analysis_framework
+        annual_report_data = getattr(requirement, 'dynamic_fields', {}).get("annual_report_data", {}) if hasattr(requirement, 'dynamic_fields') else {}
+        analysis_framework = annual_report_data.get("analysis_framework", {}) if annual_report_data else {}
+        preloaded_data = getattr(requirement, 'dynamic_fields', {}).get("preloaded_data", False) if hasattr(requirement, 'dynamic_fields') else False
+        
+        if analysis_framework and analysis_framework.get("aspects"):
+            framework_aspects = analysis_framework["aspects"]
+            if not aspects or len(aspects) == 0:
+                aspects = framework_aspects
         
         section_data_specs = getattr(intent_result, 'section_data_specs', []) or []
         if section_data_specs and isinstance(section_data_specs[0], dict):
@@ -506,26 +522,47 @@ class IndustryResearchStrategy(TaskDecompositionStrategy):
             section_id = f"section_{seq_idx}"
             matched_spec = section_spec_by_id.get(section_id) or section_spec_by_name.get(aspect)
             
-            spec = AgentSpec(
-                agent_id=agent_id,
-                agent_type="research",
-                category="research",  # Maps to DATA_COLLECTION
-                task_description=f"Collect data for {topic} - {aspect}",
-                input_keys=["topic", "aspect"],
-                output_keys=[f"data_{aspect}"],
-                dependencies=[],
-                priority=10 - i,  # Priority by order
-                parallel_group=0,  # Same group runs in parallel
-                quality_threshold=0.7,
-                max_retries=complexity_params["max_retries"],
-                skills=_get_data_collection_skills(aspect, topic, intent_result),
-                system_prompt=self._build_data_collection_prompt(topic, aspect, framework_config, sub_aspects=[sub.name for sub in matched_spec.sub_sections] if matched_spec and matched_spec.sub_sections else None),
-                context={"aspect": aspect, "topic": topic,
-                         "section_id": section_id,
-                         "data_needs": matched_spec.all_data_needs if matched_spec else [aspect],
-                         "search_data_needs": matched_spec.search_data_needs if matched_spec else [aspect],
-                         "sub_aspects": [sub.name for sub in matched_spec.sub_sections] if matched_spec and matched_spec.sub_sections else []},
-            )
+            # [P0-4] Annual report mode: lightweight preloaded data delivery
+            if preloaded_data:
+                spec = AgentSpec(
+                    agent_id=agent_id,
+                    agent_type="research",
+                    category="research",
+                    task_description=f"Deliver preloaded annual report data for {aspect}",
+                    input_keys=["topic", "aspect"],
+                    output_keys=[f"data_{aspect}"],
+                    dependencies=[],
+                    priority=10 - i,
+                    parallel_group=0,
+                    quality_threshold=0.7,
+                    max_retries=1,
+                    skills=["annual_report_parser"],
+                    system_prompt="Deliver preloaded annual report data.",
+                    context={"aspect": aspect, "topic": topic,
+                             "preloaded": True,
+                             "section_id": section_id},
+                )
+            else:
+                spec = AgentSpec(
+                    agent_id=agent_id,
+                    agent_type="research",
+                    category="research",  # Maps to DATA_COLLECTION
+                    task_description=f"Collect data for {topic} - {aspect}",
+                    input_keys=["topic", "aspect"],
+                    output_keys=[f"data_{aspect}"],
+                    dependencies=[],
+                    priority=10 - i,  # Priority by order
+                    parallel_group=0,  # Same group runs in parallel
+                    quality_threshold=0.7,
+                    max_retries=complexity_params["max_retries"],
+                    skills=_get_data_collection_skills(aspect, topic, intent_result),
+                    system_prompt=self._build_data_collection_prompt(topic, aspect, framework_config, sub_aspects=[sub.name for sub in matched_spec.sub_sections] if matched_spec and matched_spec.sub_sections else None),
+                    context={"aspect": aspect, "topic": topic,
+                             "section_id": section_id,
+                             "data_needs": matched_spec.all_data_needs if matched_spec else [aspect],
+                             "search_data_needs": matched_spec.search_data_needs if matched_spec else [aspect],
+                             "sub_aspects": [sub.name for sub in matched_spec.sub_sections] if matched_spec and matched_spec.sub_sections else []},
+                )
             phases[ResearchPhase.DATA_COLLECTION].append(spec)
         
         # === Phase 2: Data Validation ===
@@ -558,6 +595,40 @@ class IndustryResearchStrategy(TaskDecompositionStrategy):
             agent_id = self._create_agent_id(ResearchPhase.DEEP_ANALYSIS, i, aspect.lower().replace(" ", "_"))
             da_matched_spec = section_spec_by_name.get(aspect)
             
+            # [P0-4] Annual report mode: inject document_context from analysis_framework
+            document_context = ""
+            document_tables = []
+            if annual_report_data:
+                section_ids = analysis_framework.get("aspect_to_section_ids", {}).get(aspect, [])
+                aspect_to_profile = analysis_framework.get("aspect_to_profile", {})
+                
+                sections = annual_report_data.get("sections", [])
+                context_parts = []
+                for sid in section_ids:
+                    if isinstance(sid, int) and 0 <= sid - 1 < len(sections):
+                        section = sections[sid - 1]
+                        content = section.get("content", "")
+                        if content:
+                            context_parts.append(content[:4000])
+                
+                if context_parts:
+                    document_context = "\n\n".join(context_parts)
+                
+                profile = aspect_to_profile.get(aspect, "")
+                if profile in ("financial_analysis", "valuation", "investment"):
+                    financial_tables = annual_report_data.get("financial_tables", {})
+                    if financial_tables:
+                        document_tables = financial_tables
+            
+            agent_context = {"aspect": aspect, "topic": topic,
+                     "sub_aspects": [sub.name for sub in da_matched_spec.sub_sections] if da_matched_spec and da_matched_spec.sub_sections else []}
+            if document_context:
+                agent_context["document_context"] = document_context
+            if document_tables:
+                agent_context["document_tables"] = document_tables
+            if annual_report_data and (document_context or document_tables):
+                agent_context["has_preloaded_data"] = True
+            
             spec = AgentSpec(
                 agent_id=agent_id,
                 agent_type="analysis",
@@ -572,8 +643,7 @@ class IndustryResearchStrategy(TaskDecompositionStrategy):
                 max_retries=complexity_params["max_retries"],
                 skills=get_skills_for_aspect(aspect),
                 system_prompt=self._build_analysis_prompt(topic, aspect, framework_config, sub_aspects=[sub.name for sub in da_matched_spec.sub_sections] if da_matched_spec and da_matched_spec.sub_sections else None),
-                context={"aspect": aspect, "topic": topic,
-                         "sub_aspects": [sub.name for sub in da_matched_spec.sub_sections] if da_matched_spec and da_matched_spec.sub_sections else []},
+                context=agent_context,
             )
             phases[ResearchPhase.DEEP_ANALYSIS].append(spec)
         

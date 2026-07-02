@@ -87,6 +87,9 @@ class LLMConfig:
     presence_penalty: float = 0.0
     max_context_tokens: int = 128000
     cost_limit_per_report: float = 5.0
+    vision_model: str = ""
+    vision_api_key: str = ""
+    vision_base_url: str = ""
 
 
 @dataclass
@@ -494,6 +497,12 @@ class Settings:
             self.llm.cheap_model = os.environ['LLM_CHEAP_MODEL']
         if os.environ.get('LLM_EMBEDDING_MODEL'):
             self.llm.embedding_model = os.environ['LLM_EMBEDDING_MODEL']
+        if os.environ.get('LLM_VISION_MODEL'):
+            self.llm.vision_model = os.environ['LLM_VISION_MODEL']
+        if os.environ.get('LLM_VISION_API_KEY'):
+            self.llm.vision_api_key = os.environ['LLM_VISION_API_KEY']
+        if os.environ.get('LLM_VISION_BASE_URL'):
+            self.llm.vision_base_url = os.environ['LLM_VISION_BASE_URL']
         if os.environ.get('LLM_TEMPERATURE'):
             self.llm.temperature = float(os.environ['LLM_TEMPERATURE'])
         if os.environ.get('LLM_MAX_TOKENS'):
@@ -622,6 +631,9 @@ class Settings:
             ('LLM_BASE_URL', 'base_url', None),
             ('LLM_CHEAP_MODEL', 'cheap_model', None),
             ('LLM_EMBEDDING_MODEL', 'embedding_model', None),
+            ('LLM_VISION_MODEL', 'vision_model', None),
+            ('LLM_VISION_API_KEY', 'vision_api_key', None),
+            ('LLM_VISION_BASE_URL', 'vision_base_url', None),
             ('LLM_TEMPERATURE', 'temperature', float),
             ('LLM_MAX_TOKENS', 'max_tokens', int),
         ]

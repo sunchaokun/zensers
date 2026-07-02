@@ -699,6 +699,44 @@ class ResearchOrchestrator:
                 requirement.output_type, 'value') else str(requirement.output_type)
             framework_config = get_framework_config(output_type_value)
 
+            # [P0-3] Annual report pre-parsing and SharedMemory injection
+            # Must happen before decompose() so dynamic_fields are available
+            logger.info(f"[{task_id}] dynamic_fields check: analysis_mode={requirement.dynamic_fields.get('analysis_mode')}, file_ids={'yes' if requirement.dynamic_fields.get('file_ids') else 'no'}, all_keys={list(requirement.dynamic_fields.keys())}")
+            if requirement.dynamic_fields.get("analysis_mode") == "annual_report":
+                file_ids = requirement.dynamic_fields.get("file_ids", [])
+                if file_ids:
+                    try:
+                        from src.skills.analysis.annual_report_parser import AnnualReportParserSkill
+                        parser = AnnualReportParserSkill()
+                        file_paths = [f["path"] for f in file_ids if isinstance(f, dict) and "path" in f]
+                        parse_result = await parser.execute(
+                            action="parse",
+                            file_paths=file_paths,
+                            extract_tables=True,
+                            extract_sections=True,
+                        )
+                        if parse_result.get("success"):
+                            parse_data = parse_result.get("data", {})
+                            await self._shared_memory.write("annual_report_data", parse_data)
+                            await self._shared_memory.write(
+                                "financial_tables",
+                                parse_data.get("financial_tables", {}),
+                            )
+                            requirement.dynamic_fields["annual_report_data"] = parse_data
+                            requirement.dynamic_fields["preloaded_data"] = True
+                            table_validation = parse_data.get("table_validation", {})
+                            if table_validation.get("needs_manual_review"):
+                                requirement.dynamic_fields["supplement_with_api"] = True
+                            logger.info(
+                                f"[{task_id}] Annual report parsed: "
+                                f"{len(parse_data.get('sections', []))} sections, "
+                                f"{sum(len(v) for v in parse_data.get('financial_tables', {}).values() if isinstance(v, list))} financial tables"
+                            )
+                        else:
+                            logger.warning(f"[{task_id}] Annual report parsing failed: {parse_result.get('error')}")
+                    except Exception as e:
+                        logger.error(f"[{task_id}] Annual report pre-parse error: {e}", exc_info=True)
+
             # 4.2 Decompose task first, then create Agents (B-1 fix: ensure agents created per decomposition plan)
             decomposition_plan = None
             try:
@@ -1724,6 +1762,44 @@ class ResearchOrchestrator:
                     requirement = self._parse_requirement(user_input)
 
             logger.info(f"[{task_id}] Research topic: {requirement.topic}")
+
+            # [P0-3] Annual report pre-parsing and SharedMemory injection (routing path)
+            # Must happen before decompose() so dynamic_fields are available
+            logger.info(f"[{task_id}] dynamic_fields check: analysis_mode={requirement.dynamic_fields.get('analysis_mode')}, file_ids={'yes' if requirement.dynamic_fields.get('file_ids') else 'no'}, all_keys={list(requirement.dynamic_fields.keys())}")
+            if requirement.dynamic_fields.get("analysis_mode") == "annual_report":
+                file_ids = requirement.dynamic_fields.get("file_ids", [])
+                if file_ids:
+                    try:
+                        from src.skills.analysis.annual_report_parser import AnnualReportParserSkill
+                        parser = AnnualReportParserSkill()
+                        file_paths = [f["path"] for f in file_ids if isinstance(f, dict) and "path" in f]
+                        parse_result = await parser.execute(
+                            action="parse",
+                            file_paths=file_paths,
+                            extract_tables=True,
+                            extract_sections=True,
+                        )
+                        if parse_result.get("success"):
+                            parse_data = parse_result.get("data", {})
+                            await self._shared_memory.write("annual_report_data", parse_data)
+                            await self._shared_memory.write(
+                                "financial_tables",
+                                parse_data.get("financial_tables", {}),
+                            )
+                            requirement.dynamic_fields["annual_report_data"] = parse_data
+                            requirement.dynamic_fields["preloaded_data"] = True
+                            table_validation = parse_data.get("table_validation", {})
+                            if table_validation.get("needs_manual_review"):
+                                requirement.dynamic_fields["supplement_with_api"] = True
+                            logger.info(
+                                f"[{task_id}] Annual report parsed (routing path): "
+                                f"{len(parse_data.get('sections', []))} sections, "
+                                f"{sum(len(v) for v in parse_data.get('financial_tables', {}).values() if isinstance(v, list))} financial tables"
+                            )
+                        else:
+                            logger.warning(f"[{task_id}] Annual report parsing failed: {parse_result.get('error')}")
+                    except Exception as e:
+                        logger.error(f"[{task_id}] Annual report pre-parse error: {e}", exc_info=True)
 
             # ★ Forward session_id from user_input to requirement for cancel/pause checkpoints
             if isinstance(user_input, dict):
@@ -3669,6 +3745,10 @@ class ResearchOrchestrator:
                 survey_target_count=user_input.get("survey_sample_size", 100),
                 survey_timeout_days=user_input.get("survey_timeout_days", 7),
                 section_requirements=user_input.get("section_requirements", {}),
+                dynamic_fields={
+                    k: v for k, v in user_input.items()
+                    if k in {"file_ids", "analysis_mode", "preloaded_data", "annual_report_data", "supplement_with_api"}
+                },
             )
 
         # Natural language parsing
@@ -3910,6 +3990,111 @@ class ResearchOrchestrator:
                         context["role_in_report"] = ""
                     all_aspects = requirement.aspects if hasattr(requirement, 'aspects') else []
                     context["sibling_aspects"] = [a for a in all_aspects if a and a != own_aspect]
+
+                    # [P0-4 routing] Annual report mode: inject document_context from annual_report_data
+                    annual_report_data = None
+                    if hasattr(requirement, 'dynamic_fields') and isinstance(requirement.dynamic_fields, dict):
+                        annual_report_data = requirement.dynamic_fields.get("annual_report_data")
+                    if annual_report_data:
+                        analysis_framework = annual_report_data.get("analysis_framework", {})
+                        document_context = ""
+                        document_tables = []
+                        ar_sections = annual_report_data.get("sections", [])
+
+                        # [P0-4b] Map routing section_id to annual report section_type for precise injection
+                        from src.core.decomposition.section_type_map import resolve_section_types as _resolve_section_types
+                        own_section_types = []
+                        if spec.output_keys:
+                            for output_key in spec.output_keys:
+                                matched = _resolve_section_types(output_key)
+                                if matched:
+                                    own_section_types.extend(matched)
+                            own_section_types = list(set(own_section_types))
+
+                        # Priority 1: Use aspect_to_section_ids if aspect is known
+                        if own_aspect:
+                            section_ids = analysis_framework.get("aspect_to_section_ids", {}).get(own_aspect, [])
+                            context_parts = []
+                            for sid in section_ids:
+                                if isinstance(sid, int) and 0 <= sid - 1 < len(ar_sections):
+                                    section = ar_sections[sid - 1]
+                                    content = section.get("content", "")
+                                    if content:
+                                        context_parts.append(content[:4000])
+                            if context_parts:
+                                document_context = "\n\n".join(context_parts)
+
+                        # Priority 2: Match by section_type from routing section_id
+                        if not document_context and own_section_types and ar_sections:
+                            matched = [
+                                s for s in ar_sections
+                                if s.get("section_type", "") in own_section_types
+                                and s.get("content", "").strip()
+                            ]
+                            matched.sort(
+                                key=lambda s: (s.get("importance", 3), -len(s.get("content", ""))),
+                                reverse=True,
+                            )
+                            context_parts = []
+                            total_chars = 0
+                            max_total_chars = 20000
+                            for ms in matched:
+                                mc = ms.get("content", "")
+                                if not mc:
+                                    continue
+                                chunk = "### " + ms.get("title", "") + " [" + ms.get("section_type", "") + "]\n" + mc[:4000]
+                                context_parts.append(chunk)
+                                total_chars += len(chunk)
+                                if total_chars >= max_total_chars:
+                                    break
+                            if context_parts:
+                                document_context = "[年报相关章节]\n\n" + "\n\n".join(context_parts)
+
+                        # Priority 3: Global summary sorted by importance (highest-value sections)
+                        if not document_context and spec.agent_type in ("analysis", "data_collection", "research"):
+                            content_sections = [
+                                s for s in ar_sections if s.get("content", "").strip()
+                            ]
+                            content_sections.sort(
+                                key=lambda s: (
+                                    s.get("importance", 3),
+                                    len(s.get("content", "")),
+                                ),
+                                reverse=True,
+                            )
+                            context_parts = []
+                            total_chars = 0
+                            max_total_chars = 30000
+                            for ts in content_sections:
+                                tc = ts.get("content", "")
+                                if not tc:
+                                    continue
+                                chunk = "### " + ts.get("title", "") + "\n" + tc[:4000]
+                                context_parts.append(chunk)
+                                total_chars += len(chunk)
+                                if total_chars >= max_total_chars:
+                                    break
+                            if context_parts:
+                                document_context = "[年报全局摘要]\n\n" + "\n\n".join(context_parts)
+
+                        if spec.agent_type in ("analysis", "data_collection", "research"):
+                            financial_tables = annual_report_data.get("financial_tables", {})
+                            if financial_tables:
+                                document_tables = financial_tables
+
+                        if document_context:
+                            context["document_context"] = document_context
+                        if document_tables:
+                            context["document_tables"] = document_tables
+                        if document_context or document_tables:
+                            context["has_preloaded_data"] = True
+                            context["preloaded"] = True
+                            logger.info(
+                                f"[{task_id}] Agent {spec.agent_id}: annual_report inject "
+                                f"doc_ctx={len(document_context)}c, tables={len(document_tables) if document_tables else 0}, "
+                                f"aspect={own_aspect}, type={spec.agent_type}"
+                            )
+
                     agent, session = self._agent_factory.create_agent_with_session(
                         agent_id=spec.agent_id,
                         capability=capability,
@@ -4259,23 +4444,109 @@ class ResearchOrchestrator:
             if _template_category == "data-collection":
                 _template_category = "analysis"
 
+            # [P0-4 routing fallback] Annual report mode: inject document_context
+            _annual_report_data_fb = None
+            if hasattr(requirement, 'dynamic_fields') and isinstance(requirement.dynamic_fields, dict):
+                _annual_report_data_fb = requirement.dynamic_fields.get("annual_report_data")
+            _doc_ctx_fb = ""
+            _doc_tables_fb = []
+            if _annual_report_data_fb:
+                _af_fb = _annual_report_data_fb.get("analysis_framework", {})
+                _secs_fb = _annual_report_data_fb.get("sections", [])
+
+                # Priority 1: aspect_to_section_ids
+                _sec_ids_fb = _af_fb.get("aspect_to_section_ids", {}).get(aspect, [])
+                _cp_fb = []
+                for _sid_fb in _sec_ids_fb:
+                    if isinstance(_sid_fb, int) and 0 <= _sid_fb - 1 < len(_secs_fb):
+                        _sec_fb = _secs_fb[_sid_fb - 1]
+                        _c_fb = _sec_fb.get("content", "")
+                        if _c_fb:
+                            _cp_fb.append(_c_fb[:4000])
+                if _cp_fb:
+                    _doc_ctx_fb = "\n\n".join(_cp_fb)
+
+                # Priority 2: section_type matching from aspect name
+                if not _doc_ctx_fb and _secs_fb:
+                    from src.core.decomposition.section_type_map import resolve_section_types as _rst
+                    _own_types_fb = _rst(aspect)
+                    if _own_types_fb:
+                        _matched_fb = [
+                            s for s in _secs_fb
+                            if s.get("section_type", "") in _own_types_fb
+                            and s.get("content", "").strip()
+                        ]
+                        _matched_fb.sort(
+                            key=lambda s: (s.get("importance", 3), -len(s.get("content", ""))),
+                            reverse=True,
+                        )
+                        _cp2_fb = []
+                        _tc2_fb = 0
+                        for _ms_fb in _matched_fb:
+                            _mc_fb = _ms_fb.get("content", "")
+                            if not _mc_fb:
+                                continue
+                            _chunk_fb = "### " + _ms_fb.get("title", "") + " [" + _ms_fb.get("section_type", "") + "]\n" + _mc_fb[:4000]
+                            _cp2_fb.append(_chunk_fb)
+                            _tc2_fb += len(_chunk_fb)
+                            if _tc2_fb >= 20000:
+                                break
+                        if _cp2_fb:
+                            _doc_ctx_fb = "[年报相关章节]\n\n" + "\n\n".join(_cp2_fb)
+
+                # Priority 3: global summary sorted by importance
+                if not _doc_ctx_fb:
+                    _content_secs_fb = [
+                        s for s in _secs_fb if s.get("content", "").strip()
+                    ]
+                    _content_secs_fb.sort(
+                        key=lambda s: (s.get("importance", 3), -len(s.get("content", ""))),
+                        reverse=True,
+                    )
+                    _cp3_fb = []
+                    _tc3_fb = 0
+                    for _ts_fb in _content_secs_fb:
+                        _tc_fb = _ts_fb.get("content", "")
+                        if not _tc_fb:
+                            continue
+                        _chunk3_fb = "### " + _ts_fb.get("title", "") + "\n" + _tc_fb[:4000]
+                        _cp3_fb.append(_chunk3_fb)
+                        _tc3_fb += len(_chunk3_fb)
+                        if _tc3_fb >= 30000:
+                            break
+                    if _cp3_fb:
+                        _doc_ctx_fb = "[年报全局摘要]\n\n" + "\n\n".join(_cp3_fb)
+
+                _ft_fb = _annual_report_data_fb.get("financial_tables", {})
+                if _ft_fb:
+                    _doc_tables_fb = _ft_fb
+
+            _agent_context = {
+                "aspect": aspect,
+                "topic": requirement.topic,
+                "data_types": [dt[0] for dt in relevant_data_types],
+                "research_type": research_type or "market_research",
+                "intent_confidence": _intent_confidence,
+                "domain_context": _domain_context,
+                "hidden_requirements": _hidden_requirements,
+                "depends_on": [
+                    aid for ua in _upstream
+                    for aid in _aspect_to_agent_id.get(ua, [])
+                ],
+            }
+            if _doc_ctx_fb:
+                _agent_context["document_context"] = _doc_ctx_fb
+            if _doc_tables_fb:
+                _agent_context["document_tables"] = _doc_tables_fb
+            if _annual_report_data_fb and (_doc_ctx_fb or _doc_tables_fb):
+                _agent_context["has_preloaded_data"] = True
+                _agent_context["preloaded"] = True
+
             agent, session = self._agent_factory.create_agent_with_session(
                 agent_id=agent_id,
                 capability=capability,
                 parent_session_id=task_id,
-                context={
-                    "aspect": aspect,
-                    "topic": requirement.topic,
-                    "data_types": [dt[0] for dt in relevant_data_types],
-                    "research_type": research_type or "market_research",
-                    "intent_confidence": _intent_confidence,
-                    "domain_context": _domain_context,
-                    "hidden_requirements": _hidden_requirements,
-                    "depends_on": [
-                        aid for ua in _upstream
-                        for aid in _aspect_to_agent_id.get(ua, [])
-                    ],
-                },
+                context=_agent_context,
                 category=_template_category,
             )
 
@@ -4332,21 +4603,51 @@ class ResearchOrchestrator:
             )
 
             agent_id = f"synthesis_{aspect_lower.replace(' ', '_')}_{i + 1}"
+            _dep_context = {
+                "aspect": aspect,
+                "topic": requirement.topic,
+                "is_dependent": True,
+                "depends_on": normal_agent_ids,
+                "research_type": research_type or "market_research",
+                "intent_confidence": _intent_confidence,
+                "domain_context": _domain_context,
+                "hidden_requirements": _hidden_requirements,
+            }
+            if _annual_report_data_fb:
+                _dep_doc_ctx = ""
+                _dep_doc_tables = []
+                _dep_af = _annual_report_data_fb.get("analysis_framework", {})
+                _dep_sec_ids = _dep_af.get("aspect_to_section_ids", {}).get(aspect, [])
+                _dep_a2p = _dep_af.get("aspect_to_profile", {})
+                _dep_secs = _annual_report_data_fb.get("sections", [])
+                _dep_cp = []
+                for _dsid in _dep_sec_ids:
+                    if isinstance(_dsid, int) and 0 <= _dsid - 1 < len(_dep_secs):
+                        _ds = _dep_secs[_dsid - 1]
+                        _dc = _ds.get("content", "")
+                        if _dc:
+                            _dep_cp.append(_dc[:4000])
+                if _dep_cp:
+                    _dep_doc_ctx = "\n\n".join(_dep_cp)
+                _dep_prof = _dep_a2p.get(aspect, "")
+                if _dep_prof in ("financial_analysis", "valuation", "investment"):
+                    _dep_ft = _annual_report_data_fb.get("financial_tables", {})
+                    if _dep_ft:
+                        _dep_doc_tables = _dep_ft
+                if _dep_doc_ctx:
+                    _dep_context["document_context"] = _dep_doc_ctx
+                if _dep_doc_tables:
+                    _dep_context["document_tables"] = _dep_doc_tables
+                if _dep_doc_ctx or _dep_doc_tables:
+                    _dep_context["has_preloaded_data"] = True
+                    _dep_context["preloaded"] = True
+
             agent, session = self._agent_factory.create_agent_with_session(
                 agent_id=agent_id,
                 capability=capability,
                 parent_session_id=task_id,
-                context={
-                    "aspect": aspect,
-                    "topic": requirement.topic,
-                    "is_dependent": True,
-                    "depends_on": normal_agent_ids,
-                    "research_type": research_type or "market_research",
-                    "intent_confidence": _intent_confidence,
-                    "domain_context": _domain_context,
-                    "hidden_requirements": _hidden_requirements,
-                },
-                category="synthesis",  # synthesis 是有效的 category，用于综合分析
+                context=_dep_context,
+                category="synthesis",
             )
 
             agents.append(agent)

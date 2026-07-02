@@ -338,7 +338,8 @@ async def quick_start(user_input: str = Form(...), template_id: str = Form(...),
                        depth: Optional[str] = Form(None),
                        parameters: Optional[str] = Form(None),
                        auto_confirm: str = Form("false"),
-                       template_context: Optional[str] = Form(None)):
+                       template_context: Optional[str] = Form(None),
+                       file_ids: Optional[str] = Form(None)):
     from src.config.settings import settings
     llm_config: Dict[str, Any] = {}
     if llm_provider:
@@ -376,6 +377,36 @@ async def quick_start(user_input: str = Form(...), template_id: str = Form(...),
         custom_params["time_range"] = time_range
     if depth and "depth" not in custom_params:
         custom_params["depth"] = depth
+    # Validate and resolve file_ids for annual report analysis
+    if file_ids:
+        try:
+            fid_list = json.loads(file_ids)
+            if not isinstance(fid_list, list):
+                raise HTTPException(status_code=400, detail="file_ids must be a JSON array")
+            parsed_file_ids = []
+            for fid in fid_list:
+                candidate = _upload_dir / f"{fid}.pdf"
+                if candidate.exists() and candidate.is_file():
+                    file_size_mb = candidate.stat().st_size / (1024 * 1024)
+                    if file_size_mb > 100:
+                        raise HTTPException(status_code=413, detail=f"File {fid}.pdf too large: {file_size_mb:.1f}MB (max 100MB)")
+                    parsed_file_ids.append({
+                        "id": fid,
+                        "path": str(candidate),
+                        "filename": candidate.name,
+                        "size_mb": round(file_size_mb, 1),
+                    })
+            missing = set(fid_list) - {f["id"] for f in parsed_file_ids}
+            if missing:
+                raise HTTPException(status_code=400, detail=f"Files not found or not PDF: {missing}")
+            if parsed_file_ids:
+                total_size_mb = sum(f["size_mb"] for f in parsed_file_ids)
+                if total_size_mb > 300:
+                    raise HTTPException(status_code=413, detail=f"Total file size too large: {total_size_mb:.1f}MB (max 300MB)")
+                custom_params["file_ids"] = parsed_file_ids
+                custom_params["analysis_mode"] = "annual_report"
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="Invalid file_ids JSON")
     return await research_api.quick_start(user_input=user_input, template_id=template_id,
                                            user_id=user_id, llm_config=llm_config,
                                            custom_params=custom_params if custom_params else None,

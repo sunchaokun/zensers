@@ -15,6 +15,7 @@ from .stock_analysis import StockAnalysisSkill
 from .policy_analysis import PolicyAnalysisSkill
 from .tech_trend import TechTrendSkill
 from .risk_analysis import RiskAnalysisSkill
+from .annual_report_parser import AnnualReportParserSkill
 
 __all__ = [
     "MarketAnalysisSkill",
@@ -24,4 +25,5 @@ __all__ = [
     "PolicyAnalysisSkill",
     "TechTrendSkill",
     "RiskAnalysisSkill",
+    "AnnualReportParserSkill",
 ]

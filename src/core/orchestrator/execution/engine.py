@@ -2274,7 +2274,17 @@ class ExecutionEngine:
                         "aggregated_sources": filtered_sources,  # 按依赖过滤
                         "aggregated_content": filtered_content,
                         "target_aspect": target_aspect,  # 传递目标章节
+                        # [P0-6] Annual report document context injection
+                        "document_context": "",
+                        "document_tables": [],
                     }
+                    
+                    # [P0-6] Inject annual report data from Agent context
+                    agent_context = getattr(agent, '_context', {})
+                    if agent_context.get("document_context"):
+                        task["document_context"] = agent_context["document_context"]
+                    if agent_context.get("document_tables"):
+                        task["document_tables"] = agent_context["document_tables"]
                     
                     logger.info(f"[_execute_batch] synthesis任务: agent={agent.agent_id}, "
                                f"target_aspect={target_aspect}, "
@@ -2357,7 +2367,17 @@ class ExecutionEngine:
                         # S-FIX-3: inject canonical data for cross-agent consistency
                         "canonical_data": self._active_canonical_data,
                         "target_currency": self._target_currency,
+                        # [P0-6] Annual report document context injection
+                        "document_context": "",
+                        "document_tables": [],
                     }
+                    
+                    # [P0-6] Inject annual report data from Agent context
+                    agent_context = getattr(agent, '_context', {})
+                    if agent_context.get("document_context"):
+                        task["document_context"] = agent_context["document_context"]
+                    if agent_context.get("document_tables"):
+                        task["document_tables"] = agent_context["document_tables"]
                     
                     # Inject preloaded search results (Phase B: unified query planning)
                     if agent.agent_id in preloaded_data:

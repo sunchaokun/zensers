@@ -2076,12 +2076,13 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
             'market_sizing': {'output_type': 'industry_report', 'aspects': ('市场定义', '市场规模', '增长驱动', '市场细分', '竞争格局')},
             'competitive_analysis': {'output_type': 'company_research', 'aspects': ('竞争格局', '主要竞争对手', '市场份额', '竞争策略', '进入壁垒')},
             'investment_research': {'output_type': 'industry_report', 'aspects': ('投资机会', '市场展望', '团队分析', '财务分析', '风险评估', '估值分析')},
+            'annual_analysis': {'output_type': 'company_research', 'aspects': (), 'default_aspects': ('年报概述', '经营分析', '深度财务分析', '现金流分析', '治理与内控', '战略规划', '展望', '投资评估', '风险因素')},
         }
         template = TEMPLATES.get(template_id)
         if not template:
             return {'error': f"Unknown template: {template_id}", 'error_code': 'UNKNOWN_TEMPLATE'}
         output_type = template['output_type']
-        aspects = template['aspects']
+        aspects = template['aspects'] or template.get('default_aspects', ())
         params = custom_params or {}
         if auto_confirm:
             section_details = self._get_section_details_for_type(output_type)
@@ -2096,6 +2097,7 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
                 'output_type': output_type, 'aspects': aspects,
                 'selected_sections': selected_sections, 'section_details': section_details,
                 'final_plan': final_plan, 'params': params,
+                'custom_params': params,
                 'current_step': 6, 'mode': 'research', 'status': 'running',
                 'created_at': datetime.now()
             }

@@ -120,6 +120,15 @@ sections:
       zh: Industry risks, company risks, policy risks, market risks, valuation risks, upside/downside scenarios
       en: Industry/company/policy/market/valuation risks, upside/downside scenarios
       
+  - id: strategic_intent
+    name:
+      zh: Strategic Intent Inference
+      en: Strategic Intent Inference
+    required: false
+    description:
+      zh: Strategic intent inference of key participants, entry/exit signals, resource allocation intent, M&A direction, policymaker implicit goals
+      en: Strategic intent inference, entry/exit signals, resource allocation intent, M&A direction, policymaker implicit goals
+      
   - id: rating_target
     name:
       zh: Rating & Target Price

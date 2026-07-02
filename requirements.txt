@@ -24,6 +24,8 @@ markdown>=3.5.0
 docxtpl>=0.16.7           # Word模板引擎
 python-pptx>=0.6.21       # PPT生成
 reportlab>=4.0.0          # PDF生成
+pdfplumber>=0.10.0        # PDF解析（年报提取）
+PyPDF2>=3.0.0             # PDF书签/目录提取
 
 # ==================== 图表生成 ====================
 matplotlib>=3.7.0         # 核心绑图库

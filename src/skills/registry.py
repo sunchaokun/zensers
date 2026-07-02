@@ -341,6 +341,12 @@ class SkillRegistry:
                 count += 1
                 logger.info("KnowledgeQuerySkill registered (lazy KM)")
             
+            # Register Annual Report Parser Skill (PDF annual report parsing)
+            if "annual_report_parser" not in self._skills:
+                from .analysis.annual_report_parser import AnnualReportParserSkill
+                self.register(AnnualReportParserSkill(), name="annual_report_parser")
+                count += 1
+            
         except Exception as e:
             logger.warning(f"Failed to register core skills: {e}")
         
@@ -401,6 +407,7 @@ class SkillRegistry:
             "research": ["stock_data", "lc_tavily_search", "lc_wikipedia", "llm_skill"],
             "synthesis": ["llm_skill"],
             "calibration": ["llm_skill"],
+            "annual-report": ["annual_report_parser", "stock_data", "stock_analysis", "llm_skill"],
         }
         
         needed_skills = CATEGORY_TO_SKILLS.get(category, [])
