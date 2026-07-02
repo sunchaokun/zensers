@@ -650,7 +650,7 @@ class TestCognitiveStrategyRegistry:
 
     def test_fact_driven_hypothesis_count(self):
         from src.core.agents.generic_agent import COGNITIVE_STRATEGY
-        assert COGNITIVE_STRATEGY["fact_driven"]["L4"]["hypothesis_count"] == 0
+        assert COGNITIVE_STRATEGY["fact_driven"]["L4"]["hypothesis_count"] == (1, 2)
         assert COGNITIVE_STRATEGY["fact_driven"]["L4"]["agent_hypothesis_count"] == 0
 
     def test_inference_driven_hypothesis_count(self):

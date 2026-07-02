@@ -89,8 +89,8 @@ COGNITIVE_STRATEGY = {
     "fact_driven": {
         "L1": {"dimension_ceiling": "inferential", "speculative_word_downgrade": "strict", "confidence_threshold": {"factual": "HIGH"}},
         "L2": {"caliber_floor_for_citation": "llm_inference_factual", "same_caliber_resolution": "newer_timestamp", "speculative_write_policy": "never"},
-        "L3": {"speculative_policy": "reference_only", "reasoning_mode": "cross_validation", "inferential_instruction": "Verify with data; flag unsupported claims", "falsification_requirement": "all_inferential", "evidence_chain_template": "数据 → 发现 → 确认", "cross_dimension_instruction": "Cross-validate with other factual dimensions", "insight_instruction": "在数据验证之外，主动寻找数据中隐含的非常规模式或反直觉发现，这些洞察往往比数据本身更有价值"},
-        "L4": {"hypothesis_type": "描述性", "hypothesis_count": 0, "hypothesis_template": "【数据观察H1】 → 【支持证据】→ 【确认/否定】→ 【发现】", "counter_hypothesis_required": False, "agent_hypothesis_count": 0, "verification_focus": "Data accuracy", "output_suffix": "数据验证结果"},
+        "L3": {"speculative_policy": "reference_only", "reasoning_mode": "cross_validation", "inferential_instruction": "用数据验证推断，标注未经验证的主张", "falsification_requirement": "all_inferential", "evidence_chain_template": "数据 → 发现 → 确认", "cross_dimension_instruction": "与其他事实维度交叉验证", "insight_instruction": "寻找数据中隐含的反直觉模式"},
+        "L4": {"hypothesis_type": "描述性", "hypothesis_count": (1, 2), "hypothesis_template": "【数据观察H1】 → 【支持证据】→ 【确认/否定】→ 【发现】", "counter_hypothesis_required": False, "agent_hypothesis_count": 0, "verification_focus": "Data accuracy", "output_suffix": "数据验证结果"},
         "L5": {"contradiction_resolution": "Data conflict resolution", "contradiction_instruction": "两项事实性主张冲突，请：(1)判断哪个数据源更可信并说明理由 (2)解释矛盾产生的可能原因（数据口径差异、统计时间窗口不同、样本偏差等）(3)说明该矛盾对本维度结论的影响程度", "auto_resolve_threshold": 0.8, "escalation_action": "Flag for human review"},
     },
     "inference_driven": {
@@ -110,9 +110,9 @@ COGNITIVE_STRATEGY = {
     "assessment_driven": {
         "L1": {"dimension_ceiling": None, "speculative_word_downgrade": "relaxed", "confidence_threshold": {"factual": "HIGH", "inferential": "MEDIUM", "speculative": "LOW"}},
         "L2": {"caliber_floor_for_citation": "llm_inference_speculative", "same_caliber_resolution": "wider_coverage", "speculative_write_policy": "with_falsification_condition"},
-        "L3": {"speculative_policy": "open_use", "reasoning_mode": "risk_scenario", "inferential_instruction": "Build risk scenarios from cross-dimension signals", "falsification_requirement": "key_risks_only", "evidence_chain_template": "风险触发条件 → 传导路径 → 影响评估 → 应对策略", "cross_dimension_instruction": "Map cross-dimension claims to risk scenarios", "insight_instruction": "不要只列出风险清单——深入分析每个风险的作用机制和传导路径，识别风险间的关联和级联效应，这些系统性风险才是最关键的洞察"},
-        "L4": {"hypothesis_type": "风险情景", "hypothesis_count": (2, 3), "hypothesis_template": "【风险情景H1】 → 【触发条件】→ 【传导路径】→ 【影响评估】", "counter_hypothesis_required": False, "agent_hypothesis_count": 1, "verification_focus": "Scenario plausibility", "output_suffix": "风险情景评估"},
-        "L5": {"contradiction_resolution": "Risk scenario reconciliation", "contradiction_instruction": "两项评估冲突，请分析：(1)各评估隐含的风险情景是什么 (2)当前数据更支持哪个风险情景 (3)两个情景是否可能在不同条件下先后发生", "auto_resolve_threshold": 0.5, "escalation_action": "Present both risk scenarios with probability"},
+        "L3": {"speculative_policy": "open_use", "reasoning_mode": "risk_scenario", "inferential_instruction": "Build risk scenarios from cross-dimension signals", "falsification_requirement": "key_risks_only", "evidence_chain_template": "风险触发条件 → 传导路径 → 影响评估 → 应对策略", "cross_dimension_instruction": "Map cross-dimension claims to risk scenarios, must reference them explicitly", "insight_instruction": "深入分析每个风险的作用机制和传导路径，识别风险间的关联和级联效应"},
+        "L4": {"hypothesis_type": "风险情景", "hypothesis_count": (1, 2), "hypothesis_template": "【风险情景H1】 → 【触发条件】→ 【传导路径】→ 【影响评估】", "counter_hypothesis_required": False, "agent_hypothesis_count": 0, "verification_focus": "Scenario plausibility", "output_suffix": "风险情景评估"},
+        "L5": {"contradiction_resolution": "Risk scenario reconciliation", "contradiction_instruction": "两项评估冲突，请分析：(1)各评估隐含的风险情景 (2)当前数据更支持哪个情景 (3)是否可在不同条件下先后发生", "auto_resolve_threshold": 0.5, "escalation_action": "Present both risk scenarios with probability"},
     },
 }
 
@@ -368,14 +368,50 @@ class GenericAgent(
                                 annual_report_data = self._shared_memory.get("annual_report_data") or {}
                             
                             if annual_report_data:
+                                all_sections = annual_report_data.get("sections", [])
+
+                                # [P0-5c] Filter sections by agent's section_type if available
+                                own_section_types = set()
+                                section_id = self._context.get("section_id", "")
+                                if section_id:
+                                    SECTION_TYPE_MAP_AGENT = {
+                                        "industry_overview": ["overview", "business"],
+                                        "market_size": ["business", "financial"],
+                                        "competitive_landscape": ["business"],
+                                        "value_chain": ["business"],
+                                        "growth_drivers": ["business", "strategy"],
+                                        "policy": ["governance"],
+                                        "technology": ["strategy", "business"],
+                                        "key_company": ["financial", "business"],
+                                        "financial_forecast": ["financial", "cashflow", "investment"],
+                                        "risk_analysis": ["risk"],
+                                        "strategic_intent": ["strategy", "investment"],
+                                        "rating": ["investment", "financial"],
+                                    }
+                                    sid_lower = section_id.lower()
+                                    for key_part, types in SECTION_TYPE_MAP_AGENT.items():
+                                        if key_part in sid_lower:
+                                            own_section_types.update(types)
+                                            break
+
+                                if own_section_types:
+                                    filtered_sections = [
+                                        s for s in all_sections
+                                        if s.get("section_type", "") in own_section_types
+                                    ]
+                                else:
+                                    filtered_sections = all_sections
+
                                 data_points = []
-                                for section in annual_report_data.get("sections", []):
-                                    data_points.append({
-                                        "title": section.get("title", ""),
-                                        "content": section.get("content", "")[:2000],
-                                        "source": "annual_report_pdf",
-                                        "type": "document",
-                                    })
+                                for section in filtered_sections:
+                                    content = section.get("content", "")
+                                    if content:
+                                        data_points.append({
+                                            "title": section.get("title", ""),
+                                            "content": content[:4000],
+                                            "source": "annual_report_pdf",
+                                            "type": section.get("section_type", "document"),
+                                        })
                                 for table_type, rows in annual_report_data.get("financial_tables", {}).items():
                                     for row in rows[:10]:
                                         data_points.append({
@@ -385,7 +421,7 @@ class GenericAgent(
                                             "type": "structured_data",
                                         })
                                 
-                                self._report_progress(f"Delivered {len(data_points)} preloaded data points", "data_delivery")
+                                self._report_progress(f"Delivered {len(data_points)} preloaded data points (filtered={bool(own_section_types)}, types={own_section_types or 'all'})", "data_delivery")
                                 return self._ensure_standard_result({
                                     "success": True,
                                     "content": json.dumps(data_points, ensure_ascii=False),
@@ -4907,24 +4943,6 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
                 parts.append("子主题（必须按此结构输出分析）：")
                 for idx, sa in enumerate(sub_aspects, 1):
                     parts.append(f"  {idx}. {sa}")
-            # A2.2: Inject causal hypotheses into analysis prompt
-            if causal_hypotheses:
-                _l4 = _cog_strategy["L4"]
-                parts.append(f"\n### {_l4['hypothesis_type']}假设（必须验证或修正）")
-                for i, h in enumerate(causal_hypotheses, 1):
-                    parts.append(f"  {i}. {h.get('statement','')}")
-                    parts.append(f"     验证数据需求：{h.get('verification_data','')}")
-                    parts.append(f"     跨维度传导：{h.get('transmission','')}")
-                    if h.get('counter_hypothesis'):
-                        parts.append(f"     反面假设：{h['counter_hypothesis']}")
-                parts.append("\n**假设驱动分析要求**：")
-                parts.append("  1. 对每个给定假设进行验证，给出支持/反对证据和验证结果（确认/修正/推翻）")
-                if _l4['agent_hypothesis_count'] > 0:
-                    parts.append(f"  2. 基于你掌握的数据，额外提出至少{_l4['agent_hypothesis_count']}个新的{_l4['hypothesis_type']}假设并验证")
-                if _l4['counter_hypothesis_required']:
-                    parts.append("  3. 对关键假设评估其反面假设成立的可能性")
-                parts.append("  4. 最终结论必须基于假设验证结果推导，而非直接下判断")
-                parts.append(f"\n**输出格式**：在分析末尾标注「{_l4['output_suffix']}」，列出每个假设的验证结论")
             # B2.4: Inject cross-dimension claims (L3+: reasoning-driven injection)
             if cross_dimension_claims:
                 _factual_claims = [c for c in cross_dimension_claims if c.get("epistemic_level") == "factual"]
@@ -4966,10 +4984,8 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
                                 f" 证伪条件: {claim.get('falsification','未指定')})"
                             )
                         parts.append("\n**推理要求**:")
-                        parts.append("  - 前瞻性判断是本维度的核心输出，可直接作为结论基础")
-                        parts.append("  - 每个前瞻性判断必须包含：(1)证伪条件 (2)概率评估 (3)时间范围 (4)替代预测")
-                        parts.append("  - 若你掌握的数据可以证伪某前瞻性判断，必须明确指出并给出修正预测")
-                        parts.append("  - 对多个前瞻性判断给出情景分析（乐观/中性/悲观），并说明各情景的概率依据")
+                        parts.append("  - 前瞻性判断是本维度的核心输出，可直接作为结论基础；每个判断须含证伪条件和概率评估")
+                        parts.append("  - 必须引用上述其他维度的信息来支撑或修正你的风险情景分析")
                     elif _aspect_policy == "cautious_use":
                         parts.append("\n### 其他维度前瞻性判断（可作为方向性参考，但需明确标注不确定性）")
                         for claim in _speculative_claims:
@@ -4991,18 +5007,10 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
                                 f" 证伪条件: {claim.get('falsification','未指定')})"
                             )
                         parts.append("\n**推理要求**:")
-                        parts.append("  - 推测性观点不得作为你的结论依据，仅可作为分析思路参考")
-                        parts.append("  - 如果你掌握可以证伪某推测性观点的数据，必须在分析中明确指出")
-                        parts.append("  - 若推测性观点启发了你的分析方向，需说明启发路径")
-            # L3-E: Evidence chain requirement
-            parts.append("\n### 分析输出规范")
-            _ect = _cog_strategy["L3"]["evidence_chain_template"]
-            parts.append(f"  - 每个关键结论必须附带：{_ect}，标注每步的认知层级（事实/推断/前瞻）")
-            parts.append("  - 若结论基于多个来源交叉验证，注明交叉验证过程")
-            parts.append("  - 若存在反对证据，必须列出并解释为何仍得出该结论")
-            # L3-D: Inject detected contradictions
+                        parts.append("  - 推测性观点仅供参考，不得作为结论依据；若数据可证伪某观点须指出，若启发分析方向须说明")
+            # L3-D: Inject detected contradictions (before hypotheses — priority)
             if conflict_entries:
-                parts.append("\n### 已检测到跨维度矛盾")
+                parts.append("\n### 已检测到跨维度矛盾（优先处理）")
                 for _ck, _cv in conflict_entries.items():
                     _conf_val = _cv.get("value", {})
                     parts.append(
@@ -5011,12 +5019,46 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
                     )
                 _l5 = _cog_strategy["L5"]
                 parts.append(f"\n**要求**: {_l5['contradiction_instruction']}")
-            # Insight discovery section (placed last to counter template rigidity)
+            # A2.2: Inject causal hypotheses into analysis prompt
+            if causal_hypotheses:
+                _l4 = _cog_strategy["L4"]
+                _is_fact_driven = (_cog_strategy is COGNITIVE_STRATEGY.get("fact_driven"))
+                _hypo_title = "建议探索" if _is_fact_driven else "必须验证或修正"
+                parts.append(f"\n### {_l4['hypothesis_type']}假设（{_hypo_title}）")
+                for i, h in enumerate(causal_hypotheses, 1):
+                    parts.append(f"  {i}. {h.get('statement','')}")
+                    parts.append(f"     验证数据需求：{h.get('verification_data','')}")
+                    parts.append(f"     跨维度传导：{h.get('transmission','')}")
+                    if h.get('counter_hypothesis'):
+                        parts.append(f"     反面假设：{h['counter_hypothesis']}")
+                if _is_fact_driven:
+                    parts.append("\n**引导**：尝试用数据验证上述观察，确认或否定后得出发现")
+                else:
+                    parts.append("\n**假设驱动分析要求**：")
+                    parts.append("  1. 对每个给定假设进行验证，给出支持/反对证据和验证结果（确认/修正/推翻）")
+                    if _l4['agent_hypothesis_count'] > 0:
+                        parts.append(f"  2. 基于你掌握的数据，额外提出至少{_l4['agent_hypothesis_count']}个新的{_l4['hypothesis_type']}假设并验证")
+                    if _l4['counter_hypothesis_required']:
+                        parts.append("  3. 对关键假设评估其反面假设成立的可能性")
+                    parts.append("  4. 最终结论必须基于假设验证结果推导，而非直接下判断")
+                parts.append(f"\n**输出格式**：在分析末尾标注「{_l4['output_suffix']}」，列出每个假设的验证结论")
+            # L3-E: Evidence chain requirement (type-adaptive)
+            _is_fact_driven = (_cog_strategy is COGNITIVE_STRATEGY.get("fact_driven"))
+            parts.append("\n### 分析输出规范")
+            _ect = _cog_strategy["L3"]["evidence_chain_template"]
+            parts.append(f"  - 每个关键结论附带：{_ect}")
+            if not _is_fact_driven:
+                parts.append("  - 标注每步的认知层级（事实/推断/前瞻）")
+                parts.append("  - 若存在反对证据，列出并解释为何仍得出该结论")
+            # Insight discovery section (type-adaptive)
             _insight_inst = _cog_strategy["L3"].get("insight_instruction")
             if _insight_inst:
-                parts.append("\n### 洞察发现（独立于上述结构化要求）")
-                parts.append(f"  {_insight_inst}")
-                parts.append("  在报告末尾单独列出你发现的最重要的非常规洞察，标注为「核心洞察」")
+                if _is_fact_driven:
+                    parts.append(f"\n**洞察要求**：{_insight_inst}，在分析中自然呈现，标注「核心洞察」")
+                else:
+                    parts.append("\n### 洞察发现（独立于上述结构化要求）")
+                    parts.append(f"  {_insight_inst}")
+                    parts.append("  在报告末尾单独列出你发现的最重要的非常规洞察，标注为「核心洞察」")
             framework_context = "\n".join(parts)
 
         if aspect:
