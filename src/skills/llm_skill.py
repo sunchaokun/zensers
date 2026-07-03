@@ -40,12 +40,32 @@ class LLMSkill(Skill):
             fallback_model: Fallback model (optional, default uses cheap_model from config)
             max_tokens: Maximum generation tokens (default uses max_tokens from config)
             temperature: Temperature parameter (default uses temperature from config)
+            routing_hint: Routing hint for profile-based routing (optional)
 
         Returns:
             Result dictionary containing content, usage, model
         """
         prompt = kwargs.get("prompt", "")
-        
+        routing_hint = kwargs.get("routing_hint")
+
+        if routing_hint is not None:
+            from src.core.llm_client import call_llm
+            result = await call_llm(
+                prompt=prompt,
+                model=kwargs.get("model"),
+                system_prompt=kwargs.get("system_prompt", ""),
+                fallback_model=kwargs.get("fallback_model"),
+                max_tokens=kwargs.get("max_tokens"),
+                temperature=kwargs.get("temperature"),
+                routing_hint=routing_hint,
+            )
+            if result.get("success"):
+                return self._success(
+                    {"content": result["content"], "model": result.get("model", ""), "usage": result.get("usage", {})},
+                    "LLM call successful",
+                )
+            return self._failure(result.get("message", "LLM call failed"), result.get("error", "llm_call_failed"))
+
         # Read defaults from configuration system
         model = kwargs.get("model", settings.llm.model)
         system_prompt = kwargs.get("system_prompt", "")
