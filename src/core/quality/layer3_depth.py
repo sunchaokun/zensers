@@ -15,8 +15,6 @@ Layer 3: 分析深度评估 (LLM-as-Judge 升级版)
 
 __all__ = ["Layer3DepthScorer", "Layer3Result"]
 
-import asyncio
-import concurrent.futures
 import json
 import logging
 from dataclasses import dataclass, field
@@ -200,39 +198,21 @@ class Layer3DepthScorer:
         )
 
     def _call_llm(self, prompt: str) -> str:
-        """同步 LLM 调用"""
-        from src.config import settings
-        from openai import AsyncOpenAI
+        """同步 LLM 调用 — 通过统一 call_llm_sync"""
+        from src.core.llm_client import call_llm_sync
+        from src.config.llm_profiles import RoutingHint
 
-        async def _do():
-            client = AsyncOpenAI(
-                api_key=settings.llm.api_key,
-                base_url=settings.llm.base_url,
-            )
-            try:
-                model = settings.llm.model
-                resp = await client.chat.completions.create(
-                    model=model,
-                    messages=[
-                        {"role": "system", "content": "你是严格的分析质量评审专家。仅输出JSON。"},
-                        {"role": "user", "content": prompt},
-                    ],
-                    max_tokens=800,
-                    temperature=0.2,
-                )
-                return resp.choices[0].message.content or ""
-            finally:
-                try:
-                    await client.close()
-                except Exception:
-                    pass
-
-        try:
-            asyncio.get_running_loop()
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                return pool.submit(asyncio.run, _do()).result(timeout=90)
-        except RuntimeError:
-            return asyncio.run(_do())
+        result = call_llm_sync(
+            prompt=prompt,
+            system_prompt="你是严格的分析质量评审专家。仅输出JSON。",
+            max_tokens=800,
+            temperature=0.2,
+            routing_hint=RoutingHint(action="quality_judge"),
+        )
+        if result.get("success"):
+            return result.get("content", "")
+        logger.warning(f"Layer3 LLM call failed: {result.get('message', 'unknown')}")
+        return ""
 
     def _parse_response(
         self, response: str, dimensions: List[Dict[str, Any]]

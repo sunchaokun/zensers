@@ -207,26 +207,18 @@ class Layer2MethodologyScorer:
         return round(found / max(len(evidence_required), 1) * 100, 1)
 
     def _call_llm(self, prompt: str) -> str:
-        """同步 LLM 调用"""
-        import asyncio
+        """同步 LLM 调用 — 通过统一 call_llm_sync"""
+        from src.core.llm_client import call_llm_sync
+        from src.config.llm_profiles import RoutingHint
 
-        async def _do():
-            if hasattr(self._llm_client, "execute"):
-                resp = await self._llm_client.execute(prompt=prompt)
-                if isinstance(resp, dict):
-                    data = resp.get("data", resp)
-                    if isinstance(data, dict):
-                        return data.get("content", "")
-                    return str(data)
-                return str(resp)
-            elif callable(self._llm_client):
-                return self._llm_client(prompt)
-            return ""
-
-        try:
-            return asyncio.run(_do())
-        except RuntimeError:
-            return ""
+        result = call_llm_sync(
+            prompt=prompt,
+            routing_hint=RoutingHint(action="framework_match"),
+        )
+        if result.get("success"):
+            return result.get("content", "")
+        logger.warning(f"Layer2 LLM call failed: {result.get('message', 'unknown')}")
+        return ""
 
     def _parse_match_response(self, response: str) -> Dict[str, Any]:
         """解析 LLM 返回的 JSON"""

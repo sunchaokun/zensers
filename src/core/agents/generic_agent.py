@@ -368,6 +368,12 @@ class GenericAgent(
                                 annual_report_data = self._shared_memory.get("annual_report_data") or {}
                             
                             if annual_report_data:
+                                # C11: Forensic mode — precise extraction by hypothesis data needs
+                                if self._context.get("forensic_mode") and self._context.get("hypothesis_data_needs"):
+                                    result = await self._handle_preloaded_forensic(annual_report_data, action)
+                                    if result is not None:
+                                        return result
+
                                 all_sections = annual_report_data.get("sections", [])
 
                                 # [P0-5c] Filter sections by agent's section_type if available
@@ -1566,6 +1572,43 @@ class GenericAgent(
             logger.info(f"GenericAgent {self.agent_id}: dynamically added skill '{skill_name}'")
             return True
         return False
+
+    async def _handle_preloaded_forensic(self, annual_report_data: dict, action: str):
+        """C11: Forensic mode preloaded path — precise extraction by hypothesis data needs."""
+        try:
+            from src.skills.analysis.annual_report_parser import AnnualReportParserSkill
+            parser = AnnualReportParserSkill()
+            data_needs = self._context.get("hypothesis_data_needs", [])
+            hypothesis = self._context.get("core_question", "")
+            extracted = parser.extract_for_hypothesis(annual_report_data, hypothesis, data_needs)
+            data_points = []
+            for sec in extracted.get("relevant_sections", []):
+                data_points.append({
+                    "title": sec.get("title", ""),
+                    "content": sec.get("content", "")[:4000],
+                    "source": "annual_report_pdf",
+                    "type": sec.get("section_type", "document"),
+                    "relevance": "hypothesis_match",
+                })
+            for item in extracted.get("relevant_line_items", []):
+                data_points.append({
+                    "title": f"{item['table_type']} - {item['row'].get('科目', '')}",
+                    "content": str(item["row"]),
+                    "source": "annual_report_pdf_table",
+                    "type": "structured_data",
+                    "relevance": "hypothesis_match",
+                })
+            self._report_progress(f"Delivered {len(data_points)} forensic data points for hypothesis: {hypothesis[:50]}", "data_delivery")
+            return self._ensure_standard_result({
+                "success": True,
+                "content": json.dumps(data_points, ensure_ascii=False),
+                "data_points": data_points,
+                "sources": [{"title": "Annual Report PDF", "url": "", "type": "document"}],
+                "agent_id": self.agent_id,
+            }, action)
+        except Exception as e:
+            logger.warning(f"GenericAgent {self.agent_id}: forensic preloaded extraction failed, falling back to standard preloaded: {e}")
+            return None
 
     def _ensure_standard_result(self, result: Dict[str, Any], action: str) -> Dict[str, Any]:
         """
@@ -4262,49 +4305,36 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
         system_prompt: str = "",
         max_tokens: int = 500,
         temperature: float = 0.7,
+        action: str = "keyword_expand",
     ) -> Dict[str, Any]:
         """
-        Agent 直接调用 LLM（独立于 LLMSkill）
-        
+        Agent 直接调用 LLM（通过统一 call_llm 接口）
+
         用于关键词扩展、决策辅助等 Agent 内部能力。
-        不经过 Skill Registry，直接使用 OpenAI API。
-        
+
         Args:
             prompt: 用户提示
             system_prompt: 系统提示（可选）
             max_tokens: 最大输出 token 数
             temperature: 温度参数
-            
+            action: 路由动作标识（默认 "keyword_expand"）
+
         Returns:
             {"success": True, "content": "..."} 或 {"success": False, "error": "..."}
         """
         try:
-            from openai import AsyncOpenAI
-            from src.config import settings
-            
-            client = AsyncOpenAI(
-                api_key=settings.llm.api_key,
-                base_url=settings.llm.base_url,
-            )
-            
-            messages = []
-            if system_prompt:
-                messages.append({"role": "system", "content": system_prompt})
-            messages.append({"role": "user", "content": prompt})
-            
-            # 使用便宜模型
-            model = getattr(settings.llm, 'cheap_model', None) or settings.llm.model
-            
-            response = await client.chat.completions.create(
-                model=model,
-                messages=messages,
+            from src.core.llm_client import call_llm
+            from src.config.llm_profiles import RoutingHint
+
+            result = await call_llm(
+                prompt=prompt,
+                system_prompt=system_prompt,
                 max_tokens=max_tokens,
                 temperature=temperature,
+                routing_hint=RoutingHint(agent_type="generic", action=action),
             )
-            
-            content = response.choices[0].message.content
-            return {"success": True, "content": content}
-            
+            return result
+
         except Exception as e:
             logger.warning(f"GenericAgent {self.agent_id}: LLM 直接调用失败: {e}")
             return {"success": False, "content": "", "error": str(e)}

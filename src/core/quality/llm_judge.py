@@ -7,8 +7,6 @@ Uses AsyncOpenAI direct call (matching generic_agent.py:2423 _call_llm_directly 
 
 import json
 import logging
-import asyncio
-import concurrent.futures
 from typing import Dict, List, Optional, Any
 from .checkers import BaseQualityChecker, QualityResult
 
@@ -62,33 +60,21 @@ CRITICAL: Your response must contain ONLY a JSON object. No other text.
 Content: {content[:4000]}"""
 
     def _call_llm_sync(self, prompt: str) -> str:
-        """Synchronous LLM call with async event loop compatibility."""
-        from openai import AsyncOpenAI
-        from src.config import settings
+        """Synchronous LLM call via unified call_llm_sync."""
+        from src.core.llm_client import call_llm_sync
+        from src.config.llm_profiles import RoutingHint
 
-        async def _call():
-            client = AsyncOpenAI(api_key=settings.llm.api_key, base_url=settings.llm.base_url)
-            try:
-                model = getattr(settings.llm, 'cheap_model', None) or settings.llm.model
-                resp = await client.chat.completions.create(
-                    model=model,
-                    messages=[
-                        {"role": "system", "content": "You are a strict quality reviewer. Output only JSON."},
-                        {"role": "user", "content": prompt}],
-                    max_tokens=500, temperature=0.3)
-                return resp.choices[0].message.content or ""
-            finally:
-                try:
-                    await client.close()
-                except Exception:
-                    pass
-
-        try:
-            asyncio.get_running_loop()
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                return pool.submit(asyncio.run, _call()).result(timeout=60)
-        except RuntimeError:
-            return asyncio.run(_call())
+        result = call_llm_sync(
+            prompt=prompt,
+            system_prompt="You are a strict quality reviewer. Output only JSON.",
+            max_tokens=500,
+            temperature=0.3,
+            routing_hint=RoutingHint(action="quality_judge"),
+        )
+        if result.get("success"):
+            return result.get("content", "")
+        logger.warning(f"LLM judge call failed: {result.get('message', 'unknown')}")
+        return ""
 
     def _build_judge_prompt(self, content: str, context: Optional[Dict]) -> str:
         return f"""You are a strict quality reviewer. Review this content.
