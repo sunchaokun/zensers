@@ -49,22 +49,21 @@ class TranslateOperation(AtomicRevision):
     async def _llm_translate_batch(
         self, texts: list[str], target_lang: str
     ) -> list[str]:
-        from src.skills.llm_skill import LLMSkill
-        from src.config.settings import settings as app_settings
+        from src.core.llm_client import call_llm
+        from src.config.llm_profiles import RoutingHint
 
-        llm = LLMSkill()
         combined = "\n\n---SEPARATOR---\n\n".join(texts)
         prompt = (
             f"Translate the following text to {target_lang}. "
             f"Preserve all Markdown formatting, table structures, and "
             f"the SEPARATOR markers between sections.\n\n{combined}"
         )
-        result = await llm.execute(
+        result = await call_llm(
             prompt=prompt,
             system_prompt="You are a professional translator.",
-            model=app_settings.llm.cheap_model,
             max_tokens=8192,
             temperature=0.3,
+            routing_hint=RoutingHint(action="translation"),
         )
         if not result.get("success"):
             raise RuntimeError(f"Translation failed: {result.get('error')}")

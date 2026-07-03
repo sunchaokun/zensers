@@ -124,29 +124,18 @@ class LLMEntityExtractor:
         text: str,
         source: Optional[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
-        """同步 LLM 提取 — 需要在无事件循环的同步上下文中调用"""
+        """同步 LLM 提取 — 通过统一 call_llm_sync"""
         try:
+            from src.core.llm_client import call_llm_sync
+            from src.config.llm_profiles import RoutingHint
+
             truncated = text[: self._max_llm_chars]
             prompt = _LLM_EXTRACT_PROMPT.format(text=truncated)
 
-            if hasattr(self._llm_client, "execute"):
-                import asyncio
-
-                try:
-                    result = asyncio.run(self._llm_client.execute(prompt=prompt))
-                except RuntimeError as e:
-                    if "event loop" in str(e).lower():
-                        logger.warning(
-                            "Cannot call extract() with async LLM client "
-                            "from async context; use extract_async() instead"
-                        )
-                        return []
-                    raise
-            elif callable(self._llm_client):
-                result = self._llm_client(prompt)
-            else:
-                return []
-
+            result = call_llm_sync(
+                prompt=prompt,
+                routing_hint=RoutingHint(action="entity_extraction"),
+            )
             return self._parse_llm_response(result)
 
         except Exception as e:
@@ -158,18 +147,18 @@ class LLMEntityExtractor:
         text: str,
         source: Optional[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
-        """异步 LLM 提取"""
+        """异步 LLM 提取 — 通过统一 call_llm"""
         try:
+            from src.core.llm_client import call_llm
+            from src.config.llm_profiles import RoutingHint
+
             truncated = text[: self._max_llm_chars]
             prompt = _LLM_EXTRACT_PROMPT.format(text=truncated)
 
-            if hasattr(self._llm_client, "execute"):
-                result = await self._llm_client.execute(prompt=prompt)
-            elif callable(self._llm_client):
-                result = self._llm_client(prompt)
-            else:
-                return []
-
+            result = await call_llm(
+                prompt=prompt,
+                routing_hint=RoutingHint(action="entity_extraction"),
+            )
             return self._parse_llm_response(result)
 
         except Exception as e:

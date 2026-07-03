@@ -157,11 +157,12 @@ def extract_findings(section_id: str, text: str, use_llm: bool = False) -> Secti
 
 
 def _extract_claims_via_llm(text: str) -> Optional[List[str]]:
-    """LLM 通道：抽取核心判断（需要 llm_skill 可用）"""
+    """LLM 通道：抽取核心判断 — 通过统一 call_llm_sync"""
     try:
-        from src.skills.llm_skill import LLMSkill
+        from src.core.llm_client import call_llm_sync
+        from src.config.llm_profiles import RoutingHint
     except ImportError:
-        logger.warning("LLMSkill not available, skipping LLM extraction")
+        logger.warning("call_llm_sync not available, skipping LLM extraction")
         return None
 
     prompt = (
@@ -172,8 +173,10 @@ def _extract_claims_via_llm(text: str) -> Optional[List[str]]:
         "文本：\n" + text[:3000]
     )
 
-    skill = LLMSkill()
-    result = skill.execute(prompt=prompt)
+    result = call_llm_sync(
+        prompt=prompt,
+        routing_hint=RoutingHint(action="claim_extraction"),
+    )
     if not result.get("success"):
         return None
 

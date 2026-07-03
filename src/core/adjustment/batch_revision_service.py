@@ -106,10 +106,8 @@ class BatchRevisionService:
         self._max_retries = max_retries
         self._timeout = timeout
         
-        # 延迟导入 LLM Skill
         if self._llm_client is None:
-            from src.skills.llm_skill import LLMSkill
-            self._llm_client = LLMSkill()
+            self._llm_client = None
     
     async def revise_multiple_sections(
         self,
@@ -383,17 +381,17 @@ class BatchRevisionService:
 
     async def _llm_revise_batch(self, prompt: str) -> Optional[str]:
         """调用 LLM 进行批量修订"""
-        if self._llm_client is None:
-            logger.error("[BatchRevision] LLM client not initialized")
-            return None
-        
         try:
-            # 使用 asyncio.wait_for 添加超时保护
+            from src.core.llm_client import call_llm
+            from src.config.llm_profiles import RoutingHint
+
             result = await asyncio.wait_for(
-                self._llm_client.execute(prompt=prompt),
-                timeout=self._timeout
+                call_llm(
+                    prompt=prompt,
+                    routing_hint=RoutingHint(action="batch_revision"),
+                ),
+                timeout=self._timeout,
             )
-            # LLMSkill 返回 {"success": True, "content": "...", ...}
             if result and result.get("success"):
                 return result.get("content")
             else:

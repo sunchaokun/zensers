@@ -250,9 +250,8 @@ class RevisionIntentAnalyzer:
 
     async def _call_llm(self, user_message: str, report: object) -> str:
         try:
-            from src.skills.llm_skill import LLMSkill
-            from src.config.settings import settings as app_settings
-            llm_skill = LLMSkill()
+            from src.core.llm_client import call_llm
+            from src.config.llm_profiles import RoutingHint
 
             system_prompt = _REVISION_SYSTEM_PROMPT.format(
                 output_schema=json.dumps(REVISION_JSON_SCHEMA, ensure_ascii=False, indent=2)
@@ -263,12 +262,12 @@ class RevisionIntentAnalyzer:
                 section_context=section_context,
             )
 
-            result = await llm_skill.execute(
+            result = await call_llm(
                 prompt=user_prompt,
                 system_prompt=system_prompt,
-                model=app_settings.llm.cheap_model,
                 max_tokens=2048,
                 temperature=0.3,
+                routing_hint=RoutingHint(action="revision_intent"),
             )
             if not result.get("success"):
                 logger.warning(f"LLM intent analysis failed: {result.get('error', 'unknown')}")
