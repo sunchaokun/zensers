@@ -871,6 +871,113 @@ async def llm_health():
     return result
 
 
+# ============ LLM Profile API ============
+
+@app.get("/api/v1/llm/profiles")
+async def list_llm_profiles():
+    from src.config.settings import settings
+    from dataclasses import asdict
+    profiles = {}
+    for name, p in settings.llm_profiles.profiles.items():
+        d = asdict(p)
+        d["hasApiKey"] = bool(p.api_key)
+        d["apiKey"] = "***" if p.api_key else ""
+        profiles[name] = d
+    return {
+        "profiles": profiles,
+        "default_profile": settings.llm_profiles.default_profile,
+        "fallback_chain": settings.llm_profiles.fallback_chain,
+    }
+
+
+@app.get("/api/v1/llm/profiles/{profile_name}")
+async def get_llm_profile(profile_name: str):
+    from src.config.settings import settings
+    from dataclasses import asdict
+    p = settings.llm_profiles.profiles.get(profile_name)
+    if not p:
+        raise HTTPException(status_code=404, detail=f"Profile '{profile_name}' not found")
+    d = asdict(p)
+    d["hasApiKey"] = bool(p.api_key)
+    d["apiKey"] = "***" if p.api_key else ""
+    return d
+
+
+@app.post("/api/v1/llm/profiles")
+async def create_llm_profile(profile_data: Dict[str, Any]):
+    from src.config.settings import settings
+    from src.config.llm_profiles import LLMProfile
+    name = profile_data.get("name")
+    if not name:
+        raise HTTPException(status_code=400, detail="Profile name is required")
+    try:
+        p = LLMProfile(**{k: v for k, v in profile_data.items() if k in LLMProfile.__dataclass_fields__})
+        settings.add_llm_profile(p)
+        settings._persist_llm_profiles()
+        return {"success": True, "profile_name": name}
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@app.put("/api/v1/llm/profiles/{profile_name}")
+async def update_llm_profile(profile_name: str, updates: Dict[str, Any]):
+    from src.config.settings import settings
+    try:
+        settings.update_llm_profile(profile_name, **updates)
+        settings._sync_llm_config_from_profiles()
+        settings._persist_llm_profiles()
+        return {"success": True, "profile_name": profile_name}
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.delete("/api/v1/llm/profiles/{profile_name}")
+async def delete_llm_profile(profile_name: str):
+    from src.config.settings import settings
+    try:
+        settings.delete_llm_profile(profile_name)
+        settings._persist_llm_profiles()
+        return {"success": True, "deleted": profile_name}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.post("/api/v1/llm/profiles/{profile_name}/default")
+async def set_default_llm_profile(profile_name: str):
+    from src.config.settings import settings
+    try:
+        settings.set_default_llm_profile(profile_name)
+        settings._persist_llm_profiles()
+        return {"success": True, "default_profile": profile_name}
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.get("/api/v1/llm/routing")
+async def get_llm_routing():
+    from src.config.settings import settings
+    return {
+        "fixed_agent_routing": settings.llm_profiles.fixed_agent_routing,
+        "action_routing": settings.llm_profiles.action_routing,
+        "fallback_chain": settings.llm_profiles.fallback_chain,
+    }
+
+
+@app.put("/api/v1/llm/routing")
+async def update_llm_routing(routing_data: Dict[str, Any]):
+    from src.config.settings import settings
+    if "fixed_agent_routing" in routing_data:
+        settings.llm_profiles.fixed_agent_routing = routing_data["fixed_agent_routing"]
+    if "action_routing" in routing_data:
+        settings.llm_profiles.action_routing = routing_data["action_routing"]
+    if "fallback_chain" in routing_data:
+        settings.llm_profiles.fallback_chain = routing_data["fallback_chain"]
+    settings._persist_llm_profiles()
+    return {"success": True}
+
+
 # ============ Document API ============
 from src.api.document_api import DocumentAPI, DocumentAPIRouter
 
