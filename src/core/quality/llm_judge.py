@@ -2,7 +2,7 @@
 LLMJudgeChecker — LLM-as-judge semantic quality checker (G3-FIX-1)
 
 Serves as a supplement to rule-based checkers (30% weight).
-Uses AsyncOpenAI direct call (matching generic_agent.py:2423 _call_llm_directly pattern).
+Uses call_llm_sync(routing_hint=...) for unified LLM routing.
 """
 
 import json
