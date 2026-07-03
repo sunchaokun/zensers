@@ -1320,6 +1320,8 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
             'topic': parsed.get('topic'),
             'directions': parsed.get('directions', []),
             'suggestions': parsed.get('suggestions', []),
+            'mode': parsed.get('mode', 'chat'),
+            'step': parsed.get('step', 0),
         }
         if last_thinking_content:
             response_data['thinking_content'] = last_thinking_content
@@ -1334,6 +1336,21 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
                     if d not in existing:
                         existing.append(d)
                 ctx['directions'] = existing
+            if response_data.get('action') == 'enter_framework':
+                session['mode'] = 'framework'
+                if parsed.get('framework_sections'):
+                    ctx['_suggested_sections'] = parsed['framework_sections']
+                if parsed.get('framework_tree'):
+                    ctx['_framework_tree'] = parsed['framework_tree']
+                self._sync_state_machine_to_framework(session, session_id)
+                try:
+                    framework_result = await self._enter_framework_mode(session_id, parsed.get('message', ''))
+                except Exception as e:
+                    logger.warning(f"[BG] enter_framework failed from background chain: {e}")
+                    framework_result = None
+                if isinstance(framework_result, dict) and framework_result.get('framework'):
+                    response_data['mode'] = 'framework'
+                    response_data['step'] = 0
             session['research_context'] = ctx
             self._update_intent_state_after_async(session)
             history = session.get('conversation_history', [])

@@ -642,6 +642,8 @@ class ProgressStreamer:
             "directions": response_data.get("directions", []),
             "suggestions": response_data.get("suggestions", []),
             "thinking_content": response_data.get("thinking_content"),
+            "mode": response_data.get("mode", "chat"),
+            "step": response_data.get("step", 0),
             "timestamp": datetime.now().isoformat(),
         })
         # Dual-write to persistent SessionStreamer (Issue 2 fix)

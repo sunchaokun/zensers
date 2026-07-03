@@ -133,8 +133,16 @@ export const useResearchStore = create<ResearchState>()(
         next.researchTopic = current.researchTopic;
       }
 
-      if (current.sessionId !== next.sessionId || current.status !== next.status) {
+      if (current.sessionId !== next.sessionId) {
         set(next);
+      } else if (current.status !== next.status) {
+        set({
+          status: next.status,
+          progress: next.progress,
+          phases: next.phases,
+          statistics: next.statistics,
+          summary: next.summary,
+        });
       }
     });
 

@@ -188,6 +188,8 @@ class SessionStreamer:
             "directions": response_data.get("directions", []),
             "suggestions": response_data.get("suggestions", []),
             "thinking_content": response_data.get("thinking_content"),
+            "mode": response_data.get("mode", "chat"),
+            "step": response_data.get("step", 0),
             "timestamp": datetime.now().isoformat(),
         }
         cls._notify_subscribers(session_id, SessionSSEEventType.CHAT_RESPONSE, event_data)
@@ -200,6 +202,8 @@ class SessionStreamer:
             "directions": response_data.get("directions", []),
             "suggestions": response_data.get("suggestions", []),
             "thinking_content": response_data.get("thinking_content"),
+            "mode": response_data.get("mode", "chat"),
+            "step": response_data.get("step", 0),
             "timestamp": _ts,
         })
         logger.info(f"Session stream chat_response pushed: {session_id}")

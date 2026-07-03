@@ -145,11 +145,18 @@ export function ChatPanel() {
         || data.session_id === storeSessionId;
       if (!matches) return;
 
+      if (streamingDoneRef.current) return;
+
+      const existingAssistantMsg = useChatStore.getState().messages.find(
+        m => m.role === 'assistant' && m.timestamp === data.timestamp
+      );
+      if (existingAssistantMsg) return;
+
       let finalContent = data.message;
       let finalThinking: string | undefined = data.thinking_content;
       if (!finalThinking) {
-        const THINK_OPEN = '[';
-        const THINK_CLOSE = ']';
+        const THINK_OPEN = '[';
+        const THINK_CLOSE = ']';
         const thinkOpen = data.message.indexOf(THINK_OPEN);
         const thinkClose = data.message.indexOf(THINK_CLOSE, thinkOpen + THINK_OPEN.length);
         if (thinkOpen !== -1 && thinkClose !== -1) {
@@ -184,10 +191,39 @@ export function ChatPanel() {
           ...(finalThinking !== undefined ? { thinkingContent: finalThinking } : {}),
           timestamp: data.timestamp || new Date().toISOString(),
         });
+        streamingDoneRef.current = true;
       }
-      if (data.suggestions && data.suggestions.length > 0) {
-        useResearchStore.getState().setStep(0, data.suggestions);
+
+      const mode = (data as any).mode || 'chat';
+      const action = data.action || 'continue_chat';
+
+      if (mode === 'framework') {
+        useResearchStore.getState().setStep(0, data.suggestions || []);
+        api.getResearchDetail(data.session_id).then((detail) => {
+          if (detail.framework) {
+            useResearchStore.getState().setFramework(detail.framework);
+          }
+        }).catch(() => {});
+      } else if (mode === 'research' && (data as any).step === 6) {
+        useResearchStore.getState().setTaskId(data.session_id);
+        useResearchStore.getState().setStatus('running');
+        useResearchStore.getState().setStep(6, undefined);
+      } else if (action === 'enter_framework') {
+        useResearchStore.getState().setStep(0, data.suggestions || []);
+        api.getResearchDetail(data.session_id).then((detail) => {
+          if (detail.framework) {
+            useResearchStore.getState().setFramework(detail.framework);
+          }
+        }).catch(() => {});
+      } else if (action === 'start_execution' || action === 'start_research') {
+        useResearchStore.getState().setStatus('running');
+        useResearchStore.getState().setStep(6, undefined);
+      } else {
+        if (data.suggestions && data.suggestions.length > 0) {
+          useResearchStore.getState().setStep(0, data.suggestions);
+        }
       }
+
       useResearchStore.getState().setSearchState('completed');
       const rs = useResearchStore.getState();
       if (rs.status !== 'running') {

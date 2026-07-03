@@ -236,6 +236,8 @@ export interface ChatResponseData {
   suggestions?: Array<{ id: string; label: string; example: string }>;
   timestamp: string;
   thinking_content?: string;
+  mode?: 'chat' | 'framework' | 'research';
+  step?: number;
 }
 
 export interface ChatTokenData {
