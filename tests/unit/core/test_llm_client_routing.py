@@ -161,3 +161,44 @@ class TestInitLlmInfrastructure:
         init_llm_infrastructure(registry)
         assert mod._router is not None
         assert mod._client_pool is not None
+
+
+class TestCostLimitPerCall:
+    @pytest.mark.asyncio
+    async def test_cost_limit_per_call_blocks_expensive_call(self):
+        expensive = LLMProfile(
+            name="expensive", api_key="sk-exp", base_url="https://exp.api/v1",
+            model="gpt-4o", cost_limit_per_call=0.001,
+        )
+        registry = LLMProfileRegistry(
+            profiles={"expensive": expensive, "migrated": LLMProfile(name="migrated", api_key="sk-d", base_url="https://d.api/v1")},
+            default_profile="migrated",
+        )
+        with patch("src.core.llm_client.settings", _mock_settings()):
+            from src.core.llm_client import init_llm_infrastructure
+            init_llm_infrastructure(registry)
+            from src.core.llm_client import call_llm
+            hint = RoutingHint(profile_name="expensive")
+            result = await call_llm(prompt="test", max_tokens=4096, routing_hint=hint)
+            assert result["success"] is False
+            assert result["error"] == "cost_limit_per_call"
+
+    @pytest.mark.asyncio
+    async def test_cost_limit_per_call_zero_allows_call(self):
+        no_limit = LLMProfile(
+            name="no_limit", api_key="sk-nl", base_url="https://nl.api/v1",
+            model="gpt-4o", cost_limit_per_call=0.0,
+        )
+        registry = LLMProfileRegistry(
+            profiles={"no_limit": no_limit, "migrated": LLMProfile(name="migrated", api_key="sk-d", base_url="https://d.api/v1")},
+            default_profile="migrated",
+        )
+        with patch("src.core.llm_client.settings", _mock_settings()):
+            from src.core.llm_client import init_llm_infrastructure
+            init_llm_infrastructure(registry)
+            with patch("src.core.llm_client._call_llm_api", new_callable=AsyncMock) as mock_api:
+                mock_api.return_value = {"choices": [{"message": {"content": "ok"}}], "usage": {}}
+                from src.core.llm_client import call_llm
+                hint = RoutingHint(profile_name="no_limit")
+                result = await call_llm(prompt="test", routing_hint=hint)
+                assert result["success"] is True

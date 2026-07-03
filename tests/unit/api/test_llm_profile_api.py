@@ -52,6 +52,14 @@ class TestCreateProfile:
         assert resp.status_code == 200
         assert resp.json()["success"] is True
 
+    def test_create_profile_sets_timestamps(self, client):
+        resp = client.post("/api/v1/llm/profiles", json={"name": "ts_test"})
+        assert resp.status_code == 200
+        get_resp = client.get("/api/v1/llm/profiles/ts_test")
+        data = get_resp.json()
+        assert data["created_at"] != ""
+        assert data["updated_at"] != ""
+
     def test_create_duplicate_409(self, client):
         client.post("/api/v1/llm/profiles", json={"name": "dup"})
         resp = client.post("/api/v1/llm/profiles", json={"name": "dup"})
@@ -69,6 +77,17 @@ class TestUpdateProfile:
         assert resp.status_code == 200
         get_resp = client.get("/api/v1/llm/profiles/fast")
         assert get_resp.json()["model"] == "gpt-4o"
+
+    def test_update_profile_updates_timestamp(self, client):
+        client.post("/api/v1/llm/profiles", json={"name": "ts_upd"})
+        get1 = client.get("/api/v1/llm/profiles/ts_upd")
+        ts1 = get1.json()["updated_at"]
+        import time
+        time.sleep(0.01)
+        client.put("/api/v1/llm/profiles/ts_upd", json={"model": "gpt-4o"})
+        get2 = client.get("/api/v1/llm/profiles/ts_upd")
+        ts2 = get2.json()["updated_at"]
+        assert ts2 >= ts1
 
     def test_update_nonexistent_404(self, client):
         resp = client.put("/api/v1/llm/profiles/ghost", json={"model": "x"})
@@ -114,9 +133,30 @@ class TestRouting:
 
     def test_update_routing(self, client):
         resp = client.put("/api/v1/llm/routing", json={
-            "fixed_agent_routing": {"quality_check": "strong"},
-            "action_routing": {"analyze": "strong"},
+            "fixed_agent_routing": {"quality_check": "migrated"},
+            "action_routing": {"analyze": "migrated"},
         })
         assert resp.status_code == 200
         get_resp = client.get("/api/v1/llm/routing")
-        assert get_resp.json()["fixed_agent_routing"]["quality_check"] == "strong"
+        assert get_resp.json()["fixed_agent_routing"]["quality_check"] == "migrated"
+
+    def test_update_routing_invalid_profile_400(self, client):
+        resp = client.put("/api/v1/llm/routing", json={
+            "fixed_agent_routing": {"quality_check": "nonexistent"},
+        })
+        assert resp.status_code == 400
+        assert "nonexistent" in resp.json()["detail"]
+
+    def test_update_routing_invalid_action_profile_400(self, client):
+        resp = client.put("/api/v1/llm/routing", json={
+            "action_routing": {"analyze": "ghost_profile"},
+        })
+        assert resp.status_code == 400
+        assert "ghost_profile" in resp.json()["detail"]
+
+    def test_update_routing_invalid_fallback_400(self, client):
+        resp = client.put("/api/v1/llm/routing", json={
+            "fallback_chain": ["migrated", "nonexistent"],
+        })
+        assert resp.status_code == 400
+        assert "nonexistent" in resp.json()["detail"]

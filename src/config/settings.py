@@ -278,6 +278,7 @@ class Settings:
 
         # Load configuration
         self._load_config()
+        self._load_llm_profiles_from_yaml()
         self._load_llm_profiles_from_disk()
         self._migrate_legacy_to_profile()
         self._initialized = True
@@ -594,6 +595,12 @@ class Settings:
     def add_llm_profile(self, profile: LLMProfile) -> None:
         if profile.name in self.llm_profiles.profiles:
             raise ValueError(f"Profile '{profile.name}' already exists")
+        from datetime import datetime
+        now = datetime.utcnow().isoformat() + "Z"
+        if not profile.created_at:
+            profile.created_at = now
+        if not profile.updated_at:
+            profile.updated_at = now
         self.llm_profiles.profiles[profile.name] = profile
         self._persist_llm_profiles()
 
@@ -601,9 +608,11 @@ class Settings:
         if name not in self.llm_profiles.profiles:
             raise KeyError(f"Profile '{name}' not found")
         p = self.llm_profiles.profiles[name]
+        from datetime import datetime
         for k, v in kwargs.items():
             if hasattr(p, k):
                 setattr(p, k, v)
+        p.updated_at = datetime.utcnow().isoformat() + "Z"
         self._persist_llm_profiles()
 
     def delete_llm_profile(self, name: str) -> None:
@@ -697,6 +706,38 @@ class Settings:
             logger.info("LLM profiles loaded from %s", path)
         except Exception as e:
             logger.warning("Failed to load LLM profiles from disk: %s", e)
+
+    def _load_llm_profiles_from_yaml(self) -> None:
+        from dataclasses import fields as dc_fields
+        valid_keys = {f.name for f in dc_fields(LLMProfile)}
+        profiles_path = os.path.join(os.path.dirname(__file__), "..", "..", "config", "llm_profiles.yaml")
+        if os.path.exists(profiles_path):
+            try:
+                config = load_yaml_config(profiles_path)
+                for name, pdata in config.get("profiles", {}).items():
+                    if name not in self.llm_profiles.profiles:
+                        filtered = {k: v for k, v in pdata.items() if k in valid_keys}
+                        self.llm_profiles.profiles[name] = LLMProfile(**filtered)
+                if config.get("default_profile") and not Path(self._llm_profiles_persist_path).exists():
+                    self.llm_profiles.default_profile = config["default_profile"]
+                if config.get("fallback_chain") and not Path(self._llm_profiles_persist_path).exists():
+                    self.llm_profiles.fallback_chain = config["fallback_chain"]
+                logger.info("LLM profiles loaded from YAML: %s", profiles_path)
+            except Exception as e:
+                logger.warning("Failed to load LLM profiles from YAML: %s", e)
+
+        routing_path = os.path.join(os.path.dirname(__file__), "..", "..", "config", "llm_routing.yaml")
+        if os.path.exists(routing_path):
+            try:
+                config = load_yaml_config(routing_path)
+                if not Path(self._llm_profiles_persist_path).exists():
+                    if config.get("fixed_agent_routing"):
+                        self.llm_profiles.fixed_agent_routing = config["fixed_agent_routing"]
+                    if config.get("action_routing"):
+                        self.llm_profiles.action_routing = config["action_routing"]
+                logger.info("LLM routing loaded from YAML: %s", routing_path)
+            except Exception as e:
+                logger.warning("Failed to load LLM routing from YAML: %s", e)
 
     # ── Public API ────────────────────────────────────────────────────────
 

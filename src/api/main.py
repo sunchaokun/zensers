@@ -982,11 +982,21 @@ async def get_llm_routing():
 async def update_llm_routing(routing_data: Dict[str, Any]):
     from src.config.settings import get_settings
     settings = get_settings()
+    existing = set(settings.llm_profiles.profiles.keys())
     if "fixed_agent_routing" in routing_data:
+        for agent, pname in routing_data["fixed_agent_routing"].items():
+            if pname not in existing:
+                raise HTTPException(status_code=400, detail=f"Profile '{pname}' not found (referenced in fixed_agent_routing.{agent})")
         settings.llm_profiles.fixed_agent_routing = routing_data["fixed_agent_routing"]
     if "action_routing" in routing_data:
+        for action, pname in routing_data["action_routing"].items():
+            if pname not in existing:
+                raise HTTPException(status_code=400, detail=f"Profile '{pname}' not found (referenced in action_routing.{action})")
         settings.llm_profiles.action_routing = routing_data["action_routing"]
     if "fallback_chain" in routing_data:
+        for pname in routing_data["fallback_chain"]:
+            if pname not in existing:
+                raise HTTPException(status_code=400, detail=f"Profile '{pname}' not found (referenced in fallback_chain)")
         settings.llm_profiles.fallback_chain = routing_data["fallback_chain"]
     settings._persist_llm_profiles()
     return {"success": True}

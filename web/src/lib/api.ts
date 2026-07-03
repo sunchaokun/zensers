@@ -471,6 +471,7 @@ class ApiClient {
     mode?: string;
     current_step?: number;
     language?: string;
+    framework?: any;
   }> {
     const { data } = await this.client.get(`/api/v1/research/${taskId}`);
     return data;

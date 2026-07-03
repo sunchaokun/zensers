@@ -48,6 +48,23 @@ class TestSettingsProfileCRUD:
         assert "strong" in s.llm_profiles.profiles
         assert s.llm_profiles.profiles["strong"].model == "gpt-4o"
 
+    def test_add_profile_sets_created_at(self):
+        s = Settings()
+        p = _profile("ts_test")
+        s.add_llm_profile(p)
+        assert p.created_at != ""
+        assert p.updated_at != ""
+
+    def test_update_profile_sets_updated_at(self):
+        s = Settings()
+        p = _profile("ts_upd")
+        s.add_llm_profile(p)
+        ts1 = p.updated_at
+        import time
+        time.sleep(0.01)
+        s.update_llm_profile("ts_upd", model="gpt-4o-mini")
+        assert p.updated_at >= ts1
+
     def test_add_duplicate_name_raises(self):
         s = Settings()
         s.add_llm_profile(_profile("strong"))
@@ -122,3 +139,59 @@ class TestSettingsSyncLlmFromProfiles:
         assert s.llm.top_p == 0.9
         assert s.llm.frequency_penalty == 0.1
         assert s.llm.presence_penalty == 0.2
+
+
+class TestYamlProfileLoading:
+    def test_load_profiles_from_yaml(self, tmp_path):
+        yaml_dir = tmp_path / "config"
+        yaml_dir.mkdir()
+        (yaml_dir / "llm_profiles.yaml").write_text(
+            "profiles:\n"
+            "  yaml_test:\n"
+            "    name: yaml_test\n"
+            "    display_name: YAML Test\n"
+            "    model: gpt-4o\n"
+            "    api_key: sk-yaml\n"
+            "default_profile: yaml_test\n"
+            "fallback_chain:\n"
+            "  - yaml_test\n", encoding="utf-8"
+        )
+        (yaml_dir / "llm_routing.yaml").write_text(
+            "fixed_agent_routing:\n"
+            "  data_collection: yaml_test\n"
+            "action_routing:\n"
+            "  analyze: yaml_test\n", encoding="utf-8"
+        )
+        Settings._reset_instance()
+        with patch("src.config.settings.load_yaml_config") as mock_yaml:
+            def _yaml_side_effect(path):
+                if "llm_profiles.yaml" in path:
+                    return {
+                        "profiles": {"yaml_test": {"name": "yaml_test", "display_name": "YAML Test", "model": "gpt-4o", "api_key": "sk-yaml"}},
+                        "default_profile": "yaml_test",
+                        "fallback_chain": ["yaml_test"],
+                    }
+                if "llm_routing.yaml" in path:
+                    return {
+                        "fixed_agent_routing": {"data_collection": "yaml_test"},
+                        "action_routing": {"analyze": "yaml_test"},
+                    }
+                return {}
+            mock_yaml.side_effect = _yaml_side_effect
+            s = Settings()
+            s._llm_profiles_persist_path = str(tmp_path / "llm_profiles.json")
+            s._load_llm_profiles_from_yaml()
+            assert "yaml_test" in s.llm_profiles.profiles
+            assert s.llm_profiles.profiles["yaml_test"].model == "gpt-4o"
+
+    def test_yaml_does_not_override_existing_profiles(self, tmp_path):
+        Settings._reset_instance()
+        s = Settings()
+        s._llm_profiles_persist_path = str(tmp_path / "llm_profiles.json")
+        s.add_llm_profile(LLMProfile(name="existing", model="existing-model"))
+        with patch("src.config.settings.load_yaml_config") as mock_yaml:
+            mock_yaml.return_value = {
+                "profiles": {"existing": {"name": "existing", "model": "yaml-model"}},
+            }
+            s._load_llm_profiles_from_yaml()
+            assert s.llm_profiles.profiles["existing"].model == "existing-model"

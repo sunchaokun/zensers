@@ -118,6 +118,14 @@ async def call_llm(
         temperature = temperature or profile.temperature
         api_key = api_key or profile.api_key
         base_url = base_url or profile.base_url
+        if profile.cost_limit_per_call > 0:
+            estimated_cost = (max_tokens / 1000) * 0.01
+            if estimated_cost > profile.cost_limit_per_call:
+                return {
+                    "success": False,
+                    "message": f"Estimated cost ${estimated_cost:.4f} exceeds per-call limit ${profile.cost_limit_per_call:.2f} (profile: {profile.name})",
+                    "error": "cost_limit_per_call",
+                }
     elif routing_hint is not None and _router is None:
         logger.warning("routing_hint provided but LLM router not initialized; using default settings")
 
