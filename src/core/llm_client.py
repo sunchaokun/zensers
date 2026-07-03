@@ -110,10 +110,10 @@ async def call_llm(
         Dict with keys: success, content, model, usage
         On failure: success=False, message=str, error=str
     """
-    if routing_hint is not None and _router is not None and model is None:
+    if routing_hint is not None and _router is not None:
         profile = _router.resolve(routing_hint)
-        model = profile.model
-        fallback_model = profile.fallback_model
+        model = model or profile.model
+        fallback_model = fallback_model or profile.fallback_model
         max_tokens = max_tokens or profile.max_tokens
         temperature = temperature or profile.temperature
         api_key = api_key or profile.api_key
@@ -161,6 +161,51 @@ async def call_llm(
                     "error": "llm_call_failed",
                 }
         return {"success": False, "message": str(primary_err), "error": "llm_call_failed"}
+
+
+def call_llm_sync(
+    prompt: str,
+    model: Optional[str] = None,
+    system_prompt: str = "",
+    fallback_model: Optional[str] = None,
+    max_tokens: Optional[int] = None,
+    temperature: Optional[float] = None,
+    api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
+    routing_hint: Optional[RoutingHint] = None,
+) -> Dict[str, Any]:
+    """Synchronous wrapper for call_llm().
+
+    Handles async event loop bridging automatically:
+    - If no event loop is running: uses asyncio.run()
+    - If an event loop is already running: runs in a background thread
+    """
+    import asyncio
+    import concurrent.futures
+
+    coro = call_llm(
+        prompt=prompt,
+        model=model,
+        system_prompt=system_prompt,
+        fallback_model=fallback_model,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        api_key=api_key,
+        base_url=base_url,
+        routing_hint=routing_hint,
+    )
+
+    try:
+        asyncio.get_running_loop()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, coro).result(timeout=120)
+    except RuntimeError:
+        try:
+            return asyncio.run(coro)
+        except Exception as e:
+            return {"success": False, "message": str(e), "error": "sync_call_failed"}
+    except Exception as e:
+        return {"success": False, "message": str(e), "error": "sync_call_failed"}
 
 
 async def _call_llm_api(
