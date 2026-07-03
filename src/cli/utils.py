@@ -50,3 +50,46 @@ def get_api_base_url() -> str:
 def _detect_api_base_url() -> str:
     import os
     return os.environ.get("ZENSERS_API_URL", "http://localhost:8000").rstrip("/")
+
+import json as _json
+from dataclasses import dataclass, asdict
+
+@dataclass
+class CLIConfig:
+    default_output_format: str = "markdown"
+    auto_save_reports: bool = True
+    max_concurrent_tasks: int = 3
+    api_base_url: str = ""
+    default_language: str = "zh"
+
+    @classmethod
+    def load(cls) -> "CLIConfig":
+        config_path = Path.home() / ".zensers" / "config.json"
+        if config_path.exists():
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    data = _json.load(f)
+                return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+            except Exception:
+                pass
+        return cls()
+
+    def save(self) -> None:
+        config_path = Path.home() / ".zensers" / "config.json"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(config_path, "w", encoding="utf-8") as f:
+            _json.dump(asdict(self), f, indent=2, ensure_ascii=False)
+
+    @staticmethod
+    def config_path() -> Path:
+        return Path.home() / ".zensers" / "config.json"
+
+
+_output_json: bool = False
+
+def set_output_json(value: bool) -> None:
+    global _output_json
+    _output_json = value
+
+def is_output_json() -> bool:
+    return _output_json

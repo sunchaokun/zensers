@@ -9,6 +9,7 @@ import logging
 import os
 import shutil
 import sys
+from dataclasses import asdict
 from pathlib import Path
 from typing import Optional, List
 
@@ -42,6 +43,22 @@ llm.register(app)
 prompt.register(app)
 document.register(app)
 upload.register(app)
+
+
+@app.callback()
+def global_options(
+    api_url: Optional[str] = typer.Option(None, "--api-url", envvar="ZENSERS_API_URL", help="API server base URL"),
+    no_color: bool = typer.Option(False, "--no-color", help="Disable colored output"),
+    json_output: bool = typer.Option(False, "--json", help="Output in JSON format"),
+):
+    """Zensers - Automated Industry Research System."""
+    if api_url:
+        set_api_base_url(api_url)
+    if no_color:
+        console.no_color = True
+    if json_output:
+        from src.cli.utils import set_output_json
+        set_output_json(True)
 
 
 # ===== Top-level command: research =====
@@ -293,28 +310,33 @@ async def _download_report(task_id: str, output: str, format: str):
 def config(
     show: bool = typer.Option(False, "--show", help="Show current configuration"),
     reset: bool = typer.Option(False, "--reset", help="Reset to default configuration"),
+    set_key: Optional[str] = typer.Option(None, "--set", help="Set config key=value (e.g. --set default_output_format=docx)"),
 ):
     """Manage CLI configuration."""
-    config_path = Path.home() / ".zensers" / "config.json"
+    from src.cli.utils import CLIConfig
 
-    if show:
-        if config_path.exists():
-            with open(config_path, "r", encoding="utf-8") as f:
-                config = json.load(f)
-            console.print_json(json.dumps(config))
-        else:
-            console.print("[dim]Configuration file not yet created[/dim]")
-
+    if set_key:
+        if "=" not in set_key:
+            console.print("[red]Invalid format. Use: --set key=value[/red]")
+            raise typer.Exit(1)
+        key, value = set_key.split("=", 1)
+        cfg = CLIConfig.load()
+        if key not in CLIConfig.__dataclass_fields__:
+            console.print(f"[red]Unknown config key: {key}[/red]")
+            console.print(f"[dim]Available keys: {', '.join(CLIConfig.__dataclass_fields__.keys())}[/dim]")
+            raise typer.Exit(1)
+        setattr(cfg, key, value)
+        cfg.save()
+        console.print(f"[green]Set {key} = {value}[/green]")
+    elif show:
+        cfg = CLIConfig.load()
+        console.print_json(json.dumps(asdict(cfg)))
     elif reset:
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        default_config = {
-            "default_output_format": "markdown",
-            "auto_save_reports": True,
-            "max_concurrent_tasks": 3,
-        }
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(default_config, f, indent=2)
+        cfg = CLIConfig()
+        cfg.save()
         console.print("[green]Configuration reset to defaults[/green]")
+    else:
+        console.print("[dim]Use --show to view config, --reset to reset, or --set key=value to update[/dim]")
 
 
 # ===== Top-level command: version =====
