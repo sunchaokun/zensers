@@ -203,29 +203,25 @@ def status(
 
 
 async def _get_task_status_remote(task_id: str, watch: bool):
-    """Get task status via HTTP API delegation."""
-    import httpx
-    if watch:
-        console.print(f"[dim]Monitoring task {task_id} (press Ctrl+C to stop)...[/dim]\n")
-        try:
-            while True:
-                async with httpx.AsyncClient() as client:
-                    base = get_api_base_url()
-                    r = await client.get(f"{base}/api/v1/research/{task_id}/status", timeout=10)
-                    r.raise_for_status()
-                    result = r.json()
+    from src.cli.client import ZensersClient, ZensersError
+    async with ZensersClient() as client:
+        if watch:
+            console.print(f"[dim]Monitoring task {task_id} (press Ctrl+C to stop)...[/dim]\n")
+            try:
+                while True:
+                    result = await client.research_status(task_id)
                     console.print(f"[dim]Status: {result.get('status', 'unknown')}[/dim]")
                     if result.get("status") in ("completed", "failed", "cancelled"):
                         break
-                await asyncio.sleep(2)
-        except KeyboardInterrupt:
-            console.print("\n[dim]Monitoring stopped[/dim]")
-    else:
-        async with httpx.AsyncClient() as client:
-            base = get_api_base_url()
-            r = await client.get(f"{base}/api/v1/research/{task_id}/status", timeout=10)
-            r.raise_for_status()
-            result = r.json()
+                    await asyncio.sleep(2)
+            except KeyboardInterrupt:
+                console.print("\n[dim]Monitoring stopped[/dim]")
+        else:
+            try:
+                result = await client.research_status(task_id)
+            except ZensersError as e:
+                console.print(f"[red]Failed to get task status: {e.message}[/red]")
+                raise typer.Exit(1)
             console.print(f"Status: {result.get('status', 'unknown')}")
             if result.get("topic"):
                 console.print(f"Topic: {result['topic']}")
@@ -234,27 +230,16 @@ async def _get_task_status_remote(task_id: str, watch: bool):
 
 
 async def _list_active_tasks_remote():
-    """List active tasks via HTTP API."""
-    import httpx
+    from src.cli.client import ZensersClient, ZensersError
     try:
-        async with httpx.AsyncClient() as client:
-            base = get_api_base_url()
-            r = await client.get(f"{base}/api/v1/research/sessions", params={"limit": 50})
-            r.raise_for_status()
-            result = r.json()
-    except httpx.ConnectError:
-        console.print("[red]Connection refused: server not running[/red]")
-        raise typer.Exit(1)
-    except httpx.TimeoutException:
-        console.print("[red]Request timed out[/red]")
-        raise typer.Exit(1)
-    except Exception as e:
-        console.print(f"[red]Failed to list active tasks: {e}[/red]")
+        async with ZensersClient() as client:
+            result = await client.research_sessions(limit=50)
+    except ZensersError as e:
+        console.print(f"[red]Failed to list active tasks: {e.message}[/red]")
         raise typer.Exit(1)
 
     sessions = result.get("sessions", [])
     active = [s for s in sessions if s.get("status") in ("analyzing", "reporting", "paused")]
-
     if not active:
         console.print("[dim]No active tasks[/dim]")
         return
@@ -285,26 +270,15 @@ def download(
 
 
 async def _download_report(task_id: str, output: str, format: str):
-    """Download report via HTTP API."""
-    import httpx
-    content = None
+    from src.cli.client import ZensersClient, ZensersError
     try:
-        async with httpx.AsyncClient() as client:
-            url = f"{get_api_base_url()}/api/v1/download/{task_id}"
-            r = await client.get(url, timeout=60)
-            if r.status_code == 404:
-                console.print(f"[red]Report not found: {task_id}[/red]")
-                raise typer.Exit(1)
-            if r.status_code != 200:
-                console.print(f"[red]Download failed: HTTP {r.status_code} - {r.text}[/red]")
-                raise typer.Exit(1)
-            content = r.content
-    except httpx.RequestError as e:
-        console.print(f"[red]Download failed (network): {e}[/red]")
+        async with ZensersClient() as client:
+            content, content_type = await client.download(task_id)
+    except FileNotFoundError:
+        console.print(f"[red]Report not found: {task_id}[/red]")
         raise typer.Exit(1)
-
-    if content is None:
-        console.print("[red]Download failed: no content received[/red]")
+    except ZensersError as e:
+        console.print(f"[red]Download failed: {e.message}[/red]")
         raise typer.Exit(1)
 
     output_path = Path(output)
@@ -371,16 +345,13 @@ def changelog(
 
 
 async def _changelog_async(format: str, max_lines: int):
-    from src.cli.client import ZensersClient
-
-    client = ZensersClient()
+    from src.cli.client import ZensersClient, ZensersError
     try:
-        result = await client.changelog(format, max_lines)
-    except Exception as e:
-        console.print(f"[red]Failed to fetch changelog: {e}[/red]")
+        async with ZensersClient() as client:
+            result = await client.changelog(format, max_lines)
+    except ZensersError as e:
+        console.print(f"[red]Failed to fetch changelog: {e.message}[/red]")
         raise typer.Exit(1)
-    finally:
-        await client.close()
     content = result.get("changelog", "")
     if isinstance(content, list):
         for entry in content:
