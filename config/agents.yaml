@@ -16,7 +16,7 @@ version: "1.0"
 # Requirement Analysis Agent
 # ============================================================
 requirement_analysis:
-  # LLM Configuration
+  llm_profile: strong
   llm:
     model: gpt-4o
     temperature: 0.3              # Low temperature for accuracy
@@ -53,7 +53,7 @@ requirement_analysis:
 # Report Generation Agent
 # ============================================================
 report_generation:
-  # LLM Configuration
+  llm_profile: strong
   llm:
     model: gpt-4o
     temperature: 0.5
@@ -182,7 +182,7 @@ layout_design:
 # Quality Check Agent
 # ============================================================
 quality_check:
-  # LLM Configuration
+  llm_profile: strong
   llm:
     model: gpt-4o
     temperature: 0.2              # Low temperature for strict checking
@@ -239,7 +239,7 @@ quality_check:
 # Data Collection Agent
 # ============================================================
 data_collection:
-  # LLM Configuration
+  llm_profile: fast
   llm:
     model: gpt-4o
     temperature: 0.3
