@@ -259,6 +259,7 @@ class Settings:
 
         self.config_path = config_path or self._find_config_file()
         self._llm_config_persist_path = "data/llm_config.json"
+        self._llm_profiles_persist_path = "data/llm_profiles.json"
 
         # Initialize configuration modules
         self.llm = LLMConfig()
@@ -651,6 +652,57 @@ class Settings:
             max_context_tokens=self.llm.max_context_tokens,
             is_default=True,
         )
+
+    def _persist_llm_profiles(self) -> None:
+        if not self._llm_profiles_persist_path:
+            return
+        try:
+            path = Path(self._llm_profiles_persist_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            profiles_data = {}
+            for name, p in self.llm_profiles.profiles.items():
+                profiles_data[name] = {
+                    "name": p.name, "display_name": p.display_name,
+                    "provider": p.provider, "api_key": p.api_key,
+                    "base_url": p.base_url, "model": p.model,
+                    "fallback_model": p.fallback_model,
+                    "temperature": p.temperature, "max_tokens": p.max_tokens,
+                    "top_p": p.top_p, "frequency_penalty": p.frequency_penalty,
+                    "presence_penalty": p.presence_penalty,
+                    "max_context_tokens": p.max_context_tokens,
+                    "cost_limit_per_call": p.cost_limit_per_call,
+                    "is_default": p.is_default, "enabled": p.enabled,
+                    "created_at": p.created_at, "updated_at": p.updated_at,
+                }
+            data = {
+                "default_profile": self.llm_profiles.default_profile,
+                "fallback_chain": self.llm_profiles.fallback_chain,
+                "fixed_agent_routing": self.llm_profiles.fixed_agent_routing,
+                "action_routing": self.llm_profiles.action_routing,
+                "profiles": profiles_data,
+            }
+            path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            logger.debug("LLM profiles persisted to %s", path)
+        except Exception as e:
+            logger.warning("Failed to persist LLM profiles: %s", e)
+
+    def _load_llm_profiles_from_disk(self) -> None:
+        if not self._llm_profiles_persist_path:
+            return
+        path = Path(self._llm_profiles_persist_path)
+        if not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            self.llm_profiles.default_profile = data.get("default_profile", self.llm_profiles.default_profile)
+            self.llm_profiles.fallback_chain = data.get("fallback_chain", self.llm_profiles.fallback_chain)
+            self.llm_profiles.fixed_agent_routing = data.get("fixed_agent_routing", self.llm_profiles.fixed_agent_routing)
+            self.llm_profiles.action_routing = data.get("action_routing", self.llm_profiles.action_routing)
+            for name, pdata in data.get("profiles", {}).items():
+                self.llm_profiles.profiles[name] = LLMProfile(**{k: v for k, v in pdata.items() if k in LLMProfile.__dataclass_fields__})
+            logger.info("LLM profiles loaded from %s", path)
+        except Exception as e:
+            logger.warning("Failed to load LLM profiles from disk: %s", e)
 
     # ── Public API ────────────────────────────────────────────────────────
 
