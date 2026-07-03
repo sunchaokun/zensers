@@ -1,6 +1,5 @@
 """Session management commands."""
 import asyncio
-import json
 import logging
 from pathlib import Path
 from typing import Optional, List
@@ -9,7 +8,7 @@ import typer
 from rich.table import Table
 from rich.panel import Panel
 
-from src.cli.utils import console, get_api_base_url
+from src.cli.utils import console
 
 logger = logging.getLogger(__name__)
 
@@ -162,76 +161,67 @@ async def _session_resume(task_id: str):
 
 
 async def _session_pause(task_id: str):
-    """Pause research task"""
-    import httpx
+    from src.cli.client import ZensersClient, ZensersError
     try:
-        async with httpx.AsyncClient() as client:
-            r = await client.post(f"{get_api_base_url()}/api/v1/research/{task_id}/pause", timeout=10)
-            result = r.json()
-            if result.get("status") == "paused":
-                console.print(f"[green]✓ Task paused: {task_id}[/green]")
-            else:
-                console.print(f"[yellow]Pause result: {result.get('message', 'unknown')}[/yellow]")
-    except Exception as e:
-        console.print(f"[red]Pause failed: {e}[/red]")
+        async with ZensersClient() as client:
+            result = await client.research_pause(task_id)
+    except ZensersError as e:
+        console.print(f"[red]Pause failed: {e.message}[/red]")
+        return
+    if result.get("status") == "paused":
+        console.print(f"[green]✓ Task paused: {task_id}[/green]")
+    else:
+        console.print(f"[yellow]Pause result: {result.get('message', 'unknown')}[/yellow]")
 
 
 async def _session_cancel(task_id: str):
-    """Cancel research task"""
-    import httpx
+    from src.cli.client import ZensersClient, ZensersError
     try:
-        async with httpx.AsyncClient() as client:
-            r = await client.post(f"{get_api_base_url()}/api/v1/research/{task_id}/cancel", timeout=10)
-            result = r.json()
-            if result.get("status") == "cancelled":
-                console.print(f"[green]✓ Task cancelled: {task_id}[/green]")
-            else:
-                console.print(f"[yellow]Cancel result: {result.get('message', 'unknown')}[/yellow]")
-    except Exception as e:
-        console.print(f"[red]Cancel failed: {e}[/red]")
+        async with ZensersClient() as client:
+            result = await client.research_cancel(task_id)
+    except ZensersError as e:
+        console.print(f"[red]Cancel failed: {e.message}[/red]")
+        return
+    if result.get("status") == "cancelled":
+        console.print(f"[green]✓ Task cancelled: {task_id}[/green]")
+    else:
+        console.print(f"[yellow]Cancel result: {result.get('message', 'unknown')}[/yellow]")
 
 
 async def _session_status(task_id: str):
-    """View task status"""
-    import httpx
+    from src.cli.client import ZensersClient, ZensersError
     try:
-        async with httpx.AsyncClient() as client:
-            r = await client.get(f"{get_api_base_url()}/api/v1/research/{task_id}/status", timeout=10)
-            result = r.json()
-            console.print(f"\n[bold]Task: {task_id}[/bold]")
-            console.print(f"  Status: {result.get('status', 'unknown')}")
-            console.print(f"  Progress: {result.get('progress', 0) * 100:.0f}%")
-            if result.get('current_phase'):
-                console.print(f"  Current Phase: {result['current_phase']}")
-            if result.get('phases'):
-                console.print(f"  Phases:")
-                for p in result['phases']:
-                    status_icon = {"completed": "✅", "running": "⏳", "pending": "⬜", "error": "❌"}.get(p.get('status', ''), '⬜')
-                    console.print(f"    {status_icon} {p.get('name', 'unknown')} ({p.get('progress', 0)*100:.0f}%)")
-    except Exception as e:
-        console.print(f"[red]Status query failed: {e}[/red]")
+        async with ZensersClient() as client:
+            result = await client.research_status(task_id)
+        console.print(f"\n[bold]Task: {task_id}[/bold]")
+        console.print(f"  Status: {result.get('status', 'unknown')}")
+        console.print(f"  Progress: {result.get('progress', 0) * 100:.0f}%")
+        if result.get('current_phase'):
+            console.print(f"  Current Phase: {result['current_phase']}")
+        if result.get('phases'):
+            console.print(f"  Phases:")
+            for p in result['phases']:
+                status_icon = {"completed": "✅", "running": "⏳", "pending": "⬜", "error": "❌"}.get(p.get('status', ''), '⬜')
+                console.print(f"    {status_icon} {p.get('name', 'unknown')} ({p.get('progress', 0)*100:.0f}%)")
+    except ZensersError as e:
+        console.print(f"[red]Status query failed: {e.message}[/red]")
 
 
 async def _session_modify(task_id: str, aspects: List[str], topic: Optional[str] = None):
-    """Modify research requirements"""
-    import httpx
+    from src.cli.client import ZensersClient, ZensersError
     try:
-        data = {"task_id": task_id, "aspects": json.dumps(aspects, ensure_ascii=False)}
-        if topic:
-            data["topic"] = topic
-        async with httpx.AsyncClient() as client:
-            r = await client.post(f"{get_api_base_url()}/api/v1/research/{task_id}/modify", data=data, timeout=30)
-            result = r.json()
-            if result.get("status") == "requirements_updated":
-                plan = result.get("plan", {})
-                console.print(f"[green]✓ Requirements updated[/green]")
-                console.print(f"  Topic: {plan.get('topic', 'N/A')}")
-                console.print(f"  Sections: {', '.join(plan.get('sections', []))}")
-                console.print(f"\n[dim]Use 'session resume {task_id}' to resume research[/dim]")
-            else:
-                console.print(f"[red]Modify failed: {result.get('error', 'unknown')}[/red]")
-    except Exception as e:
-        console.print(f"[red]Modify failed: {e}[/red]")
+        async with ZensersClient() as client:
+            result = await client.research_modify(task_id, aspects, topic)
+        if result.get("status") == "requirements_updated":
+            plan = result.get("plan", {})
+            console.print(f"[green]✓ Requirements updated[/green]")
+            console.print(f"  Topic: {plan.get('topic', 'N/A')}")
+            console.print(f"  Sections: {', '.join(plan.get('sections', []))}")
+            console.print(f"\n[dim]Use 'session resume {task_id}' to resume research[/dim]")
+        else:
+            console.print(f"[red]Modify failed: {result.get('error', 'unknown')}[/red]")
+    except ZensersError as e:
+        console.print(f"[red]Modify failed: {e.message}[/red]")
 
 
 async def _session_revise(task_id: str, aspects: List[str]):
