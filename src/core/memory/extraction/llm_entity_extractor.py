@@ -69,6 +69,14 @@ class LLMEntityExtractor:
     ):
         self._regex_extractor = regex_extractor or EntityExtractor()
         self._llm_client = llm_client
+        if llm_client is not None:
+            import warnings
+            warnings.warn(
+                "llm_client parameter is deprecated; LLM calls now use call_llm(routing_hint=...). "
+                "The llm_client parameter will be removed in a future version.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         self._min_entities = min_entities
         self._max_llm_chars = max_llm_chars
         self._config = config or {}

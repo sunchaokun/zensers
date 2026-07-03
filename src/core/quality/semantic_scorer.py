@@ -66,6 +66,14 @@ class SemanticQualityScorer:
         section_elements: Optional[Dict[str, List[Dict]]] = None,
     ):
         self._llm_client = llm_client
+        if llm_client is not None:
+            import warnings
+            warnings.warn(
+                "llm_client parameter is deprecated; LLM calls now use call_llm_sync(routing_hint=...). "
+                "The llm_client parameter will be removed in a future version.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         self._section_elements = section_elements
         self._layer2 = Layer2MethodologyScorer(llm_client=llm_client)
         self._layer3 = Layer3DepthScorer(llm_client=llm_client)

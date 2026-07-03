@@ -90,6 +90,14 @@ class SemanticQualityAdapter(BaseQualityChecker):
     ):
         super().__init__(threshold)
         self._scorer = SemanticQualityScorer(llm_client=llm_client)
+        if llm_client is not None:
+            import warnings
+            warnings.warn(
+                "llm_client parameter is deprecated; LLM calls now use call_llm_sync(routing_hint=...). "
+                "The llm_client parameter will be removed in a future version.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         self._fallback_checker = fallback_checker
 
     def get_checker_type(self) -> str:

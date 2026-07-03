@@ -69,6 +69,14 @@ class Layer2MethodologyScorer:
         match_weight: float = 0.4,
     ):
         self._llm_client = llm_client
+        if llm_client is not None:
+            import warnings
+            warnings.warn(
+                "llm_client parameter is deprecated; LLM calls now use call_llm_sync(routing_hint=...). "
+                "The llm_client parameter will be removed in a future version.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         self._coverage_weight = coverage_weight
         self._match_weight = match_weight
 
