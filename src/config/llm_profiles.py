@@ -10,6 +10,7 @@ class LLMProfile:
     api_key: str = ""
     base_url: str = "https://api.openai.com/v1"
     model: str = "gpt-4o"
+    fallback_model: str = ""
     temperature: float = 0.7
     max_tokens: int = 4096
     top_p: float = 1.0

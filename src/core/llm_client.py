@@ -16,8 +16,20 @@ import base64
 import logging
 from typing import Any, AsyncGenerator, Dict, List, Optional, Union
 from src.config import settings
+from src.config.llm_profiles import LLMProfile, LLMProfileRegistry, RoutingHint
 
 logger = logging.getLogger(__name__)
+
+_router: Optional[Any] = None
+_client_pool: Optional[Any] = None
+
+
+def init_llm_infrastructure(registry: LLMProfileRegistry):
+    global _router, _client_pool
+    from src.core.llm_router import LLMRouter
+    from src.core.llm_client_pool import LLMClientPool
+    _router = LLMRouter(registry)
+    _client_pool = LLMClientPool()
 
 
 async def call_llm_stream(
@@ -78,6 +90,7 @@ async def call_llm(
     temperature: Optional[float] = None,
     api_key: Optional[str] = None,
     base_url: Optional[str] = None,
+    routing_hint: Optional[RoutingHint] = None,
 ) -> Dict[str, Any]:
     """
     Call LLM (standalone utility, not a skill).
@@ -91,11 +104,21 @@ async def call_llm(
         temperature: Temperature (default from settings.llm.temperature)
         api_key: API key (default from settings.llm.api_key)
         base_url: API base URL (default from settings.llm.base_url)
+        routing_hint: Optional routing hint for profile-based routing
 
     Returns:
         Dict with keys: success, content, model, usage
         On failure: success=False, message=str, error=str
     """
+    if routing_hint is not None and _router is not None and model is None:
+        profile = _router.resolve(routing_hint)
+        model = profile.model
+        fallback_model = profile.fallback_model
+        max_tokens = max_tokens or profile.max_tokens
+        temperature = temperature or profile.temperature
+        api_key = api_key or profile.api_key
+        base_url = base_url or profile.base_url
+
     model = model or settings.llm.model
     fallback_model = fallback_model or settings.llm.cheap_model
     max_tokens = max_tokens or settings.llm.max_tokens
