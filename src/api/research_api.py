@@ -379,7 +379,8 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
         depth_keywords = ('深度研究', 'deep research', '按框架研究', '根据框架', '开始研究', 'start research', '详细分析', 'detailed analysis')
         question_suffixes = ('？', '?', '吗', '呢', '是什么', '是什么意思', '怎么', '如何')
         input_lower = user_input.strip().lower()
-        is_depth_command = any(kw in input_lower for kw in depth_keywords) and not any(input_lower.endswith(s) for s in question_suffixes)
+        has_preloaded = bool(session.get('custom_params', {}).get('file_ids'))
+        is_depth_command = any(kw in input_lower for kw in depth_keywords) and (not any(input_lower.endswith(s) for s in question_suffixes) or has_preloaded)
         if is_depth_command and latest_context.get('topic') and mode != 'framework':
             if mode == 'research':
                 # R-FIX-6: 研究正在运行，不走直接中断，走正常意图分析+约束层
@@ -700,7 +701,7 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
 
         if action == 'revise_report':
             logger.info(f"LLM returned revise_report for {session_id}")
-            return await self._handle_v2_revision(session_id, conv_result)
+            return await self._handle_revise_report_gate(session_id, conv_result, session)
         if action == 'enter_framework':
             fw_sections = conv_result.get('framework_sections')
             if fw_sections and isinstance(fw_sections, list) and len(fw_sections) > 0:
@@ -787,7 +788,7 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
 
     def _build_dialogue_context(self, conversation_state):
         """Build dialogue phase guidance (without intent state injection)"""
-        state_guidance = {ConversationState.UNDERSTANDING: '## Current Dialogue Phase: Understanding\nFocus on understanding the user\'s research need.\n- If the request is vague, ask 1-2 targeted questions.\n- Do NOT propose a research framework yet.\n', ConversationState.CLARIFYING: '## Current Dialogue Phase: Clarifying\nThe topic is identified but details may be missing.\n- Ask focused questions about specific gaps. Max 2 per turn.\n- If enough information, you may propose a framework.\n', ConversationState.FRAMEWORK_CONFIRM: '## Current Dialogue Phase: Framework Confirmation\nRequirements are clear. Propose a research framework.\n- Use action="enter_framework" with framework_sections.\n- If the topic has natural sub-structure (e.g., industry segments, regional breakdowns), also output "framework_tree" with hierarchical section→sub_section→points structure.\n', ConversationState.EXECUTING: '## Current Dialogue Phase: Research Executing\nResearch is actively running with professional agents working.\nCRITICAL RULES for action selection:\n- Default action: "continue_chat" — for confirmations, greetings, simple questions, status queries.\n- "inject_requirement" — ONLY when user clearly asks to add/remove/supplement sections.\n- "modify_research" — ONLY when user EXPLICITLY uses words like 修改/调整/修订/adjust/modify. Do NOT use this for vague suggestions.\n- "enter_framework" — ONLY when user EXPLICITLY uses words like 重新规划/重新开始/换个方向/restart/redesign. NEVER use this for simple messages like "继续" or "好的".\n- When in doubt, use "continue_chat" with a brief reassuring message.\n', ConversationState.PAUSED: '## Current Dialogue Phase: Research Paused\nResearch was interrupted. Cached data available.\n- Resume → resume_research; Modify → modify_research; Chat → continue_chat.\n', ConversationState.PREVIEWING: '## Current Dialogue Phase: Report Preview\nReport is being previewed.\n- Handle user feedback on the report.\n'}
+        state_guidance = {ConversationState.UNDERSTANDING: '## Current Dialogue Phase: Understanding\nFocus on understanding the user\'s research need.\n- If the request is vague, ask 1-2 targeted questions.\n- Do NOT propose a research framework yet.\n- NEVER use "revise_report" — research has not started yet.\n', ConversationState.CLARIFYING: '## Current Dialogue Phase: Clarifying\nThe topic is identified but details may be missing.\n- Ask focused questions about specific gaps. Max 2 per turn.\n- If enough information, you may propose a framework.\n- NEVER use "revise_report" — research has not started yet.\n', ConversationState.FRAMEWORK_CONFIRM: '## Current Dialogue Phase: Framework Confirmation\nRequirements are clear. Propose a research framework.\n- Use action="enter_framework" with framework_sections.\n- If the topic has natural sub-structure (e.g., industry segments, regional breakdowns), also output "framework_tree" with hierarchical section→sub_section→points structure.\n', ConversationState.EXECUTING: '## Current Dialogue Phase: Research Executing\nResearch is actively running with professional agents working.\nCRITICAL RULES for action selection:\n- Default action: "continue_chat" — for confirmations, greetings, simple questions, status queries.\n- "inject_requirement" — ONLY when user clearly asks to add/remove/supplement sections.\n- "modify_research" — ONLY when user EXPLICITLY uses words like 修改/调整/修订/adjust/modify. Do NOT use this for vague suggestions.\n- "enter_framework" — ONLY when user EXPLICITLY uses words like 重新规划/重新开始/换个方向/restart/redesign. NEVER use this for simple messages like "继续" or "好的".\n- NEVER use "revise_report" — use "inject_requirement" instead for mid-research modifications.\n- When in doubt, use "continue_chat" with a brief reassuring message.\n', ConversationState.PAUSED: '## Current Dialogue Phase: Research Paused\nResearch was interrupted. Cached data available.\n- Resume → resume_research; Modify → modify_research; Chat → continue_chat.\n- NEVER use "revise_report" — research is not complete yet.\n', ConversationState.PREVIEWING: '## Current Dialogue Phase: Report Preview\nReport is being previewed.\n- Handle user feedback on the report.\n- Use "revise_report" when user asks to modify specific content in the report (e.g., 修改某节, 更新数据, 调整结论).\n', ConversationState.CANCELLED: '## Current Dialogue Phase: Research Cancelled\nResearch was cancelled and cannot be resumed.\n- NEVER use "revise_report" — there is no report to revise.\n- If user wants to start over, use "enter_framework".\n', ConversationState.COMPLETED: '## Current Dialogue Phase: Research Completed\nResearch and report generation are complete.\n- Use "revise_report" when user asks to modify specific content in the report.\n- Use "regenerate_report" when user asks to regenerate the entire report.\n- Use "enter_framework" when user asks to start a completely new research.\n'}
         guidance = state_guidance.get(conversation_state, '')
         return f"""\n{guidance}\n"""
 
@@ -1384,21 +1385,19 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
         user_lang = 'Chinese' if lang == 'zh' else 'English'
         prompt = f"""You are helping the user refine their research framework.\n\nCurrent research topic: {topic}\nCurrent framework sections:\n{sections_str}{tree_str}\n\nUser's request: {user_input}\n\n## Rules\n\n1. If the user confirms (e.g., '确认', '没问题', 'ok', '好的', '开始吧', 'looks good', 'proceed'), set action="confirm".\n2. If the user wants ANY change, set action="modify" with COMPLETE new section list in `new_sections`.\n3. If the user wants to cancel, set action="cancel".\n4. When action="modify", `new_sections` MUST be a non-empty array.\n5. Remove duplicate or semantically overlapping sections.\n6. When modifying a multi-level framework, also provide `new_framework_tree` reflecting the updated structure.\n7. Your `message` MUST be in {user_lang}.\n\nOutput JSON only:\n{{"action": "confirm" | "modify" | "cancel", "message": "...", "new_sections": [...], "new_framework_tree": [{{"name": "...", "sub_sections": [{{"name": "...", "points": [...]}}]}}]}}\n"""
         try:
-            from src.skills.llm_skill import LLMSkill
-            llm_skill = LLMSkill()
-        except ImportError:
-            import sys, pathlib
-            project_root = pathlib.Path(__file__).parent.parent.parent
-            if str(project_root) not in sys.path:
-                sys.path.insert(0, str(project_root))
-            from src.skills.llm_skill import LLMSkill
-            llm_skill = LLMSkill()
-        try:
+            from src.core.llm_client import call_llm
+            from src.config.llm_profiles import RoutingHint
             from src.config.settings import settings as app_settings
             llm_config = session.get('llm_config', {})
             result = await asyncio.wait_for(
-                llm_skill.execute(prompt=prompt, model=llm_config.get('model', app_settings.llm.model), max_tokens=llm_config.get('max_tokens', app_settings.llm.max_tokens)),
-                timeout=30)
+                call_llm(
+                    prompt=prompt,
+                    model=llm_config.get('model') or None,
+                    max_tokens=llm_config.get('max_tokens') or None,
+                    routing_hint=RoutingHint(action="framework_modify"),
+                ),
+                timeout=30,
+            )
         except Exception:
             return {'action': 'modify', 'message': "I understand you'd like to adjust the framework. Please tell me what changes you'd like to make.", 'new_sections': None}
         if not result.get('success'):
@@ -1749,20 +1748,16 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
         user_lang = 'Chinese' if lang == 'zh' else 'English'
         prompt = f"""Based on the following conversation about a research topic, derive appropriate report sections for a professional research framework.\n\nResearch topic: {topic}\n\nConversation history:\n{history_text}\n\nRequirements:\n- Output 4-8 sections that comprehensively cover the research topic\n- Section names must be in {user_lang}\n- Reflect what was actually discussed or requested in the conversation\n- NO duplicate or semantically overlapping sections\n- Output ONLY a JSON array of section name strings, no other text\n- Example format: ["Market Size Analysis", "Competitive Landscape", "Policy Environment"]\n"""
         try:
-            from src.skills.llm_skill import LLMSkill
-            llm_skill = LLMSkill()
-        except ImportError:
-            import sys, pathlib
-            project_root = pathlib.Path(__file__).parent.parent.parent
-            if str(project_root) not in sys.path:
-                sys.path.insert(0, str(project_root))
-            from src.skills.llm_skill import LLMSkill
-            llm_skill = LLMSkill()
-        try:
-            from src.config.settings import settings as app_settings
+            from src.core.llm_client import call_llm
+            from src.config.llm_profiles import RoutingHint
             result = await asyncio.wait_for(
-                llm_skill.execute(prompt=prompt, model=app_settings.llm.model, max_tokens=app_settings.llm.max_tokens, temperature=0.3),
-                timeout=30)
+                call_llm(
+                    prompt=prompt,
+                    temperature=0.3,
+                    routing_hint=RoutingHint(action="section_inference"),
+                ),
+                timeout=30,
+            )
         except (asyncio.TimeoutError, Exception) as e:
             logger.warning(f"Failed to infer framework sections: {e}")
             return []
@@ -2180,15 +2175,18 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
             param_descriptions.append(f"  - {key} ({label}): options = {options}")
         prompt = f"Extract research parameters from user conversation.\n\nConversation:\n{context}\n\nParameters:\n{chr(10).join(param_descriptions)}\n\nDefault values: {json.dumps(default_params, ensure_ascii=False)}\n\nReturn ONLY a JSON object with extracted values.\nUse default value if a parameter is not mentioned.\nDo NOT include explanations.\n"
         try:
-            from src.skills.llm_skill import LLMSkill
-            llm = LLMSkill()
-            result = await llm.execute(prompt=prompt)
-            if isinstance(result, dict):
+            from src.core.llm_client import call_llm
+            from src.config.llm_profiles import RoutingHint
+            result = await call_llm(
+                prompt=prompt,
+                routing_hint=RoutingHint(action="param_extraction"),
+            )
+            if isinstance(result, dict) and result.get("success"):
                 raw = result.get('content', '')
                 if not raw:
                     return default_params
             else:
-                raw = str(result)
+                raw = ''
             match = re.search(r'```(?:json)?\s*([\s\S]*?)```', raw)
             if match:
                 extracted = json.loads(match.group(1))
@@ -2827,15 +2825,61 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
             PreviewStorage.write(session_id, html)
         return
 
+    async def _handle_revise_report_gate(self, session_id, conv_result, session):
+        """阶段门控：revise_report 只在 PREVIEWING/COMPLETED 状态下允许"""
+        conv_machine = session.get('state_machine')
+        if conv_machine:
+            current_state = conv_machine.current_state
+            if current_state not in (ConversationState.PREVIEWING, ConversationState.COMPLETED):
+                if current_state in (ConversationState.UNDERSTANDING, ConversationState.CLARIFYING):
+                    logger.info(f"[{session_id}] revise_report blocked in {current_state.value}, redirecting to continue_chat")
+                    return self._chat_response(session_id, '请先完成研究后再提出修订需求。')
+                elif current_state == ConversationState.EXECUTING:
+                    logger.info(f"[{session_id}] revise_report blocked in EXECUTING, redirecting to inject_requirement")
+                    user_input = conv_result.get('user_input', conv_result.get('message', ''))
+                    inject_ops = conv_result.get('inject_ops', [])
+                    if not inject_ops:
+                        inject_ops = [{'op': 'add_section', 'description': user_input}]
+                    return await self._handle_inject_requirement(session_id, inject_ops, user_input)
+                elif current_state == ConversationState.FRAMEWORK_CONFIRM:
+                    logger.info(f"[{session_id}] revise_report blocked in FRAMEWORK_CONFIRM, redirecting to framework confirmation mode")
+                    user_input = conv_result.get('user_input', conv_result.get('message', ''))
+                    return await self._enter_framework_mode(session_id, user_input)
+                elif current_state == ConversationState.PAUSED:
+                    logger.info(f"[{session_id}] revise_report blocked in PAUSED, suggesting resume")
+                    return self._chat_response(session_id, '研究尚未完成，请先恢复研究以完成报告生成。')
+                elif current_state == ConversationState.CANCELLED:
+                    logger.info(f"[{session_id}] revise_report blocked in CANCELLED, research was cancelled")
+                    return self._chat_response(session_id, '研究已取消，无法修订报告。请发起新的研究。')
+                else:
+                    logger.info(f"[{session_id}] revise_report blocked in {current_state.value}, falling back to continue_chat")
+                    return self._chat_response(session_id, conv_result.get('message', ''))
+        return await self._handle_v2_revision(session_id, conv_result)
+
     async def _handle_v2_revision(self, session_id, conv_result):
-        """v2 修订入口：LLM 返回 revise_report 时调用"""
-        MAX_TOTAL_REVISIONS = 10
+        """v2 修订入口：直连 ReportOrchestrator.revision()，失败时降级到 RevisionExecutor"""
         session = session_manager.get(session_id)
         if not session:
             return {'error': 'Session not found', 'error_code': 'SESSION_NOT_FOUND'}
-        
+
+        research_result = session.get('research_result', {})
+        if not research_result or research_result.get('status') not in ('completed', 'completed_with_warnings'):
+            return self._chat_response(session_id, '报告尚未生成完成，请等待研究完成后再提出修订需求。')
+
+        sections = research_result.get('report', {}).get('sections', [])
+        if not sections:
+            return self._chat_response(session_id, '报告内容为空，无法执行修订。')
+
+        if not PreviewStorage.path(session_id).exists():
+            return self._chat_response(session_id, '报告预览不存在，请先重新生成报告。')
+
+        existing_task = self._executor_tasks.get(f"rev_{session_id}")
+        revision_task = getattr(self, '_revision_task', None)
+        if (existing_task and not existing_task.done()) or (revision_task and not revision_task.done()):
+            return self._chat_response(session_id, '已有修订任务正在执行中，请等待完成后再发起新的修订。')
+
         adjustment = conv_result.get('adjustment') or conv_result.get('user_input', '')
-        
+
         quality_lock = self._get_quality_lock(session_id)
         async with quality_lock:
             quality_state_data = session.get("quality_state", {})
@@ -2845,7 +2889,7 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
                 if quality_state_data.get("phase") in ("reviewing", "revising"):
                     quality_state_data["phase"] = "revising"
                 session["quality_state"] = quality_state_data
-                
+
                 version_id = f"v{int(time.time())}"
                 html_path = str(PreviewStorage.path(session_id))
                 md_path = str(Path('data') / session_id / 'report.md')
@@ -2854,7 +2898,7 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
                     quality_state_data["phase"] = "reviewing"
                     session["quality_state"] = quality_state_data
                     return self._chat_response(session_id)
-                
+
                 version_n = len(quality_state_data.get("version_stack", []))
                 snapshot_copy = copy.deepcopy({k: v for k, v in quality_state_data.items() if k != "version_stack"})
                 quality_state_data.setdefault("version_stack", []).append({
@@ -2866,10 +2910,10 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
                     "overall_score": quality_state_data.get("overall_score", 0),
                     "label": f"修订前快照 v{version_n}",
                 })
-                
+
                 session['quality_state_snapshot'] = quality_state_data
                 session["quality_state"] = quality_state_data
-            
+
             MAX_ISSUE_REVISIONS = 3
             modified_sections = []
             aspects = conv_result.get("aspects", [])
@@ -2881,14 +2925,14 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
                     for task in getattr(flow_pending.get("flow", {}), 'tasks', []):
                         if getattr(task, 'section_name', None):
                             modified_sections.append(task.section_name)
-            
+
             if not modified_sections:
                 pending_input = session.get("_pending_revision_input")
                 if pending_input and isinstance(pending_input, dict):
                     sn = pending_input.get("sectionName")
                     if sn:
                         modified_sections.append(sn)
-            
+
             for sec_name, sec_data in quality_state_data.get("section_scores", {}).items():
                 for issue in sec_data.get("issues", []):
                     if issue.get("state") == "open" and (not modified_sections or issue.get("section") in modified_sections):
@@ -2899,82 +2943,86 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
                             issue["revision_count"] = issue.get("revision_count", 0) + 1
                             issue["revising_since"] = time.time()
             session["quality_state"] = quality_state_data
-        
+
         current_task = asyncio.current_task()
         old_task = self._revision_task
         self._revision_task = current_task
         if old_task and not old_task.done():
             old_task.cancel()
-        from src.core.adjustment.report_adapter import SessionReportAdapter
-        from src.core.adjustment.revision_executor import RevisionExecutor, ProgressNotifier
-        from src.core.adjustment.revision_types import ExecutionStatus, TaskStatus
-        adapter = SessionReportAdapter(session)
-        if not hasattr(self, '_v2_lock_manager'):
-            from src.core.adjustment.report_lock_manager import ReportLockManager
-            self._v2_lock_manager = ReportLockManager()
-        notifier = ProgressNotifier()
-        executor = RevisionExecutor(lock_manager=self._v2_lock_manager, notifier=notifier)
-        revision_task = safe_create_task(executor.handle_feedback(adjustment, adapter), name=f"rev_{session_id}")
-        self._executor_tasks[f"""rev_{session_id}"""] = revision_task
-        revision_task.add_done_callback(lambda _: self._executor_tasks.pop(f"rev_{session_id}", None))
+
         try:
-            flow = await asyncio.shield(revision_task)
-        except asyncio.CancelledError:
-            logger.info(f"""[BP3-FIX] SSE cancelled, revision continues in background for {session_id}""")
-            session['_pending_revision_task'] = revision_task
-            return {'session_id': session_id, 'status': 'executing', 'message': '修订正在后台继续执行...'}
-        except Exception as rev_err:
-            logger.warning(f"Revision execution failed: {rev_err}")
+            from src.agents.fixed_agents.report_upgrade.orchestrator import ReportOrchestrator
+            from src.agents.fixed_agents.report_upgrade.chapter_writer import ChapterWriter
+            from src.agents.fixed_agents.report_upgrade.chapter_reviewer import ChapterReviewAgent
+            from src.agents.fixed_agents.report_upgrade.global_reviewer import GlobalReviewAgent
+            from src.agents.fixed_agents.report_upgrade.data_repair import DataRepairAgent, ConflictResolver
+            from src.agents.fixed_agents.report_upgrade.prompt_manager import PromptManager
+        except ImportError as e:
+            logger.warning(f"ReportOrchestrator import failed: {e}, falling back to V2 executor")
+            return await self._run_v2_revision_fallback(session_id, conv_result, session, adjustment, quality_state_data)
+
+        skill_registry = getattr(self._orchestrator, '_skill_registry', None)
+        search_skill = skill_registry.get("search_skill") if skill_registry else None
+        web_scraper_skill = skill_registry.get("web_scraper") if skill_registry else None
+
+        pm = PromptManager()
+        ro = ReportOrchestrator(
+            chapter_writer=ChapterWriter(prompt_manager=pm),
+            chapter_reviewer=ChapterReviewAgent(prompt_manager=pm),
+            global_reviewer=GlobalReviewAgent(prompt_manager=pm),
+            data_repair_agent=DataRepairAgent(
+                search_skill=search_skill, web_scraper_skill=web_scraper_skill,
+                prompt_manager=pm,
+            ),
+            conflict_resolver=ConflictResolver(
+                search_skill=search_skill,
+                web_scraper_skill=web_scraper_skill, prompt_manager=pm,
+            ),
+            prompt_manager=pm,
+            skill_registry=skill_registry,
+        )
+
+        chapters = self._sections_to_chapters(sections)
+        data_registry = self._restore_data_registry(session)
+        framework_config = self._get_framework_config(session)
+        task_structure = self._get_task_structure(session)
+
+        ro._chapters = chapters
+        ro._data_registry = data_registry
+        ro._framework_config = framework_config
+        ro._task_structure = task_structure
+
+        quality_issues = []
+        for sec_name, sec_data in quality_state_data.get("section_scores", {}).items():
+            for issue in sec_data.get("issues", []):
+                if issue.get("state") in ("revising", "open"):
+                    quality_issues.append(issue)
+
+        try:
+            try:
+                from src.core.session_streamer import SessionStreamer
+                SessionStreamer.push_agent_message(session_id, {
+                    "agent_id": "system", "agent_name": "系统",
+                    "action": "status", "content": "正在执行报告修订，请稍候...",
+                })
+            except Exception:
+                pass
+            result = await ro.revision(
+                user_request=adjustment,
+                quality_issues=quality_issues if quality_issues else None,
+            )
+        except Exception as e:
+            logger.error(f"ReportOrchestrator.revision() failed: {e}", exc_info=True)
             self._rollback_revising_issues(session)
-            return self._chat_response(session_id, f"修订执行失败: {rev_err}")
-        if flow.status == ExecutionStatus.LIGHTWEIGHT_DONE:
-            if flow.tasks:
-                action = flow.tasks[0].action
-                self._apply_lightweight(session, action)
-                self._sync_lightweight_to_preview(session_id, session, action)
-            if quality_state_data:
-                await self._post_revision_recheck(session)
-            return self._chat_response(session_id)
-        if flow.current_index < len(flow.tasks):
-            has_pending = (flow.tasks[flow.current_index].status == TaskStatus.CONFIRMING)
-            pending_data = {'flow': flow, 'adapter': adapter, 'snapshot_id': flow.snapshot_id}
-            session['_pending_v2_revision'] = pending_data
-            if has_pending:
-                task = flow.tasks[flow.current_index]
-            return self._chat_response(session_id)
-        if flow.status == ExecutionStatus.PREVIEW_READY:
-            msg = '以下是对报告的修改预览：\n\n'
-            if flow.preview and flow.preview.commit_message:
-                msg += flow.preview.commit_message + '\n\n'
-            msg += '请确认修改(y)或拒绝(n)'
-            return self._chat_response(session_id, msg)
-        if flow.status == ExecutionStatus.ABORTED:
-            self._rollback_revising_issues(session)
-            if quality_state_data:
-                await self._post_revision_recheck(session)
-            return self._chat_response(session_id)
-        if flow.status == ExecutionStatus.CLARIFICATION_FAILED:
-            self._rollback_revising_issues(session)
-            user_msg = '未能理解您的修订意图。请重新描述要修改的内容，例如："修改第三节的市场规模数据"。'
-            if flow.error:
-                user_msg += f"""\n({flow.error})"""
-            return self._chat_response(session_id, user_msg)
-        if flow.status == ExecutionStatus.ROLLED_BACK:
-            self._rollback_revising_issues(session)
-            if quality_state_data:
-                await self._post_revision_recheck(session)
-            return self._chat_response(session_id)
-        if flow.status == ExecutionStatus.FULL_RESEARCH_NEEDED:
-            self._rollback_revising_issues(session)
-            routing_result = getattr(flow, '_routing_result', None)
-            if routing_result:
-                session['mode'] = 'research'
-                session['_routing_result'] = routing_result
-                return await self._start_execution_with_routing(session_id, routing_result)
-            return self._chat_response(session_id)
-        if flow.error:
-            err_detail = flow.error or '未知错误'
-            return self._chat_response(session_id)
+            return self._chat_response(session_id, f"修订执行失败: {e}")
+
+        self._apply_revision_to_session(session, result, ro._chapters, ro._data_registry)
+
+        await self._regenerate_from_revision(session_id, session, ro._chapters)
+
+        if quality_state_data:
+            await self._post_revision_recheck(session)
+
         return self._chat_response(session_id)
 
     async def _confirm_v2_revision(self, session_id, accept):
@@ -3253,6 +3301,118 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
         executor = get_executor()
         await executor.execute(session_id, new_plan, session_manager)
         return
+
+    def _sections_to_chapters(self, sections):
+        from src.api.research_api_helpers import sections_to_chapters
+        return sections_to_chapters(sections)
+
+    def _restore_data_registry(self, session):
+        from src.api.research_api_helpers import restore_data_registry
+        return restore_data_registry(session)
+
+    def _get_framework_config(self, session):
+        from src.api.research_api_helpers import get_framework_config
+        return get_framework_config(session)
+
+    def _get_task_structure(self, session):
+        from src.api.research_api_helpers import get_task_structure
+        return get_task_structure(session)
+
+    def _apply_revision_to_session(self, session, result, chapters, data_registry):
+        from src.api.research_api_helpers import apply_revision_to_session
+        return apply_revision_to_session(session, result, chapters, data_registry)
+
+    async def _regenerate_from_revision(self, session_id, session, chapters):
+        research_result_data = self._convert_session_to_cache_format(
+            session.get("research_result", {})
+        )
+        output_dir = Path('data') / session_id
+        output_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            preview_input = {
+                'action': 'produce_document',
+                'research_result': research_result_data,
+                'output_format': 'html',
+                'output_dir': str(output_dir),
+                'task_id': session_id,
+            }
+            preview_result = await self._orchestrator._document_agent.execute(preview_input)
+            if isinstance(preview_result, dict) and preview_result.get('document_path'):
+                from src.core.preview_storage import PreviewStorage
+                PreviewStorage.copy_file(session_id, Path(preview_result['document_path']))
+            try:
+                from src.core.session_streamer import SessionStreamer
+                from src.core.preview_storage import PreviewStorage as PS
+                preview_url = PS.url(session_id)
+                SessionStreamer.push_preview_refresh(session_id, preview_url, 'v1')
+            except Exception:
+                pass
+        except Exception as e:
+            logger.warning(f"Post-revision preview regeneration failed: {e}")
+
+    async def _run_v2_revision_fallback(self, session_id, conv_result, session, adjustment, quality_state_data):
+        from src.core.adjustment.report_adapter import SessionReportAdapter
+        from src.core.adjustment.revision_executor import RevisionExecutor, ProgressNotifier
+        from src.core.adjustment.revision_types import ExecutionStatus, TaskStatus
+
+        adapter = SessionReportAdapter(session)
+        if not hasattr(self, '_v2_lock_manager'):
+            from src.core.adjustment.report_lock_manager import ReportLockManager
+            self._v2_lock_manager = ReportLockManager()
+        notifier = ProgressNotifier()
+        executor = RevisionExecutor(lock_manager=self._v2_lock_manager, notifier=notifier)
+        revision_task = safe_create_task(executor.handle_feedback(adjustment, adapter), name=f"rev_{session_id}")
+        self._executor_tasks[f"rev_{session_id}"] = revision_task
+        revision_task.add_done_callback(lambda _: self._executor_tasks.pop(f"rev_{session_id}", None))
+        try:
+            flow = await asyncio.shield(revision_task)
+        except asyncio.CancelledError:
+            logger.info(f"[BP3-FIX] SSE cancelled, revision continues in background for {session_id}")
+            session['_pending_revision_task'] = revision_task
+            return {'session_id': session_id, 'status': 'executing', 'message': '修订正在后台继续执行...'}
+        except Exception as rev_err:
+            logger.warning(f"Revision execution failed: {rev_err}")
+            self._rollback_revising_issues(session)
+            return self._chat_response(session_id, f"修订执行失败: {rev_err}")
+        if flow.status == ExecutionStatus.LIGHTWEIGHT_DONE:
+            if flow.tasks:
+                action = flow.tasks[0].action
+                self._apply_lightweight(session, action)
+                self._sync_lightweight_to_preview(session_id, session, action)
+            if quality_state_data:
+                await self._post_revision_recheck(session)
+            return self._chat_response(session_id)
+        if flow.current_index < len(flow.tasks):
+            pending_data = {'flow': flow, 'adapter': adapter, 'snapshot_id': flow.snapshot_id}
+            session['_pending_v2_revision'] = pending_data
+            return self._chat_response(session_id)
+        if flow.status == ExecutionStatus.ABORTED:
+            self._rollback_revising_issues(session)
+            if quality_state_data:
+                await self._post_revision_recheck(session)
+            return self._chat_response(session_id)
+        if flow.status == ExecutionStatus.CLARIFICATION_FAILED:
+            self._rollback_revising_issues(session)
+            user_msg = '未能理解您的修订意图。请重新描述要修改的内容。'
+            if flow.error:
+                user_msg += f"\n({flow.error})"
+            return self._chat_response(session_id, user_msg)
+        if flow.status == ExecutionStatus.ROLLED_BACK:
+            self._rollback_revising_issues(session)
+            if quality_state_data:
+                await self._post_revision_recheck(session)
+            return self._chat_response(session_id)
+        if flow.status == ExecutionStatus.FULL_RESEARCH_NEEDED:
+            self._rollback_revising_issues(session)
+            routing_result = getattr(flow, '_routing_result', None)
+            if routing_result:
+                session['mode'] = 'research'
+                session['_routing_result'] = routing_result
+                return await self._start_execution_with_routing(session_id, routing_result)
+            return self._chat_response(session_id)
+        if flow.error:
+            return self._chat_response(session_id)
+        return self._chat_response(session_id)
 
     def _rollback_revising_issues(self, session):
         """Roll back all revising issues to open state after revision failure"""
