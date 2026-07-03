@@ -1,0 +1,26 @@
+# LLM Routing Configuration
+# Maps agents and actions to LLM profiles.
+
+# Fixed agent routing: agent_type -> profile_name
+fixed_agent_routing:
+  quality_check: strong
+  data_collection: fast
+  report_generation: strong
+  requirement_analysis: strong
+  survey_simulation: fast
+
+# Action routing: action_name -> profile_name
+action_routing:
+  analyze: strong
+  generate: strong
+  write: strong
+  review: strong
+  judge: strong
+  evaluate: strong
+  search: fast
+  scrape: fast
+  extract: fast
+  classify: fast
+  translate: fast
+  format: fast
+  vision: strong
