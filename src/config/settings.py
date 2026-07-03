@@ -24,6 +24,7 @@ Usage:
     db_url = settings.database.postgres_url
 """
 
+from src.config.llm_profiles import LLMProfile, LLMProfileRegistry
 import os
 import re
 import json
@@ -265,8 +266,10 @@ class Settings:
         self.mcp = MCPConfig()
         self.agents = AgentConfig()
         self.system = SystemConfig()
-        self.quality = QualityConfig()  # New: quality control config
+        self.quality = QualityConfig()
         self.conversation = ConversationConfig()
+
+        self.llm_profiles = LLMProfileRegistry(default_profile="migrated")
 
         # Data provider configuration (dynamic)
         self.data_providers: Dict[str, Any] = {}
@@ -274,6 +277,7 @@ class Settings:
 
         # Load configuration
         self._load_config()
+        self._migrate_legacy_to_profile()
         self._initialized = True
 
     def _find_config_file(self) -> str:
@@ -582,6 +586,71 @@ class Settings:
                 logger.debug("Persisted LLM config deleted")
         except Exception as e:
             logger.warning("Failed to delete persisted LLM config: %s", e)
+
+    # ── LLM Profile CRUD ──────────────────────────────────────────────────
+
+    def add_llm_profile(self, profile: LLMProfile) -> None:
+        if profile.name in self.llm_profiles.profiles:
+            raise ValueError(f"Profile '{profile.name}' already exists")
+        self.llm_profiles.profiles[profile.name] = profile
+
+    def update_llm_profile(self, name: str, **kwargs) -> None:
+        if name not in self.llm_profiles.profiles:
+            raise KeyError(f"Profile '{name}' not found")
+        p = self.llm_profiles.profiles[name]
+        for k, v in kwargs.items():
+            if hasattr(p, k):
+                setattr(p, k, v)
+
+    def delete_llm_profile(self, name: str) -> None:
+        if name == self.llm_profiles.default_profile:
+            raise ValueError(f"Cannot delete default profile '{name}'")
+        if name not in self.llm_profiles.profiles:
+            raise KeyError(f"Profile '{name}' not found")
+        del self.llm_profiles.profiles[name]
+
+    def set_default_llm_profile(self, name: str) -> None:
+        if name not in self.llm_profiles.profiles:
+            raise KeyError(f"Profile '{name}' not found")
+        self.llm_profiles.default_profile = name
+        self._sync_llm_config_from_profiles()
+
+    def list_llm_profiles(self) -> list:
+        return list(self.llm_profiles.profiles.keys())
+
+    def _sync_llm_config_from_profiles(self) -> None:
+        default = self.llm_profiles.profiles.get(self.llm_profiles.default_profile)
+        if not default:
+            return
+        self.llm.model = default.model
+        self.llm.api_key = default.api_key
+        self.llm.base_url = default.base_url
+        self.llm.temperature = default.temperature
+        self.llm.max_tokens = default.max_tokens
+        self.llm.top_p = default.top_p
+        self.llm.frequency_penalty = default.frequency_penalty
+        self.llm.presence_penalty = default.presence_penalty
+        if default.fallback_model:
+            self.llm.cheap_model = default.fallback_model
+
+    def _migrate_legacy_to_profile(self) -> None:
+        if "migrated" in self.llm_profiles.profiles:
+            return
+        self.llm_profiles.profiles["migrated"] = LLMProfile(
+            name="migrated",
+            provider=self.llm.provider,
+            api_key=self.llm.api_key,
+            base_url=self.llm.base_url,
+            model=self.llm.model,
+            fallback_model=self.llm.cheap_model,
+            temperature=self.llm.temperature,
+            max_tokens=self.llm.max_tokens,
+            top_p=self.llm.top_p,
+            frequency_penalty=self.llm.frequency_penalty,
+            presence_penalty=self.llm.presence_penalty,
+            max_context_tokens=self.llm.max_context_tokens,
+            is_default=True,
+        )
 
     # ── Public API ────────────────────────────────────────────────────────
 
