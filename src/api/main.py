@@ -977,6 +977,10 @@ async def startup_event():
     from src.core.orchestrator.execution.task_utils import register_global_exception_handler
     register_global_exception_handler()
 
+    from src.core.llm_client import init_llm_infrastructure
+    init_llm_infrastructure(settings.llm_profiles)
+    logger.info("LLM infrastructure initialized with %d profiles", len(settings.llm_profiles.profiles))
+
     global _scheduled_dream_task, _dream_scheduler, _dream_cfg
 
     # DreamModeScheduler 后台循环（始终启动，驱动研究提取 + 可选目录扫描）
