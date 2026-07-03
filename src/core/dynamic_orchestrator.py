@@ -130,6 +130,7 @@ class ExecutionPlan:
                     quality_threshold=spec.quality_threshold,
                     max_retries=spec.max_retries,
                 )
+                orig.context.update(spec.config)
                 phases.setdefault(rp, []).append(orig)
 
         execution_order = [
@@ -463,3 +464,154 @@ class DynamicPhaseOrchestrator:
                         ))
                     # sid not in dep_map → no rules → auto-unlocked by ContentLockManager
         return rules
+
+    def _orchestrate_forensic_phases(self, task_structure, intent, topic):
+        """Generate forensic analysis phases: DC→Analysis→Synthesis→Calibration→Report."""
+        phases = []
+        counter = 1
+        section_map = {s.section_id: s for s in task_structure.sections}
+        global_section_to_agent = {}
+
+        dc_sections = [s for s in task_structure.sections if s.section_role == SectionRole.DATA_COLLECTION]
+        analysis_sections = [s for s in task_structure.sections if s.section_role == SectionRole.ANALYSIS]
+        synthesis_sections = [s for s in task_structure.sections if s.section_role == SectionRole.SYNTHESIS]
+
+        # Phase A: DATA_COLLECTION — single agent for precise data extraction
+        dc_phase = None
+        if dc_sections:
+            dc_agent = AgentSpec(
+                agent_id=f"phase_{counter}_dc_0",
+                agent_type=PhaseType.DATA_COLLECTION.value,
+                section_ids=[s.section_id for s in dc_sections],
+                priority=0,
+                config={"content_dependency": [], "resolved_dependencies": []},
+                core_question="根据所有假设的数据需求，从年报中精准提取相关数据",
+            )
+            dc_phase = ExecutionPhase(
+                phase_id=f"phase_{counter}",
+                phase_type=PhaseType.DATA_COLLECTION,
+                agent_specs=[dc_agent],
+                section_ids=[s.section_id for s in dc_sections],
+                parallel=False,
+                depends_on=[],
+            )
+            phases.append(dc_phase)
+            counter += 1
+
+        # Phase B: DEEP_ANALYSIS — one agent per hypothesis
+        analysis_phase = None
+        if analysis_sections:
+            dc_depends = [dc_phase.phase_id] if dc_phase else []
+            agents = []
+            for i, section in enumerate(analysis_sections):
+                agent_id = f"phase_{counter}_agent_{i}"
+                dc_dep = dc_phase.agent_specs[0].agent_id if dc_phase else ""
+                resolved = [dc_dep] if dc_dep else []
+                content_deps = getattr(section, 'content_dependency', []) or []
+                for dep_sid in content_deps:
+                    dep_aid = global_section_to_agent.get(dep_sid)
+                    if dep_aid and dep_aid not in resolved:
+                        resolved.append(dep_aid)
+                agent_config = {
+                    "content_dependency": content_deps,
+                    "resolved_dependencies": resolved,
+                }
+                if hasattr(section, 'config') and section.config:
+                    agent_config.update(section.config)
+                agent = AgentSpec(
+                    agent_id=agent_id,
+                    agent_type=PhaseType.ANALYSIS.value,
+                    section_ids=[section.section_id],
+                    priority=i,
+                    config=agent_config,
+                    core_question=section.section_name,
+                    dependencies=resolved,
+                )
+                agents.append(agent)
+                global_section_to_agent[section.section_id] = agent_id
+            analysis_phase = ExecutionPhase(
+                phase_id=f"phase_{counter}",
+                phase_type=PhaseType.ANALYSIS,
+                agent_specs=agents,
+                section_ids=[s.section_id for s in analysis_sections],
+                parallel=True,
+                depends_on=dc_depends,
+            )
+            phases.append(analysis_phase)
+            counter += 1
+
+        # Phase C: SYNTHESIS — causal attribution
+        if synthesis_sections:
+            depends_on = [analysis_phase.phase_id] if analysis_phase else ([dc_phase.phase_id] if dc_phase else [])
+            agents = []
+            for i, section in enumerate(synthesis_sections):
+                agent_id = f"phase_{counter}_agent_{i}"
+                content_deps = getattr(section, 'content_dependency', []) or []
+                resolved = [global_section_to_agent[sid] for sid in content_deps if sid in global_section_to_agent]
+                agent = AgentSpec(
+                    agent_id=agent_id,
+                    agent_type=PhaseType.SYNTHESIS.value,
+                    section_ids=[section.section_id],
+                    priority=i,
+                    config={"content_dependency": content_deps, "resolved_dependencies": resolved},
+                    core_question=section.section_name,
+                    dependencies=resolved,
+                )
+                agents.append(agent)
+                global_section_to_agent[section.section_id] = agent_id
+            phase = ExecutionPhase(
+                phase_id=f"phase_{counter}",
+                phase_type=PhaseType.SYNTHESIS,
+                agent_specs=agents,
+                section_ids=[s.section_id for s in synthesis_sections],
+                parallel=False,
+                depends_on=depends_on,
+            )
+            phases.append(phase)
+            counter += 1
+
+        # Phase D: CALIBRATION
+        _prior_agent_ids = sorted({spec.agent_id for p in phases for spec in p.agent_specs if spec.agent_id})
+        cal_depends_on = [phases[-1].phase_id] if phases else []
+        cal_phase = ExecutionPhase(
+            phase_id=f"phase_{counter}",
+            phase_type=PhaseType.CALIBRATION,
+            agent_specs=[
+                AgentSpec(
+                    agent_id=f"phase_{counter}_calibrator",
+                    agent_type="calibration",
+                    section_ids=[],
+                    priority=0,
+                    config={
+                        "content_dependency": [],
+                        "resolved_dependencies": _prior_agent_ids,
+                        "category": "calibration",
+                    },
+                    core_question="统一全报告数据口径，消除数值和叙述矛盾",
+                ),
+            ],
+            section_ids=[],
+            parallel=False,
+            depends_on=cal_depends_on,
+        )
+        phases.append(cal_phase)
+        counter += 1
+
+        # Phase E: REPORT
+        depends_on = [phases[-1].phase_id] if phases else []
+        phases.append(self._create_report_phase(f"phase_{counter}", task_structure, topic,
+                                                  depends_on=depends_on))
+        return phases
+
+    def plan_forensic(self, task_structure, intent, topic):
+        """Public entry point for forensic phase orchestration."""
+        phases = self._orchestrate_forensic_phases(task_structure, intent, topic)
+        content_lock_rules = self._generate_content_lock_rules(task_structure, phases)
+        total_agents = sum(len(p.agent_specs) for p in phases)
+        return ExecutionPlan(
+            plan_id=f"forensic_{task_structure.task_id}",
+            task_structure=task_structure,
+            phases=phases,
+            content_lock_rules=content_lock_rules,
+            total_agents=total_agents,
+        )

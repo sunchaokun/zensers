@@ -833,3 +833,37 @@ class AnnualReportParserSkill(Skill):
         except Exception as e:
             logger.warning(f"Page render failed for {file_path} page {page_index}: {e}")
             return None
+
+    def search_sections(self, parse_data: dict, keywords: list) -> list:
+        results = []
+        for section in parse_data.get("sections", []):
+            content = section.get("content", "")
+            for kw in keywords:
+                if kw in content or kw in section.get("title", ""):
+                    results.append(section)
+                    break
+        return results
+
+    def find_line_items(self, parse_data: dict, metric_keywords: list) -> list:
+        results = []
+        for table_type, rows in parse_data.get("financial_tables", {}).items():
+            if not isinstance(rows, list):
+                continue
+            for row in rows:
+                subject = row.get("科目", "")
+                for kw in metric_keywords:
+                    if kw in subject:
+                        results.append({"table_type": table_type, "row": row})
+                        break
+        return results
+
+    def extract_for_hypothesis(self, parse_data: dict, hypothesis: str, data_needs: list) -> dict:
+        sections = self.search_sections(parse_data, data_needs)
+        line_items = self.find_line_items(parse_data, data_needs)
+        return {
+            "hypothesis": hypothesis,
+            "relevant_sections": sections,
+            "relevant_line_items": line_items,
+            "section_count": len(sections),
+            "line_item_count": len(line_items),
+        }

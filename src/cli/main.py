@@ -6,9 +6,7 @@ Provides research task submission, status query, report download and other funct
 import asyncio
 import json
 import logging
-import os
 import shutil
-import sys
 from dataclasses import asdict
 from pathlib import Path
 from typing import Optional, List
@@ -20,10 +18,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
 from src.cli.utils import console, setup_cli_logging, set_api_base_url, get_api_base_url
-from src.cli.commands import session, knowledge, chat, survey, mcp, llm, prompt, document, upload
-from src.cli.interaction import build_interaction_callback
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
+from src.cli.commands import session, task, knowledge, survey, mcp, llm, prompt, document, upload
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +30,8 @@ app = typer.Typer(
 
 # Register all subcommand groups
 session.register(app)
+task.register(app)
 knowledge.register(app)
-chat.register(app)
 survey.register(app)
 mcp.register(app)
 llm.register(app)
@@ -125,83 +120,124 @@ async def _research_async(
     template: Optional[str] = None,
     output_type: Optional[str] = None,
 ):
-    """Execute research task asynchronously."""
-    from src.core.orchestrator import ResearchOrchestrator as Orchestrator
+    """Execute research task via API."""
+    from src.cli.client import ZensersClient, ZensersError
 
     console.print(Panel.fit(
         f"[bold blue]Zensers[/bold blue] - Starting Research Task\n"
         f"[dim]Requirement: {requirement[:50]}{'...' if len(requirement) > 50 else ''}[/dim]"
     ))
 
-    callback = await build_interaction_callback(console) if interactive else None
-
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
         console=console,
     ) as progress:
-        task = progress.add_task("Initializing research system...", total=None)
-        orchestrator = Orchestrator()
-        progress.update(task, description="System ready")
+        task = progress.add_task("Submitting research task...", total=None)
 
-        progress.update(task, description="Executing research workflow...")
         try:
-            result = await orchestrator.research(
-                requirement,
-                output_dir=output,
-                interaction_mode=interactive,
-                interaction_callback=callback,
-                output_type=output_type,
-                custom_aspects=aspects,
-                framework=framework,
-                template_name=template,
-                output_format=format,
-            )
-            progress.update(task, description="Research complete")
-        except Exception as e:
-            logger.error(f"Research execution failed: {e}", exc_info=True)
-            console.print(f"[red]Research execution failed: {e}[/red]")
+            async with ZensersClient() as client:
+                if template:
+                    start_result = await client.research_quick_start(
+                        user_input=requirement,
+                        template_id=template,
+                        auto_confirm=not interactive,
+                        custom_params={"aspects": aspects, "framework": framework, "output_type": output_type} if any([aspects, framework, output_type]) else None,
+                    )
+                else:
+                    start_result = await client.research_start(user_input=requirement)
+
+                session_id = start_result.get("session_id") or start_result.get("task_id")
+                if not session_id:
+                    console.print(f"[red]Failed to start research: no session_id returned[/red]")
+                    raise typer.Exit(1)
+
+                progress.update(task, description=f"Session {session_id[:12]} created")
+
+                if not interactive:
+                    if start_result.get("mode") == "chat" or start_result.get("status") is None:
+                        console.print(f"\n[green][OK] Research session started: {session_id}[/green]")
+                        response = start_result.get("response", start_result.get("message", ""))
+                        if response:
+                            from rich.markdown import Markdown
+                            console.print(f"[bold blue]Assistant:[/bold blue]")
+                            console.print(Markdown(str(response)[:2000]))
+                        console.print(f"\n[dim]Session is in dialogue mode. Use --interactive to continue, or:[/dim]")
+                        console.print(f"[dim]  python -m src.cli.main session attach {session_id}[/dim]")
+                        progress.update(task, description="Session created (non-interactive)")
+                        return
+                    while True:
+                        status_result = await client.research_status(session_id)
+                        status = status_result.get("status", "unknown")
+                        progress.update(task, description=f"Task {session_id[:12]} - {status}")
+                        if status in ("completed", "failed", "cancelled"):
+                            result = status_result
+                            result["task_id"] = session_id
+                            break
+                        await asyncio.sleep(2)
+                    progress.update(task, description="Research complete")
+                    _print_research_result(result, output)
+                    return
+
+                result = start_result
+                result.setdefault("session_id", session_id)
+                progress.update(task, description="Session ready for interactive dialogue")
+
+        except ZensersError as e:
+            logger.error(f"Research execution failed: {e.message}", exc_info=True)
+            console.print(f"[red]Research execution failed: {e.message}[/red]")
             raise typer.Exit(1)
 
-    _print_research_result(result, output)
+    if interactive and result.get("session_id"):
+        from src.cli.repl import SessionREPL
+        console.print(f"[green][OK] Session started: {result['session_id']}[/green]")
+        response = result.get("response", result.get("message", ""))
+        if response:
+            from rich.markdown import Markdown
+            console.print(f"[bold blue]Assistant:[/bold blue]")
+            console.print(Markdown(str(response)[:2000]))
+        repl = SessionREPL(result["session_id"])
+        await repl.run()
 
 
-def _print_research_result(result, output: Optional[str]):
-    if result.status == "completed":
-        console.print("\n[green]✓ Research task completed![/green]")
+def _print_research_result(result: dict, output: Optional[str]):
+    status = result.get("status", "unknown")
+    if status == "completed":
+        console.print("\n[green][OK] Research task completed![/green]")
 
         table = Table(title="Report Information")
         table.add_column("Item", style="cyan")
         table.add_column("Content", style="green")
 
-        table.add_row("Task ID", result.task_id)
-        table.add_row("Topic", result.topic)
-        table.add_row("Status", result.status)
-        table.add_row("Output Path", str(result.output_path))
-        table.add_row("Used Agents", ", ".join(result.agents_used))
+        table.add_row("Task ID", result.get("task_id", "N/A"))
+        table.add_row("Topic", result.get("topic", "N/A"))
+        table.add_row("Status", status)
+        table.add_row("Output Path", str(result.get("output_path", "N/A")))
+        agents = result.get("agents_used", [])
+        table.add_row("Used Agents", ", ".join(agents) if isinstance(agents, list) else str(agents))
 
         console.print(table)
 
-        if output and result.document_path:
-            src_path = Path(result.document_path)
+        document_path = result.get("document_path")
+        if output and document_path:
+            src_path = Path(document_path)
             dst_path = Path(output)
             if src_path.exists():
                 dst_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src_path, dst_path)
                 console.print(f"\n[green]Report saved: {output}[/green]")
             else:
-                console.print(f"\n[yellow]Warning: Document path does not exist {result.document_path}[/yellow]")
-        elif output and not result.document_path:
+                console.print(f"\n[yellow]Warning: Document path does not exist {document_path}[/yellow]")
+        elif output and not document_path:
             console.print(f"\n[yellow]Warning: Research complete but no document generated, cannot save to {output}[/yellow]")
 
-        if result.document_path:
-            console.print(f"\n[green]Report generated: {result.document_path}[/green]")
+        if document_path:
+            console.print(f"\n[green]Report generated: {document_path}[/green]")
         console.print("[dim]Use python -m src.cli.main session list to view historical tasks[/dim]")
-        console.print("[dim]Use python -m src.cli.main session resume <task_id> to resume task[/dim]")
-        console.print("[dim]Web UI for conversational interaction will be available later[/dim]")
+        console.print("[dim]Use python -m src.cli.main session attach <session_id> to enter session REPL[/dim]")
 
     else:
-        console.print(f"\n[red]Research failed: {result.status}[/red]")
+        console.print(f"\n[red]Research failed: {status}[/red]")
         raise typer.Exit(1)
 
 

@@ -70,35 +70,12 @@ class TestKnowledgeCommands:
 
 
 class TestChatCommand:
-    """测试对话命令"""
-    
-    def test_chat_start_command(self, tmp_path):
-        """测试启动对话命令"""
-        from src.core.memory.knowledge_bank import UserKnowledgeBank
-        db_path = tmp_path / "test.db"
-        bank = UserKnowledgeBank("user_001", db_path=str(db_path))
-        
+    """Chat command has been removed (merged into session)."""
+
+    def test_chat_command_removed(self):
         from src.cli.main import app
-        
-        result = runner.invoke(app, ["chat", "start", "--user-id", "user_001", "--db-path", str(db_path)])
-        
-        # 命令应该运行（可能退出码非0因为需要交互）
-        assert result.exit_code in [0, 1]
-        bank.close()
-    
-    def test_chat_status_command(self, tmp_path):
-        """测试对话状态命令"""
-        from src.core.memory.knowledge_bank import UserKnowledgeBank
-        db_path = tmp_path / "test.db"
-        bank = UserKnowledgeBank("user_001", db_path=str(db_path))
-        
-        from src.cli.main import app
-        
-        result = runner.invoke(app, ["chat", "status", "--user-id", "user_001", "--db-path", str(db_path)])
-        
-        # 命令应该运行
-        assert result.exit_code in [0, 1]
-        bank.close()
+        result = runner.invoke(app, ["chat", "--help"])
+        assert result.exit_code == 2
 
 
 class TestKnowledgeBankWithResearch:

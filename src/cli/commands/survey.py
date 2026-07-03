@@ -96,7 +96,7 @@ async def _survey_create_async(title: str, questions_path: str, description: str
 
     client = SurveyClient(backend_type="ai_simulation")
     survey = await client.create_survey(title, qs, description)
-    console.print(f"[green]✓ Survey created[/green]")
+    console.print(f"[green][OK] Survey created[/green]")
     console.print(f"  ID: {survey.survey_id}")
     console.print(f"  Title: {survey.title}")
     console.print(f"  Questions: {len(survey.questions)}")
@@ -145,7 +145,7 @@ async def _survey_simulate_async(survey_id: str, count: int, template: str, pers
             survey_context=template,
         )
 
-    console.print(f"[green]✓ Simulation complete[/green]")
+    console.print(f"[green][OK] Simulation complete[/green]")
     console.print(f"  Personas: {len(result['personas'])}")
     console.print(f"  Responses: {len(result['responses'])}")
     console.print(f"  Cost: ${result['cost_report']['total_cost']:.4f}")
@@ -186,7 +186,7 @@ async def _survey_results_async(survey_id: str, limit: int):
     client = SurveyClient(backend_type="ai_simulation")
     responses = await client.get_results(task, limit=limit)
 
-    console.print(f"[green]✓ {len(responses)} responses total[/green]")
+    console.print(f"[green][OK] {len(responses)} responses total[/green]")
     for r in responses[:10]:
         answers_display = ", ".join(
             f"{qid}: {a.answer_value}" for qid, a in list(r.answers.items())[:3]
@@ -226,7 +226,7 @@ async def _survey_analyze_async(survey_id: str, output: Optional[str]):
     report_path = output or os.path.join(output_dir, "report.md")
     with open(report_path, "w", encoding="utf-8") as f:
         f.write(result["report"])
-    console.print(f"[green]✓ Report generated: {report_path}[/green]")
+    console.print(f"[green][OK] Report generated: {report_path}[/green]")
     console.print(f"  Statistics: {result['statistics'].get('valid_responses', 0)} valid responses")
     console.print(f"  Charts: {list(result.get('charts', {}).keys())}")
 

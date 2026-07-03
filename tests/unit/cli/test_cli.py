@@ -1,4 +1,4 @@
-"""CLI单元测试."""
+"""CLI unit tests — updated for refactored module structure."""
 
 import pytest
 import json
@@ -15,232 +15,197 @@ runner = CliRunner()
 
 
 class TestCLICommands:
-    """测试CLI命令."""
-
     def test_cli_help(self):
-        """测试CLI帮助信息."""
         result = runner.invoke(app, ["--help"])
         assert result.exit_code == 0
         assert "Zensers" in result.output
         assert "research" in result.output
+        assert "session" in result.output
+        assert "task" in result.output
 
     def test_version_command(self):
-        """测试版本命令."""
         result = runner.invoke(app, ["version"])
         assert result.exit_code == 0
         assert "Zensers" in result.output
-        assert "0.1.0" in result.output
 
     def test_research_command_help(self):
-        """测试research命令帮助."""
         result = runner.invoke(app, ["research", "--help"])
         assert result.exit_code == 0
-        assert "研究需求" in result.output
         assert "--output" in result.output
         assert "--format" in result.output
 
     def test_status_command_help(self):
-        """测试status命令帮助."""
         result = runner.invoke(app, ["status", "--help"])
         assert result.exit_code == 0
-        assert "任务ID" in result.output
         assert "--watch" in result.output
 
     def test_download_command_help(self):
-        """测试download命令帮助."""
         result = runner.invoke(app, ["download", "--help"])
         assert result.exit_code == 0
-        assert "任务ID" in result.output
         assert "--output" in result.output
+
+    def test_global_options_present(self):
+        result = runner.invoke(app, ["--help"])
+        assert "--api-url" in result.output
+        assert "--no-color" in result.output
+        assert "--json" in result.output
 
 
 class TestConfigCommand:
-    """测试配置命令."""
+    def test_config_show(self):
+        result = runner.invoke(app, ["config", "--show"])
+        assert result.exit_code == 0
+        assert "default_output_format" in result.output
 
-    def test_config_show_no_config(self):
-        """测试显示配置（无配置文件）."""
+    def test_config_set_invalid_format(self):
+        result = runner.invoke(app, ["config", "--set", "no_equals_sign"])
+        assert result.exit_code == 1
+
+    def test_config_set_unknown_key(self):
+        result = runner.invoke(app, ["config", "--set", "nonexistent_key=val"])
+        assert result.exit_code == 1
+
+    def test_config_no_args(self):
+        result = runner.invoke(app, ["config"])
+        assert result.exit_code == 0
+
+
+class TestSessionCommands:
+    def test_session_help(self):
+        result = runner.invoke(app, ["session", "--help"])
+        assert result.exit_code == 0
+        assert "start" in result.output
+        assert "attach" in result.output
+        assert "history" in result.output
+
+    def test_session_start_help(self):
+        result = runner.invoke(app, ["session", "start", "--help"])
+        assert result.exit_code == 0
+        assert "--interactive" in result.output
+
+    def test_session_attach_help(self):
+        result = runner.invoke(app, ["session", "attach", "--help"])
+        assert result.exit_code == 0
+
+    def test_session_history_help(self):
+        result = runner.invoke(app, ["session", "history", "--help"])
+        assert result.exit_code == 0
+        assert "--limit" in result.output
+
+
+class TestTaskCommands:
+    def test_task_help(self):
+        result = runner.invoke(app, ["task", "--help"])
+        assert result.exit_code == 0
+        assert "pause" in result.output
+        assert "cancel" in result.output
+        assert "status" in result.output
+
+
+class TestLLMCommands:
+    def test_llm_help(self):
+        result = runner.invoke(app, ["llm", "--help"])
+        assert result.exit_code == 0
+        assert "set-config" in result.output
+        assert "reset-config" in result.output
+
+    def test_llm_set_config_help(self):
+        result = runner.invoke(app, ["llm", "set-config", "--help"])
+        assert result.exit_code == 0
+        assert "--provider" in result.output
+
+
+class TestClientErrors:
+    def test_zensers_error(self):
+        from cli.client import ZensersError
+        err = ZensersError("test", status_code=500)
+        assert err.message == "test"
+        assert err.status_code == 500
+
+    def test_connection_error(self):
+        from cli.client import ZensersConnectionError, ZensersError
+        err = ZensersConnectionError("refused")
+        assert isinstance(err, ZensersError)
+
+    def test_not_found_error(self):
+        from cli.client import ZensersNotFoundError, ZensersError
+        err = ZensersNotFoundError("missing")
+        assert isinstance(err, ZensersError)
+
+    def test_server_error(self):
+        from cli.client import ZensersServerError, ZensersError
+        err = ZensersServerError("internal")
+        assert isinstance(err, ZensersError)
+
+
+class TestClientContextManager:
+    @pytest.mark.asyncio
+    async def test_context_manager(self):
+        from cli.client import ZensersClient
+        with patch("cli.client.get_api_base_url", return_value="http://localhost:8000"):
+            async with ZensersClient() as client:
+                assert client._base_url == "http://localhost:8000"
+
+
+class TestREPLCommands:
+    @pytest.mark.asyncio
+    async def test_quit_command(self):
+        from cli.repl import SessionREPL
+        repl = SessionREPL("test-session")
+        result = await repl._handle_command("/quit")
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_exit_command(self):
+        from cli.repl import SessionREPL
+        repl = SessionREPL("test-session")
+        result = await repl._handle_command("/exit")
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_unknown_command(self):
+        from cli.repl import SessionREPL
+        repl = SessionREPL("test-session")
+        result = await repl._handle_command("/unknown")
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_help_command(self):
+        from cli.repl import SessionREPL
+        mock_console = Mock()
+        repl = SessionREPL("test-session", console=mock_console)
+        result = await repl._handle_command("/help")
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_revise_no_arg(self):
+        from cli.repl import SessionREPL
+        mock_console = Mock()
+        repl = SessionREPL("test-session", console=mock_console)
+        result = await repl._handle_command("/revise")
+        assert result is True
+
+
+class TestCLIConfig:
+    def test_load_defaults(self):
+        from cli.utils import CLIConfig
         with patch.object(Path, "exists", return_value=False):
-            result = runner.invoke(app, ["config", "--show"])
-            assert result.exit_code == 0
-            assert "尚未创建" in result.output or "dim" in result.output
+            cfg = CLIConfig.load()
+        assert cfg.default_output_format == "markdown"
+        assert cfg.auto_save_reports is True
 
-    def test_config_reset(self):
-        """测试重置配置."""
-        with patch("builtins.open", mock_open := Mock()):
-            with patch.object(Path, "mkdir"):
-                result = runner.invoke(app, ["config", "--reset"])
-                assert result.exit_code == 0
-                assert "已重置" in result.output or "green" in result.output
-
-
-class TestResearchCommand:
-    """测试研究命令."""
-
-    @pytest.mark.asyncio
-    async def test_research_success(self):
-        """测试研究命令成功执行."""
-        mock_result = {
-            "success": True,
-            "report": {
-                "title": "测试报告",
-                "sections": [
-                    {"title": "章节1", "content": "内容1"},
-                    {"title": "章节2", "content": "内容2"},
-                ]
-            },
-            "quality_score": 0.85,
-        }
-        
-        with patch("cli.main.Orchestrator") as mock_orch:
-            mock_instance = Mock()
-            mock_instance.process_request = AsyncMock(return_value=mock_result)
-            mock_orch.return_value = mock_instance
-            
-            result = runner.invoke(app, ["research", "测试需求"])
-            
-            assert result.exit_code == 0
-            assert "完成" in result.output or "green" in result.output
-
-    @pytest.mark.asyncio
-    async def test_research_failure(self):
-        """测试研究命令失败."""
-        mock_result = {
-            "success": False,
-            "error": "研究失败",
-        }
-        
-        with patch("cli.main.Orchestrator") as mock_orch:
-            mock_instance = Mock()
-            mock_instance.process_request = AsyncMock(return_value=mock_result)
-            mock_orch.return_value = mock_instance
-            
-            result = runner.invoke(app, ["research", "测试需求"])
-            
-            assert result.exit_code == 1
-
-
-class TestStatusCommand:
-    """测试状态命令."""
-
-    def test_status_list_no_tasks(self):
-        """测试列出任务（无任务）."""
-        with patch("cli.main.TaskStorage") as mock_storage:
-            mock_instance = Mock()
-            mock_instance.list_tasks.return_value = []
-            mock_storage.return_value = mock_instance
-            
-            result = runner.invoke(app, ["status"])
-            
-            assert result.exit_code == 0
-            assert "没有" in result.output or "dim" in result.output
-
-    def test_status_show_task(self):
-        """测试显示特定任务状态."""
-        mock_task = {
-            "id": "test-task-123",
-            "status": "running",
-            "progress": 50,
-            "created_at": "2024-01-01T00:00:00",
-        }
-        
-        with patch("cli.main.TaskStorage") as mock_storage:
-            mock_instance = Mock()
-            mock_instance.get_task.return_value = mock_task
-            mock_storage.return_value = mock_instance
-            
-            result = runner.invoke(app, ["status", "test-task-123"])
-            
-            assert result.exit_code == 0
-            assert "test-task-123" in result.output or "running" in result.output
-
-    def test_status_task_not_found(self):
-        """测试任务不存在."""
-        with patch("cli.main.TaskStorage") as mock_storage:
-            mock_instance = Mock()
-            mock_instance.get_task.return_value = None
-            mock_storage.return_value = mock_instance
-            
-            result = runner.invoke(app, ["status", "non-existent"])
-            
-            assert result.exit_code == 1
-            assert "未找到" in result.output or "red" in result.output
-
-
-class TestDownloadCommand:
-    """测试下载命令."""
-
-    @pytest.mark.asyncio
-    async def test_download_success(self):
-        """测试下载成功."""
-        mock_task = {
-            "id": "test-task-123",
-            "status": "completed",
-            "result": {
-                "report": {
-                    "title": "测试报告",
-                    "sections": [{"title": "章节1", "content": "内容"}],
-                }
-            },
-        }
-        
-        with patch("cli.main.TaskStorage") as mock_storage:
-            mock_instance = Mock()
-            mock_instance.get_task.return_value = mock_task
-            mock_storage.return_value = mock_instance
-            
-            with patch("cli.main._save_report", new_callable=AsyncMock):
-                result = runner.invoke(app, [
-                    "download", "test-task-123",
-                    "--output", "/tmp/test.md",
-                    "--format", "markdown"
-                ])
-                
-                assert result.exit_code == 0
-                assert "已下载" in result.output or "green" in result.output
-
-    def test_download_task_not_completed(self):
-        """测试任务未完成."""
-        mock_task = {
-            "id": "test-task-123",
-            "status": "running",
-        }
-        
-        with patch("cli.main.TaskStorage") as mock_storage:
-            mock_instance = Mock()
-            mock_instance.get_task.return_value = mock_task
-            mock_storage.return_value = mock_instance
-            
-            result = runner.invoke(app, [
-                "download", "test-task-123",
-                "--output", "/tmp/test.md"
-            ])
-            
-            assert result.exit_code == 1
-            assert "尚未完成" in result.output or "yellow" in result.output
-
-
-class TestReportFormatting:
-    """测试报告格式化."""
-
-    def test_format_markdown_report(self):
-        """测试Markdown格式化."""
-        from cli.main import _format_markdown_report
-        
-        report = {
-            "title": "测试报告",
-            "sections": [
-                {"title": "章节1", "content": "内容1"},
-                {"title": "章节2", "content": "内容2"},
-            ]
-        }
-        
-        result = _format_markdown_report(report)
-        
-        assert "# 测试报告" in result
-        assert "## 章节1" in result
-        assert "## 章节2" in result
-        assert "内容1" in result
-        assert "内容2" in result
+    def test_save_and_load(self):
+        from cli.utils import CLIConfig
+        import tempfile
+        import os
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_path = Path(tmpdir) / "config.json"
+            with patch.object(Path, "home", return_value=Path(tmpdir).parent):
+                with patch("cli.utils.Path.home", return_value=Path(tmpdir)):
+                    cfg = CLIConfig(default_output_format="docx")
+                    cfg.save()
+                    loaded = CLIConfig.load()
+                    assert loaded.default_output_format == "docx"
 
 
 if __name__ == "__main__":

@@ -147,13 +147,13 @@ async def _knowledge_import_async(
             result = bank.import_file(str(input_path), auto_extract=auto_extract)
 
         if result.status == "success":
-            console.print(f"[green]✓ Import successful: {path}[/green]")
+            console.print(f"[green][OK] Import successful: {path}[/green]")
             console.print(f"  Knowledge pages created: {result.pages_created}")
             console.print(f"  Entities extracted: {result.entities_extracted}")
         elif result.status == "skipped":
             console.print(f"[yellow]Skipped: {result.error_message}[/yellow]")
         else:
-            console.print(f"[red]✗ Import failed: {result.error_message}[/red]")
+            console.print(f"[red][FAIL] Import failed: {result.error_message}[/red]")
 
     elif input_path.is_dir():
         console.print(f"[bold]Batch importing directory: {path}[/bold]")
@@ -293,5 +293,5 @@ async def _knowledge_backlinks_async(
         task = progress.add_task("Updating backlink references...", total=None)
         bank.compiler.backlink_system.update_backlinks()
 
-    console.print("[green]✓ Backlink references updated[/green]")
+    console.print("[green][OK] Backlink references updated[/green]")
     bank.close()

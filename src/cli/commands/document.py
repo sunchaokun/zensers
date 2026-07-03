@@ -114,7 +114,7 @@ async def _doc_generate_async(task_id: str, format: str, template: str):
         raise typer.Exit(1)
     finally:
         await client.close()
-    console.print(f"[green]✓ Document generation started[/green]")
+    console.print(f"[green][OK] Document generation started[/green]")
     if result.get("task_id"):
         console.print(f"  Task ID: {result['task_id']}")
     if result.get("document_path"):
@@ -156,7 +156,7 @@ async def _doc_rollback_async(task_id: str, format: str, target_version: str):
         raise typer.Exit(1)
     finally:
         await client.close()
-    console.print(f"[green]✓ Rolled back to {target_version}[/green]")
+    console.print(f"[green][OK] Rolled back to {target_version}[/green]")
     if result.get("new_version"):
         console.print(f"  New version: {result['new_version']}")
 
@@ -193,7 +193,7 @@ async def _doc_adjust_async(task_id: str, adjustment_type: str, target: Optional
         raise typer.Exit(1)
     finally:
         await client.close()
-    console.print(f"[green]✓ Document adjusted[/green]")
+    console.print(f"[green][OK] Document adjusted[/green]")
     if result.get("message"):
         console.print(f"  {result['message']}")
 
@@ -269,7 +269,7 @@ async def _doc_revision_async(
     finally:
         await client.close()
     if result.get("success"):
-        console.print(f"[green]✓ Revision submitted[/green]")
+        console.print(f"[green][OK] Revision submitted[/green]")
         if result.get("revision_id"):
             console.print(f"  Revision ID: {result['revision_id']}")
     else:

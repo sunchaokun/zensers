@@ -133,6 +133,24 @@ class TestRoutingHintWithRouter:
                 call_kwargs = mock_api.call_args[1]
                 assert call_kwargs["model"] == "my-custom-model"
                 assert call_kwargs["api_key"] == "my-key"
+                assert call_kwargs["base_url"] == "https://fast.api/v1"
+
+    @pytest.mark.asyncio
+    async def test_hint_fills_non_overridden_fields(self):
+        registry = _make_registry()
+        with patch("src.core.llm_client.settings", _mock_settings()):
+            from src.core.llm_client import init_llm_infrastructure
+            init_llm_infrastructure(registry)
+            with patch("src.core.llm_client._call_llm_api", new_callable=AsyncMock) as mock_api:
+                mock_api.return_value = {"choices": [{"message": {"content": "ok"}}], "usage": {}}
+                from src.core.llm_client import call_llm
+                hint = RoutingHint(profile_name="fast")
+                result = await call_llm(prompt="test", routing_hint=hint, model="my-custom-model")
+                assert result["success"] is True
+                call_kwargs = mock_api.call_args[1]
+                assert call_kwargs["model"] == "my-custom-model"
+                assert call_kwargs["api_key"] == "sk-fast"
+                assert call_kwargs["base_url"] == "https://fast.api/v1"
 
 
 class TestInitLlmInfrastructure:

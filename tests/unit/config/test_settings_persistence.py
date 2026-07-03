@@ -9,6 +9,10 @@ from src.config.settings import Settings
 @pytest.fixture(autouse=True)
 def reset_settings(tmp_path):
     Settings._reset_instance()
+    s = Settings()
+    s._llm_profiles_persist_path = str(tmp_path / "llm_profiles.json")
+    s.llm_profiles = LLMProfileRegistry(default_profile="migrated")
+    s._migrate_legacy_to_profile()
     yield
     Settings._reset_instance()
 

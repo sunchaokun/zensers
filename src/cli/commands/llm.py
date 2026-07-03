@@ -55,16 +55,13 @@ def register(parent: typer.Typer) -> None:
 
 
 async def _llm_models_async(provider: Optional[str] = None):
-    from src.cli.client import ZensersClient
-
-    client = ZensersClient()
+    from src.cli.client import ZensersClient, ZensersError
     try:
-        result = await client.llm_models()
-    except Exception as e:
-        console.print(f"[red]Failed to list LLM models: {e}[/red]")
+        async with ZensersClient() as client:
+            result = await client.llm_models()
+    except ZensersError as e:
+        console.print(f"[red]Failed to list LLM models: {e.message}[/red]")
         raise typer.Exit(1)
-    finally:
-        await client.close()
     providers = result.get("providers", [])
     models = result.get("models", [])
 
@@ -91,16 +88,13 @@ async def _llm_models_async(provider: Optional[str] = None):
 
 
 async def _llm_config_async():
-    from src.cli.client import ZensersClient
-
-    client = ZensersClient()
+    from src.cli.client import ZensersClient, ZensersError
     try:
-        result = await client.llm_config()
-    except Exception as e:
-        console.print(f"[red]Failed to get LLM config: {e}[/red]")
+        async with ZensersClient() as client:
+            result = await client.llm_config()
+    except ZensersError as e:
+        console.print(f"[red]Failed to get LLM config: {e.message}[/red]")
         raise typer.Exit(1)
-    finally:
-        await client.close()
     console.print(Panel.fit(
         f"  Provider: {result.get('provider', 'N/A')}\n"
         f"  Model: {result.get('model', 'N/A')}\n"
@@ -113,16 +107,13 @@ async def _llm_config_async():
 
 
 async def _llm_health_async():
-    from src.cli.client import ZensersClient
-
-    client = ZensersClient()
+    from src.cli.client import ZensersClient, ZensersError
     try:
-        result = await client.llm_health()
-    except Exception as e:
-        console.print(f"[red]LLM health check failed: {e}[/red]")
+        async with ZensersClient() as client:
+            result = await client.llm_health()
+    except ZensersError as e:
+        console.print(f"[red]LLM health check failed: {e.message}[/red]")
         raise typer.Exit(1)
-    finally:
-        await client.close()
     reachable = result.get("reachable", False)
     status_style = "green" if reachable else "red"
     table = Table(title="LLM Health")
@@ -144,7 +135,7 @@ async def _llm_set_config_async(provider, model, api_key, api_endpoint, temperat
     except ZensersError as e:
         console.print(f"[red]Failed to set LLM config: {e.message}[/red]")
         raise typer.Exit(1)
-    console.print("[green]✓ LLM configuration updated[/green]")
+    console.print("[green][OK] LLM configuration updated[/green]")
 
 
 async def _llm_reset_config_async():
@@ -155,4 +146,4 @@ async def _llm_reset_config_async():
     except ZensersError as e:
         console.print(f"[red]Failed to reset LLM config: {e.message}[/red]")
         raise typer.Exit(1)
-    console.print("[green]✓ LLM configuration reset to defaults[/green]")
+    console.print("[green][OK] LLM configuration reset to defaults[/green]")

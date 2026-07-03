@@ -136,4 +136,26 @@ Rules:
       ]
     }
 
+## Forensic Analysis Detection
+
+When the user's input meets ALL of the following conditions, set `primary_intent` to `"forensic_analysis"`:
+
+1. **Question-type input**: The input asks a "why", "how", or "whether" question about a specific phenomenon
+2. **Preloaded data available**: Document data has been uploaded/parsed (indicated by `file_ids` or `annual_report_data` in requirement)
+3. **Answerable from data**: The question can be answered by analyzing the available document data (not requiring external information)
+
+Examples:
+- "为什么现金流增长但利润没增长？" + annual report data → forensic_analysis (question + preloaded data + answerable from financial statements)
+- "公司的竞争优势是什么？" + annual report data → forensic_analysis (question + preloaded data + answerable from business description)
+- "行业前景如何？" without annual report data → research (question but requires external data, not answerable from document alone)
+
+When `primary_intent` is `forensic_analysis`, also output:
+- `forensic_mode`: true
+- `data_preloaded`: true
+- `causal_hypotheses`: array of 3-5 initial causal hypotheses for the observed phenomenon
+- `section_data_specs` with `data_source_type: "preloaded"` for data available in the document
+
+Rules for `data_source_type` (extended):
+- **"preloaded"**: Data already available in uploaded document (new type for forensic analysis)
+
 {include:quality_rubric}

@@ -39,6 +39,7 @@ class IntentType(Enum):
     FIX = "fix"                        # Fix task (error correction, data cleaning)
     OPEN_ENDED = "open_ended"          # Open-ended task (exploratory research)
     CLARIFICATION = "clarification"    # Clarification task (requires further user input)
+    FORENSIC_ANALYSIS = "forensic_analysis"  # Forensic analysis (explain causality from preloaded data)
 
 
 class TaskComplexity(Enum):

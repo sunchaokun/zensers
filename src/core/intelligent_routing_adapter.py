@@ -12,6 +12,7 @@ Responsibilities:
 Design Doc: .sisyphus/plans/intelligent_routing_system_design.md
 """
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
@@ -330,11 +331,17 @@ class IntelligentRoutingAdapter:
         # Step 1: Semantic intent analysis
         intent_result = self._analyze_intent(user_request, requirement)
 
-        # Step 2: Task structure analysis
-        task_structure = self._analyze_structure(requirement, intent_result, topic)
+        # Step 2: Task structure analysis (branch based on forensic mode)
+        if intent_result.forensic_mode:
+            task_structure = self._analyze_forensic_structure(requirement, intent_result, topic)
+        else:
+            task_structure = self._analyze_structure(requirement, intent_result, topic)
 
-        # Step 3: Dynamic phase orchestration
-        execution_plan = self._orchestrate_phases(task_structure, intent_result, topic)
+        # Step 3: Dynamic phase orchestration (branch based on forensic mode)
+        if intent_result.forensic_mode:
+            execution_plan = self._orchestrate_forensic_phases(task_structure, intent_result, topic)
+        else:
+            execution_plan = self._orchestrate_phases(task_structure, intent_result, topic)
 
         # Step 4: Convert to compatible format
         decomposition_plan = self._to_decomposition_plan(execution_plan)
@@ -447,6 +454,152 @@ class IntelligentRoutingAdapter:
         )
 
         return execution_plan
+
+    def _analyze_forensic_structure(
+        self,
+        requirement: Dict[str, Any],
+        intent_result: DeepIntentResult,
+        topic: Optional[str],
+    ) -> TaskStructure:
+        """Generate hypothesis-driven task structure for forensic analysis."""
+        hypotheses = intent_result.causal_hypotheses
+        if not hypotheses:
+            hypotheses = self._generate_hypotheses_with_llm(intent_result.core_question, requirement)
+
+        sections = []
+        data_needs = self._extract_data_needs_from_hypotheses(hypotheses, requirement)
+
+        sections.append(SectionSpec(
+            section_id="section_0_core_question",
+            section_name=intent_result.core_question or topic or "Forensic Analysis",
+            section_role=SectionRole.SYNTHESIS,
+            content_dependency=[],
+        ))
+
+        for i, hypothesis in enumerate(hypotheses):
+            hypothesis_data_needs = self._extract_data_needs_for_hypothesis(hypothesis, data_needs)
+            sections.append(SectionSpec(
+                section_id=f"section_{i+1}_hypothesis",
+                section_name=hypothesis,
+                section_role=SectionRole.ANALYSIS,
+                content_dependency=[],
+                config={
+                    "forensic_mode": True,
+                    "is_hypothesis": True,
+                    "hypothesis_data_needs": hypothesis_data_needs,
+                },
+            ))
+
+        sections.append(SectionSpec(
+            section_id="section_data_extraction",
+            section_name="精准数据提取",
+            section_role=SectionRole.DATA_COLLECTION,
+            content_dependency=[],
+            skill_requirements=["annual_report_parser"],
+        ))
+
+        for s in sections[1:-1]:
+            if s.section_role == SectionRole.ANALYSIS:
+                sections[0].content_dependency.append(s.section_id)
+
+        for s in sections[1:-1]:
+            if s.section_role == SectionRole.ANALYSIS:
+                s.content_dependency.append("section_data_extraction")
+
+        return TaskStructure(
+            task_id=requirement.get("task_id", "forensic_unknown"),
+            topic=topic or intent_result.core_question or "Forensic Analysis",
+            sections=sections,
+            dependencies=self._build_forensic_dependencies(sections),
+            execution_graph={},
+            parallel_groups=self._compute_forensic_parallel_groups(sections),
+        )
+
+    def _generate_hypotheses_with_llm(self, core_question: str, requirement: Dict[str, Any]) -> List[str]:
+        """Fallback: generate hypotheses via LLM when intent analysis didn't provide them."""
+        try:
+            from src.core.llm import call_llm
+            import asyncio
+            prompt = f"""基于以下问题，生成3-5个因果假设。每个假设必须可被数据验证或反驳。
+问题：{core_question}
+输出格式（每行一个假设）：
+假设：[因果陈述]"""
+            loop = None
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            if loop and loop.is_running():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as pool:
+                    future = pool.submit(
+                        asyncio.run,
+                        call_llm(prompt=prompt, system_prompt="你是一位因果推断专家。只输出假设，不要分析。")
+                    )
+                    result = future.result(timeout=30)
+            else:
+                result = asyncio.run(call_llm(
+                    prompt=prompt,
+                    system_prompt="你是一位因果推断专家。只输出假设，不要分析。",
+                ))
+            if result.get("success") and result.get("content"):
+                hypotheses = []
+                for line in result["content"].strip().split("\n"):
+                    line = line.strip()
+                    if line.startswith("假设：") or line.startswith("假设:"):
+                        hypotheses.append(line.split("：", 1)[-1].split(":", 1)[-1].strip())
+                    elif line and not line.startswith("#"):
+                        hypotheses.append(line)
+                return hypotheses[:5]
+        except Exception as e:
+            logger.warning(f"[Forensic] LLM hypothesis generation failed: {e}")
+        return ["假设1: 待验证的因果假设"]
+
+    def _extract_data_needs_from_hypotheses(self, hypotheses: List[str], requirement: Dict[str, Any]) -> List[str]:
+        """Extract data needs keywords from all hypotheses."""
+        needs = set()
+        for h in hypotheses:
+            keywords = re.findall(r'[\u4e00-\u9fff]{2,6}', h)
+            needs.update(keywords)
+        return list(needs)
+
+    def _extract_data_needs_for_hypothesis(self, hypothesis: str, all_needs: List[str]) -> List[str]:
+        """Extract data needs specific to one hypothesis."""
+        relevant = []
+        for need in all_needs:
+            if need in hypothesis:
+                relevant.append(need)
+        if not relevant:
+            relevant = all_needs[:3]
+        return relevant
+
+    def _build_forensic_dependencies(self, sections):
+        from .task_structure import ContentDependency
+        deps = []
+        for s in sections:
+            for dep_id in s.content_dependency:
+                dep_type = "data" if s.section_role == SectionRole.ANALYSIS else "synthesis"
+                deps.append(ContentDependency(from_section=dep_id, to_section=s.section_id, dependency_type=dep_type))
+        return deps
+
+    def _compute_forensic_parallel_groups(self, sections):
+        hypothesis_ids = [s.section_id for s in sections if s.section_role == SectionRole.ANALYSIS]
+        other_ids = [s.section_id for s in sections if s.section_role != SectionRole.ANALYSIS]
+        groups = []
+        if hypothesis_ids:
+            groups.append(hypothesis_ids)
+        for sid in other_ids:
+            groups.append([sid])
+        return groups
+
+    def _orchestrate_forensic_phases(
+        self,
+        task_structure: TaskStructure,
+        intent_result: DeepIntentResult,
+        topic: Optional[str],
+    ) -> ExecutionPlan:
+        """Orchestrate forensic analysis phases (independent from _generate_phases, no M1 split)."""
+        return self._phase_orchestrator.plan_forensic(task_structure, intent_result, topic)
 
     def _to_decomposition_plan(
         self,

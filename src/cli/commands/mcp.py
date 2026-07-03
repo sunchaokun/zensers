@@ -102,7 +102,7 @@ async def _mcp_start_async(server_name: str):
     finally:
         await client.close()
     if result.get("success"):
-        console.print(f"[green]✓ MCP server '{server_name}' started (status: {result.get('new_status', 'unknown')})[/green]")
+        console.print(f"[green][OK] MCP server '{server_name}' started (status: {result.get('new_status', 'unknown')})[/green]")
     else:
         console.print(f"[red]Failed to start MCP server '{server_name}': {result.get('message', 'unknown error')}[/red]")
         raise typer.Exit(1)
@@ -120,7 +120,7 @@ async def _mcp_stop_async(server_name: str):
     finally:
         await client.close()
     if result.get("success"):
-        console.print(f"[green]✓ MCP server '{server_name}' stopped (status: {result.get('new_status', 'unknown')})[/green]")
+        console.print(f"[green][OK] MCP server '{server_name}' stopped (status: {result.get('new_status', 'unknown')})[/green]")
     else:
         console.print(f"[red]Failed to stop MCP server '{server_name}': {result.get('message', 'unknown error')}[/red]")
         raise typer.Exit(1)
@@ -183,7 +183,7 @@ async def _mcp_reload_async():
     finally:
         await client.close()
     if result.get("success"):
-        console.print(f"[green]✓ MCP configuration reloaded ({result.get('servers_count', 0)} servers)[/green]")
+        console.print(f"[green][OK] MCP configuration reloaded ({result.get('servers_count', 0)} servers)[/green]")
     else:
         console.print(f"[red]MCP reload failed: {result.get('message', 'unknown error')}[/red]")
         raise typer.Exit(1)

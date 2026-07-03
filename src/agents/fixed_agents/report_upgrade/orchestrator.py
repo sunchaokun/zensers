@@ -11,7 +11,7 @@ from .models import (
     ChapterWriteInput, ChapterWriteOutput, ChapterReviewInput, ChapterReviewOutput,
     ReviewInput, ReviewOutput, DataGap, DataConflict, DataPoint, DataConflictResolution,
     DataRepairResult, QualityIssueDiagnosis, ChapterDiagnostic, QualityReport,
-    ChapterIssue,
+    ChapterIssue, FixSuggestion,
 )
 from .data_registry import DataRegistry
 from .chapter_writer import ChapterWriter, DATAPOINT_FIELDS
@@ -173,6 +173,8 @@ class ReportOrchestrator:
         self._skill_registry = skill_registry
         self._structured_data_repair = StructuredDataRepairAgent(skill_registry=skill_registry)
         self._llm_trace: List[Dict[str, Any]] = []
+        self._chapters: List[ChapterWriteOutput] = []
+        self._framework_config: Dict[str, Any] = {}
 
     async def generate_report(
         self,
@@ -219,6 +221,7 @@ class ReportOrchestrator:
 
                 self._task_structure = task_structure
                 self._aggregated_result = aggregated_result
+                self._framework_config = framework_config
 
                 narrative_context = self._understand_framework(task_structure, framework_config)
 
@@ -418,6 +421,8 @@ class ReportOrchestrator:
                     )
 
                 exec_summary = await self._generate_exec_summary(chapters, task_structure, topic)
+
+                self._chapters = chapters
 
                 original_sources = getattr(aggregated_result, 'sources', [])
                 return self._assemble_final_report(
@@ -1429,6 +1434,7 @@ class ReportOrchestrator:
                 "charts": [],
                 "data_points": grounded_dp,
                 "sources": chapter_sources,
+                "key_conclusions": ch.key_conclusions,
             })
 
         result = {
@@ -1523,3 +1529,330 @@ class ReportOrchestrator:
             registry_snapshot = data.get("data_registry_snapshot", {})
 
         return (chapters, registry_snapshot) if chapters else None
+
+    def _parse_location_result(self, raw: str, fallback_request: str) -> "RevisionLocation":
+        from .revision_models import RevisionLocation, RevisionTarget, RevisionComplexity
+        try:
+            json_match = re.search(r'```json\s*(.*?)\s*```', raw, re.DOTALL)
+            if json_match:
+                data = json.loads(json_match.group(1))
+                targets = [
+                    RevisionTarget(
+                        chapter_id=t.get("chapter_id", ""),
+                        chapter_title=t.get("chapter_title", ""),
+                        revision_type=t.get("revision_type", "modify"),
+                        revision_description=t.get("revision_description", fallback_request),
+                        data_patches=t.get("data_patches", []),
+                    )
+                    for t in data.get("targets", [])
+                ]
+                return RevisionLocation(
+                    complexity=RevisionComplexity(data.get("complexity", "standard")),
+                    targets=targets,
+                    data_gaps=data.get("data_gaps", []),
+                    data_conflicts=data.get("data_conflicts", []),
+                    preceding_summary=data.get("preceding_summary", ""),
+                )
+        except (json.JSONDecodeError, KeyError, ValueError) as e:
+            logger.warning(f"Failed to parse revision location: {e}")
+        return RevisionLocation(
+            complexity=RevisionComplexity.STANDARD,
+            targets=[RevisionTarget(
+                chapter_id="", chapter_title="",
+                revision_type="modify",
+                revision_description=fallback_request,
+            )],
+        )
+
+    def _append_revision_preceding_summary(self, current: str, result) -> str:
+        from .revision_models import ChapterRewriteResult
+        conclusions = ""
+        if result.revised_content:
+            conclusions = result.revised_content[:500]
+        if current and conclusions:
+            max_len = self._MAX_PRECEDING_SUMMARY_LENGTH if hasattr(self, '_MAX_PRECEDING_SUMMARY_LENGTH') else 3000
+            return current[-(max_len - 500):] + "\n" + conclusions
+        return conclusions or current
+
+    async def _execute_chapter_revision(
+        self,
+        target,
+        preceding_summary: str,
+    ):
+        from .revision_models import RevisionTarget, ChapterRewriteResult
+
+        target_chapter = next(
+            (c for c in self._chapters if c.chapter_id == target.chapter_id), None
+        )
+        if not target_chapter:
+            return ChapterRewriteResult(
+                chapter_id=target.chapter_id,
+                original_content="", revised_content="",
+                review_passed=False, review_score=0.0,
+            )
+
+        original_content = target_chapter.content
+
+        review_feedback = ChapterReviewOutput(
+            passed=False, score=0.0,
+            issues=[
+                ChapterIssue(
+                    category="user_revision", severity="HIGH",
+                    location=f"chapter:{target.chapter_id}",
+                    description=target.revision_description,
+                    suggestion=target.revision_description,
+                )
+            ],
+        )
+
+        chapter_data = {"data_points": [dp.__dict__ for dp in target_chapter.data_points_used]} \
+            if target_chapter.data_points_used else None
+
+        rewritten = await self._chapter_writer.rewrite(
+            original_chapter=target_chapter,
+            review_feedback=review_feedback,
+            framework_config=self._framework_config,
+            chapter_spec={"section_id": target.chapter_id, "section_name": target.chapter_title},
+            preceding_summary=preceding_summary,
+            chapter_data=chapter_data,
+        )
+
+        best_chapter = rewritten
+        best_score = 0.0
+
+        review_chapter_data = {"data_points": [dp.__dict__ for dp in target_chapter.data_points_used]} \
+            if target_chapter.data_points_used else None
+
+        for review_round in range(2):
+            review = await self._chapter_reviewer.review(
+                ChapterReviewInput(
+                    framework_config=self._framework_config,
+                    chapter_spec={"section_id": target.chapter_id, "section_name": target.chapter_title},
+                    chapter_content=best_chapter.content,
+                    preceding_summary=preceding_summary,
+                    used_metrics_summary=self._data_registry.serialize_used_metrics(),
+                    topic=self._task_structure.get('topic', ''),
+                    writer_self_check_issues=best_chapter.self_check_issues,
+                    chapter_data=review_chapter_data,
+                )
+            )
+            if review.passed:
+                best_score = review.score
+                break
+            if review.score > best_score:
+                best_score = review.score
+            rewritten = await self._chapter_writer.rewrite(
+                original_chapter=best_chapter,
+                review_feedback=review,
+                framework_config=self._framework_config,
+                chapter_spec={"section_id": target.chapter_id, "section_name": target.chapter_title},
+                preceding_summary=preceding_summary,
+                chapter_data=chapter_data,
+            )
+            if rewritten.content:
+                best_chapter = rewritten
+
+        validated_dps = self._extract_and_validate_data_points(best_chapter)
+        best_chapter.data_points_used = validated_dps
+        for dp in validated_dps:
+            self._data_registry.register(
+                metric=dp.metric, value=dp.value, unit=dp.unit,
+                chapter_id=best_chapter.chapter_id, source=dp.source,
+            )
+
+        idx = next(
+            (i for i, c in enumerate(self._chapters) if c.chapter_id == target.chapter_id), None
+        )
+        if idx is not None:
+            self._chapters[idx] = best_chapter
+
+        return ChapterRewriteResult(
+            chapter_id=target.chapter_id,
+            original_content=original_content,
+            revised_content=best_chapter.content,
+            review_passed=best_score >= 60,
+            review_score=best_score,
+            rewrite_rounds=review_round + 1,
+        )
+
+    async def _fix_global_issues(self, issues, fix_suggestions):
+        fix_context = ""
+        if fix_suggestions:
+            fix_context = "\n".join(
+                f"- {fs.fix_instruction}" for fs in fix_suggestions[:5]
+                if hasattr(fs, 'fix_instruction')
+            )
+        for issue in issues[:5]:
+            chapter_id = issue.location.split(":")[-1] if ":" in issue.location else ""
+            target_chapter = next(
+                (c for c in self._chapters if c.chapter_id == chapter_id), None
+            )
+            if not target_chapter:
+                continue
+            suggestion_text = issue.evidence
+            if fix_context:
+                suggestion_text = f"{issue.evidence}\n全局修正建议：\n{fix_context}" if issue.evidence else f"全局修正建议：\n{fix_context}"
+            review_feedback = ChapterReviewOutput(
+                passed=False, score=0.0,
+                issues=[
+                    ChapterIssue(
+                        category=issue.dimension, severity=issue.severity,
+                        location=issue.location, description=issue.description,
+                        suggestion=suggestion_text,
+                    )
+                ],
+            )
+            chapter_data = {"data_points": [dp.__dict__ for dp in target_chapter.data_points_used]} \
+                if target_chapter.data_points_used else None
+            rewritten = await self._chapter_writer.rewrite(
+                original_chapter=target_chapter,
+                review_feedback=review_feedback,
+                framework_config=self._framework_config,
+                chapter_spec={"section_id": target_chapter.chapter_id, "section_name": target_chapter.title},
+                preceding_summary="",
+                chapter_data=chapter_data,
+            )
+            if rewritten.content:
+                validated_dps = self._extract_and_validate_data_points(rewritten)
+                rewritten.data_points_used = validated_dps
+                for dp in validated_dps:
+                    self._data_registry.register(
+                        metric=dp.metric, value=dp.value, unit=dp.unit,
+                        chapter_id=rewritten.chapter_id, source=dp.source,
+                    )
+                idx = next(
+                    (i for i, c in enumerate(self._chapters) if c.chapter_id == chapter_id), None
+                )
+                if idx is not None:
+                    self._chapters[idx] = rewritten
+
+    async def _apply_lightweight_revision(self, location) -> Dict:
+        from .revision_models import RevisionLocation
+        for target in location.targets:
+            for ch in self._chapters:
+                if ch.chapter_id == target.chapter_id:
+                    result = await call_llm(
+                        prompt=f"对以下章节内容进行轻量修改：{target.revision_description}\n\n当前内容：\n{ch.content[:3000]}\n\n只修改涉及的部分，保持其他内容不变。",
+                        max_tokens=4096, temperature=0.3,
+                    )
+                    if result.get("success") and result.get("content"):
+                        ch.content = result["content"]
+                        validated_dps = self._extract_and_validate_data_points(ch)
+                        ch.data_points_used = validated_dps
+                        for dp in validated_dps:
+                            self._data_registry.register(
+                                metric=dp.metric, value=dp.value, unit=dp.unit,
+                                chapter_id=ch.chapter_id, source=dp.source,
+                            )
+                    break
+        return {
+            "chapter_results": [],
+            "global_review_score": 0,
+            "global_review_passed": True,
+            "data_registry_snapshot": self._data_registry.to_snapshot(),
+        }
+
+    async def _locate_revision_target(
+        self,
+        user_request: str,
+        quality_issues: Optional[List[Dict]] = None,
+    ):
+        from .revision_models import RevisionLocation, RevisionComplexity
+        chapter_index = "\n".join(
+            f"- [{c.chapter_id}] {c.title}"
+            for c in self._chapters
+        )
+        data_index = self._data_registry.serialize_used_metrics()
+        issues_context = ""
+        if quality_issues:
+            issues_context = "\n".join(
+                f"- [{iss.get('severity', '')}] {iss.get('section', '')}: {iss.get('message', '')}"
+                for iss in quality_issues[:20]
+            )
+
+        prompt = f"""# 修订定位
+
+## 研究主题
+{self._task_structure.get('topic', '')}
+
+## 章节索引
+{chapter_index}
+
+## 已使用的数据指标
+{data_index}
+
+## 质检问题
+{issues_context or '无'}
+
+## 用户修订请求
+{user_request}
+
+## 输出格式（严格JSON，包裹在 ```json ``` 中）
+```json
+{{
+  "complexity": "lightweight|standard|complex",
+  "targets": [
+    {{
+      "chapter_id": "章节ID",
+      "chapter_title": "章节标题",
+      "revision_type": "modify|rewrite|patch_data|delete",
+      "revision_description": "具体修订描述",
+      "data_patches": ["数据修补指令"]
+    }}
+  ],
+  "preceding_summary": "前文核心结论摘要",
+  "data_gaps": [{{"chapter_id": "", "metric": "缺失指标", "context": "上下文"}}],
+  "data_conflicts": [{{"metric": "冲突指标", "entries": []}}]
+}}
+```"""
+
+        result = await call_llm(prompt=prompt, max_tokens=4096, temperature=0.3)
+        if not result.get("success"):
+            return RevisionLocation(complexity=RevisionComplexity.STANDARD)
+        return self._parse_location_result(result["content"], user_request)
+
+    async def revision(
+        self,
+        user_request: str,
+        quality_issues: Optional[List[Dict]] = None,
+    ) -> Dict[str, Any]:
+        from .revision_models import RevisionComplexity
+
+        location = await self._locate_revision_target(user_request, quality_issues)
+
+        if location.complexity == RevisionComplexity.LIGHTWEIGHT:
+            return await self._apply_lightweight_revision(location)
+
+        preceding_summary = ""
+        chapter_results = []
+        for target in location.targets:
+            result = await self._execute_chapter_revision(target, preceding_summary)
+            chapter_results.append(result)
+            if result.review_passed:
+                preceding_summary = self._append_revision_preceding_summary(preceding_summary, result)
+
+        global_review = await self._global_reviewer.review(
+            ReviewInput(
+                framework_config=self._framework_config,
+                report_summary=serialize_report_for_review(self._chapters, self._data_registry),
+                conflicts_summary=self._data_registry.serialize_conflicts(),
+            )
+        )
+        verified_issues = await self._global_reviewer.verify_issues(global_review.issues, self._chapters)
+
+        if global_review.overall_score < 80 and verified_issues:
+            await self._fix_global_issues(verified_issues, global_review.fix_suggestions)
+            global_review = await self._global_reviewer.review(
+                ReviewInput(
+                    framework_config=self._framework_config,
+                    report_summary=serialize_report_for_review(self._chapters, self._data_registry),
+                    conflicts_summary=self._data_registry.serialize_conflicts(),
+                )
+            )
+
+        return {
+            "chapter_results": chapter_results,
+            "global_review_score": global_review.overall_score,
+            "global_review_passed": global_review.overall_score >= 80,
+            "data_registry_snapshot": self._data_registry.to_snapshot(),
+        }

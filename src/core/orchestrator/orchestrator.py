@@ -1117,6 +1117,15 @@ class ResearchOrchestrator:
                     )
                     if "title" not in research_result_data:
                         research_result_data["title"] = requirement.topic
+                    try:
+                        if hasattr(_ro, '_data_registry') and _ro._data_registry is not None:
+                            research_result_data["_data_registry_snapshot"] = _ro._data_registry.to_snapshot()
+                        if hasattr(_ro, '_framework_config') and _ro._framework_config:
+                            research_result_data["_framework_config"] = _ro._framework_config
+                        if hasattr(_ro, '_task_structure') and _ro._task_structure:
+                            research_result_data["_task_structure"] = _ro._task_structure
+                    except Exception as _snapshot_err:
+                        logger.warning(f"[{task_id}] Failed to save registry/config snapshot: {_snapshot_err}")
                     logger.info(f"[{task_id}] Report upgrade (non-routing): framework-driven generation complete")
                 else:
                     raise RuntimeError("No LLM skill available")
@@ -2333,6 +2342,15 @@ class ResearchOrchestrator:
                     )
                     if "title" not in research_result_data:
                         research_result_data["title"] = requirement.topic
+                    try:
+                        if hasattr(report_orchestrator, '_data_registry') and report_orchestrator._data_registry is not None:
+                            research_result_data["_data_registry_snapshot"] = report_orchestrator._data_registry.to_snapshot()
+                        if hasattr(report_orchestrator, '_framework_config') and report_orchestrator._framework_config:
+                            research_result_data["_framework_config"] = report_orchestrator._framework_config
+                        if hasattr(report_orchestrator, '_task_structure') and report_orchestrator._task_structure:
+                            research_result_data["_task_structure"] = report_orchestrator._task_structure
+                    except Exception as _snapshot_err:
+                        logger.warning(f"[{task_id}] Failed to save registry/config snapshot: {_snapshot_err}")
                     logger.info(f"[{task_id}] Report upgrade: framework-driven generation complete, {len(research_result_data.get('sections', []))} sections")
                 else:
                     raise RuntimeError("No LLM skill available")
@@ -4001,81 +4019,99 @@ class ResearchOrchestrator:
                         document_tables = []
                         ar_sections = annual_report_data.get("sections", [])
 
-                        # [P0-4b] Map routing section_id to annual report section_type for precise injection
-                        from src.core.decomposition.section_type_map import resolve_section_types as _resolve_section_types
-                        own_section_types = []
-                        if spec.output_keys:
-                            for output_key in spec.output_keys:
-                                matched = _resolve_section_types(output_key)
-                                if matched:
-                                    own_section_types.extend(matched)
-                            own_section_types = list(set(own_section_types))
+                        # Forensic mode: use extract_for_hypothesis for precise document_context
+                        _is_forensic = (intent_result and getattr(intent_result, 'forensic_mode', False))
+                        if _is_forensic and spec.agent_type == "analysis":
+                            _hypothesis_data_needs = (spec.context or {}).get("hypothesis_data_needs", [])
+                            if _hypothesis_data_needs:
+                                from src.skills.analysis.annual_report_parser import AnnualReportParserSkill
+                                _parser = AnnualReportParserSkill()
+                                _hypothesis_name = spec.context.get("aspect", spec.agent_id)
+                                _extracted = _parser.extract_for_hypothesis(annual_report_data, _hypothesis_name, _hypothesis_data_needs)
+                                if _extracted.get("relevant_sections") or _extracted.get("relevant_line_items"):
+                                    _parts = []
+                                    for _sec in _extracted.get("relevant_sections", []):
+                                        _parts.append(f"### {_sec.get('title', '')}\n{_sec.get('content', '')[:4000]}")
+                                    for _item in _extracted.get("relevant_line_items", []):
+                                        _parts.append(f"### {_item.get('table_type', '')} - {_item.get('row', {}).get('科目', '')}\n{_item['row']}")
+                                    document_context = f"[年报相关数据（假设验证）]\n\n" + "\n\n".join(_parts)
 
-                        # Priority 1: Use aspect_to_section_ids if aspect is known
-                        if own_aspect:
-                            section_ids = analysis_framework.get("aspect_to_section_ids", {}).get(own_aspect, [])
-                            context_parts = []
-                            for sid in section_ids:
-                                if isinstance(sid, int) and 0 <= sid - 1 < len(ar_sections):
-                                    section = ar_sections[sid - 1]
-                                    content = section.get("content", "")
-                                    if content:
-                                        context_parts.append(content[:4000])
-                            if context_parts:
-                                document_context = "\n\n".join(context_parts)
+                        if not document_context:
+                            # [P0-4b] Map routing section_id to annual report section_type for precise injection
+                            from src.core.decomposition.section_type_map import resolve_section_types as _resolve_section_types
+                            own_section_types = []
+                            if spec.output_keys:
+                                for output_key in spec.output_keys:
+                                    matched = _resolve_section_types(output_key)
+                                    if matched:
+                                        own_section_types.extend(matched)
+                                own_section_types = list(set(own_section_types))
 
-                        # Priority 2: Match by section_type from routing section_id
-                        if not document_context and own_section_types and ar_sections:
-                            matched = [
-                                s for s in ar_sections
-                                if s.get("section_type", "") in own_section_types
-                                and s.get("content", "").strip()
-                            ]
-                            matched.sort(
-                                key=lambda s: (s.get("importance", 3), -len(s.get("content", ""))),
-                                reverse=True,
-                            )
-                            context_parts = []
-                            total_chars = 0
-                            max_total_chars = 20000
-                            for ms in matched:
-                                mc = ms.get("content", "")
-                                if not mc:
-                                    continue
-                                chunk = "### " + ms.get("title", "") + " [" + ms.get("section_type", "") + "]\n" + mc[:4000]
-                                context_parts.append(chunk)
-                                total_chars += len(chunk)
-                                if total_chars >= max_total_chars:
-                                    break
-                            if context_parts:
-                                document_context = "[年报相关章节]\n\n" + "\n\n".join(context_parts)
+                            # Priority 1: Use aspect_to_section_ids if aspect is known
+                            if own_aspect:
+                                section_ids = analysis_framework.get("aspect_to_section_ids", {}).get(own_aspect, [])
+                                context_parts = []
+                                for sid in section_ids:
+                                    if isinstance(sid, int) and 0 <= sid - 1 < len(ar_sections):
+                                        section = ar_sections[sid - 1]
+                                        content = section.get("content", "")
+                                        if content:
+                                            context_parts.append(content[:4000])
+                                if context_parts:
+                                    document_context = "\n\n".join(context_parts)
 
-                        # Priority 3: Global summary sorted by importance (highest-value sections)
-                        if not document_context and spec.agent_type in ("analysis", "data_collection", "research"):
-                            content_sections = [
-                                s for s in ar_sections if s.get("content", "").strip()
-                            ]
-                            content_sections.sort(
-                                key=lambda s: (
-                                    s.get("importance", 3),
-                                    len(s.get("content", "")),
-                                ),
-                                reverse=True,
-                            )
-                            context_parts = []
-                            total_chars = 0
-                            max_total_chars = 30000
-                            for ts in content_sections:
-                                tc = ts.get("content", "")
-                                if not tc:
-                                    continue
-                                chunk = "### " + ts.get("title", "") + "\n" + tc[:4000]
-                                context_parts.append(chunk)
-                                total_chars += len(chunk)
-                                if total_chars >= max_total_chars:
-                                    break
-                            if context_parts:
-                                document_context = "[年报全局摘要]\n\n" + "\n\n".join(context_parts)
+                            # Priority 2: Match by section_type from routing section_id
+                            if not document_context and own_section_types and ar_sections:
+                                matched = [
+                                    s for s in ar_sections
+                                    if s.get("section_type", "") in own_section_types
+                                    and s.get("content", "").strip()
+                                ]
+                                matched.sort(
+                                    key=lambda s: (s.get("importance", 3), -len(s.get("content", ""))),
+                                    reverse=True,
+                                )
+                                context_parts = []
+                                total_chars = 0
+                                max_total_chars = 20000
+                                for ms in matched:
+                                    mc = ms.get("content", "")
+                                    if not mc:
+                                        continue
+                                    chunk = "### " + ms.get("title", "") + " [" + ms.get("section_type", "") + "]\n" + mc[:4000]
+                                    context_parts.append(chunk)
+                                    total_chars += len(chunk)
+                                    if total_chars >= max_total_chars:
+                                        break
+                                if context_parts:
+                                    document_context = "[年报相关章节]\n\n" + "\n\n".join(context_parts)
+
+                            # Priority 3: Global summary sorted by importance (highest-value sections)
+                            if not document_context and spec.agent_type in ("analysis", "data_collection", "research"):
+                                content_sections = [
+                                    s for s in ar_sections if s.get("content", "").strip()
+                                ]
+                                content_sections.sort(
+                                    key=lambda s: (
+                                        s.get("importance", 3),
+                                        len(s.get("content", "")),
+                                    ),
+                                    reverse=True,
+                                )
+                                context_parts = []
+                                total_chars = 0
+                                max_total_chars = 30000
+                                for ts in content_sections:
+                                    tc = ts.get("content", "")
+                                    if not tc:
+                                        continue
+                                    chunk = "### " + ts.get("title", "") + "\n" + tc[:4000]
+                                    context_parts.append(chunk)
+                                    total_chars += len(chunk)
+                                    if total_chars >= max_total_chars:
+                                        break
+                                if context_parts:
+                                    document_context = "[年报全局摘要]\n\n" + "\n\n".join(context_parts)
 
                         if spec.agent_type in ("analysis", "data_collection", "research"):
                             financial_tables = annual_report_data.get("financial_tables", {})

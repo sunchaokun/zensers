@@ -81,6 +81,8 @@ tmp/
 *.tmp
 *.bak
 *.log
+tmp_*.txt
+s1_export.pdf
 
 # 报告草稿
 *.docx

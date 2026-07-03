@@ -73,4 +73,4 @@ async def _delete_file_async(file_id: str):
     finally:
         await client.close()
     removed = result.get("removed", 0)
-    console.print(f"[green]✓ Deleted {removed} file(s) (ID: {file_id})[/green]")
+    console.print(f"[green][OK] Deleted {removed} file(s) (ID: {file_id})[/green]")

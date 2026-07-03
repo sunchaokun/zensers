@@ -220,14 +220,21 @@ class SessionREPL:
 
         try:
             async with ZensersClient(base_url=self._api_base_url) as client:
-                result = await client.research_feedback(
-                    self.session_id, action="confirm"
+                result = await client.document_generate(
+                    self.session_id, output_format="docx"
                 )
         except ZensersError as e:
-            self.console.print(f"[red]Confirm failed: {e.message}[/red]")
+            self.console.print(f"[red]Confirm/generate failed: {e.message}[/red]")
             return
 
-        self.console.print(f"[green]Confirmed. {result.get('message', 'Processing...')}[/green]")
+        if result.get("success") or result.get("status") in ("completed", "generating"):
+            document_path = result.get("document_path") or result.get("output_path")
+            if document_path:
+                self.console.print(f"[green][OK] Document generated: {document_path}[/green]")
+            else:
+                self.console.print(f"[green][OK] Document generation started. {result.get('message', '')}[/green]")
+        else:
+            self.console.print(f"[red][FAIL] Document generation failed: {result.get('error', result.get('message', 'Unknown error'))}[/red]")
 
     async def _cmd_export(self, format_arg: str) -> None:
         """Export document."""
