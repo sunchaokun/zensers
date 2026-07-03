@@ -86,7 +86,9 @@ export function QualityPanel() {
   const [pendingIssues, setPendingIssues] = useState<QualityIssueData[]>([]);
 
   if (!qualityState) return null;
-  if (qualityState.phase === 'confirmed') return null;
+
+  const isConfirmed = qualityState.phase === 'confirmed';
+  if (isConfirmed) return null;
 
   const sessionId = activeId || '';
 
@@ -195,7 +197,7 @@ export function QualityPanel() {
         <div className="pt-2 border-t space-y-2">
           <Button
             onClick={() => handleConfirm()}
-            disabled={qualityState.phase === 'confirmed'}
+            disabled={isConfirmed}
             className="w-full h-9 text-sm"
           >
             确认交付
