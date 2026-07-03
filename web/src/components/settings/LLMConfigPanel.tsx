@@ -47,7 +47,7 @@ export function LLMConfigPanel() {
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [modifiedFields, setModifiedFields] = useState<Set<string>>(new Set());
-  const [debounceTimer, setDebounceTimer] = useState<NodeJS.Timeout | null>(null);
+  const debounceRef = useRef<NodeJS.Timeout | null>(null);
 
   const activeProfile = profiles[activeProfileName] || null;
   const profileNames = Object.keys(profiles);
@@ -79,8 +79,8 @@ export function LLMConfigPanel() {
   }, []);
 
   const scheduleSave = useCallback((fields: Record<string, any>) => {
-    if (debounceTimer) clearTimeout(debounceTimer);
-    const timer = setTimeout(async () => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(async () => {
       try {
         await updateProfile(activeProfileName, fields);
         setModifiedFields(new Set());
@@ -89,8 +89,7 @@ export function LLMConfigPanel() {
         showError(e.message || '保存失败');
       }
     }, 800);
-    setDebounceTimer(timer);
-  }, [activeProfileName, debounceTimer]);
+  }, [activeProfileName]);
 
   const handleFieldChange = (field: string, value: any) => {
     if (field === 'api_key') {
@@ -552,16 +551,7 @@ function RoutingEditor({
   const [newAction, setNewAction] = useState('');
 
   const handleSave = () => {
-    const c = { ...localConfig };
-    if (newAgent.trim()) {
-      c.fixed_agent_routing = { ...c.fixed_agent_routing, [newAgent.trim()]: profileNames[0] || '' };
-      setNewAgent('');
-    }
-    if (newAction.trim()) {
-      c.action_routing = { ...c.action_routing, [newAction.trim()]: profileNames[0] || '' };
-      setNewAction('');
-    }
-    onChange(c);
+    onChange(localConfig);
   };
 
   return (

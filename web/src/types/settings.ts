@@ -178,7 +178,7 @@ export function normalizeProfileResponse(raw: Record<string, any>): LLMProfile {
   const { apiKey, hasApiKey, ...rest } = raw;
   return {
     ...rest,
-    api_key: apiKey ?? '',
+    api_key: apiKey && apiKey !== '***' ? apiKey : '',
     hasApiKey: hasApiKey ?? false,
   } as LLMProfile;
 }
@@ -186,7 +186,7 @@ export function normalizeProfileResponse(raw: Record<string, any>): LLMProfile {
 export function profileToLLMConfig(p: LLMProfile): LLMConfig {
   return {
     provider: p.provider as LLMProvider,
-    apiKey: p.api_key,
+    apiKey: p.api_key && p.api_key !== '***' ? p.api_key : '',
     apiEndpoint: p.base_url,
     model: p.model,
     temperature: p.temperature,

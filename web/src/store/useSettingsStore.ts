@@ -209,9 +209,18 @@ export const useSettingsStore = create<SettingsState & SettingsMethods>()((set, 
       const defaultProfileName = data.default_profile || '';
       const currentActive = get().activeProfileName;
       const activeProfileName = (currentActive && profiles[currentActive]) ? currentActive : defaultProfileName;
+      const routingController = new AbortController();
+      const routingTimeoutId = setTimeout(() => routingController.abort(), 10000);
+      const routingRes = await fetch(`${API_BASE_URL}/api/v1/llm/routing`, { signal: routingController.signal });
+      clearTimeout(routingTimeoutId);
+      let routingData: any = {};
+      if (routingRes.ok) {
+        routingData = await routingRes.json();
+      }
+
       const routingConfig: RoutingConfig = {
-        fixed_agent_routing: data.fixed_agent_routing || {},
-        action_routing: data.action_routing || {},
+        fixed_agent_routing: routingData.fixed_agent_routing || {},
+        action_routing: routingData.action_routing || {},
         fallback_chain: data.fallback_chain || [],
       };
 
