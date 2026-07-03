@@ -70,6 +70,7 @@ class SectionSpec:
     estimated_complexity: str = "medium"    # "low" / "medium" / "high"
     can_parallel: bool = True               # Whether can parallelize with other sections
     priority: int = 0                       # Execution priority
+    config: Dict[str, Any] = field(default_factory=dict)  # Extensible section-level metadata
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize to dictionary"""
@@ -84,6 +85,7 @@ class SectionSpec:
             "estimated_complexity": self.estimated_complexity,
             "can_parallel": self.can_parallel,
             "priority": self.priority,
+            "config": self.config,
         }
 
 
@@ -261,25 +263,9 @@ class TaskStructureAnalyzer:
         self._use_llm = use_llm
         self._fallback_to_rule = fallback_to_rule
         self._llm_model = llm_model
-        self._llm_skill = None
 
         logger.info(f"TaskStructureAnalyzer initialized: use_llm={use_llm}, fallback={fallback_to_rule}")
 
-    def _get_llm_skill(self):
-        """Lazily get LLM Skill"""
-        if self._llm_skill is None:
-            try:
-                from src.skills.llm_skill import LLMSkill
-            except ImportError:
-                import sys
-                from pathlib import Path
-                project_root = Path(__file__).parent.parent.parent
-                if str(project_root) not in sys.path:
-                    sys.path.insert(0, str(project_root))
-                from src.skills.llm_skill import LLMSkill
-            self._llm_skill = LLMSkill()
-        return self._llm_skill
-    
     def analyze(
         self,
         intent: DeepIntentResult,
@@ -366,7 +352,6 @@ class TaskStructureAnalyzer:
         topic: str,
     ) -> TaskStructure:
         """Use LLM for dynamic structure analysis"""
-        llm_skill = self._get_llm_skill()
 
         # Load section analysis prompt from PromptManager
         pm = PromptManager.get_instance()
@@ -386,12 +371,16 @@ class TaskStructureAnalyzer:
         )
 
         # Call LLM
-        result = await llm_skill.execute(
+        from src.core.llm_client import call_llm
+        from src.config.llm_profiles import RoutingHint
+
+        result = await call_llm(
             prompt=prompt,
             system_prompt=system_prompt,
-            model=self._llm_model,
+            model=self._llm_model or None,
             max_tokens=2048,
             temperature=0.1,
+            routing_hint=RoutingHint(action="task_structure"),
         )
         
         if not result.get("success"):

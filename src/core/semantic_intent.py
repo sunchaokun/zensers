@@ -60,6 +60,9 @@ class DeepIntentResult:
     orchestration_strategy: str = "sequential"
     core_question: str = ""
     section_data_specs: list = field(default_factory=list)
+    forensic_mode: bool = False
+    data_preloaded: bool = False
+    causal_hypotheses: List[str] = field(default_factory=list)
 
     def to_intent_analysis_result(self) -> IntentAnalysisResult:
         """Convert to compatible IntentAnalysisResult."""
@@ -120,7 +123,10 @@ class DeepIntentResult:
                     for s in self.sub_intents
                 ],
                 "orchestration_strategy": self.orchestration_strategy,
-                "section_data_specs": self.section_data_specs}
+                "section_data_specs": self.section_data_specs,
+                "forensic_mode": self.forensic_mode,
+                "data_preloaded": self.data_preloaded,
+                "causal_hypotheses": self.causal_hypotheses}
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "DeepIntentResult":
@@ -178,6 +184,9 @@ class DeepIntentResult:
             sub_intents=sub_intents,
             orchestration_strategy=data.get("orchestration_strategy", "sequential"),
             section_data_specs=data.get("section_data_specs", []),
+            forensic_mode=data.get("forensic_mode", False),
+            data_preloaded=data.get("data_preloaded", False),
+            causal_hypotheses=data.get("causal_hypotheses", []),
             analysis_timestamp=datetime.fromisoformat(data["analysis_timestamp"]) if data.get("analysis_timestamp") else datetime.now(),
         )
 
@@ -199,13 +208,14 @@ class SemanticIntentAnalyzer:
         logger.info(f"SemanticIntentAnalyzer initialized: use_llm={use_llm}, fallback={fallback_to_keyword}")
 
     def _get_llm_skill(self):
+        import warnings
+        warnings.warn(
+            "_get_llm_skill() is deprecated; use call_llm(routing_hint=...) instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         if self._llm_skill is None:
-            try:
-                from src.skills.llm_skill import LLMSkill
-            except ImportError:
-                import sys; from pathlib import Path
-                sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-                from src.skills.llm_skill import LLMSkill
+            from src.skills.llm_skill import LLMSkill
             self._llm_skill = LLMSkill()
         return self._llm_skill
 
@@ -270,12 +280,19 @@ class SemanticIntentAnalyzer:
         return template.format(user_request=safe, requirement_json=json.dumps(requirement, ensure_ascii=False, indent=2))
 
     async def _analyze_with_llm(self, user_request, requirement, conversation_history=None):
-        llm_skill = self._get_llm_skill()
+        from src.core.llm_client import call_llm
+        from src.config.llm_profiles import RoutingHint
+
         system_prompt, user_template = self._load_intent_prompts()
         prompt = self._format_intent_prompt(user_template, user_request, requirement)
-        result = await llm_skill.execute(prompt=prompt, system_prompt=system_prompt,
-                                          model=self._llm_model, max_tokens=self._max_tokens,
-                                          temperature=self._temperature)
+        result = await call_llm(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            model=self._llm_model or None,
+            max_tokens=self._max_tokens or None,
+            temperature=self._temperature or None,
+            routing_hint=RoutingHint(action="intent_analysis"),
+        )
         if not result.get("success"):
             raise ValueError(f"LLM call failed: {result.get('error', 'Unknown')}")
         return self._build_result(llm_output=self._parse_llm_json(result["content"]),
@@ -303,12 +320,19 @@ class SemanticIntentAnalyzer:
                                    raw_response=json.dumps(valid, ensure_ascii=False), used_fallback=False)
 
     async def _call_llm_with_temp(self, user_request, requirement, temperature):
-        llm_skill = self._get_llm_skill()
+        from src.core.llm_client import call_llm
+        from src.config.llm_profiles import RoutingHint
+
         system_prompt, user_template = self._load_intent_prompts()
         prompt = self._format_intent_prompt(user_template, user_request, requirement)
-        result = await llm_skill.execute(prompt=prompt, system_prompt=system_prompt,
-                                          model=self._llm_model, max_tokens=self._max_tokens,
-                                          temperature=temperature)
+        result = await call_llm(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            model=self._llm_model or None,
+            max_tokens=self._max_tokens or None,
+            temperature=temperature,
+            routing_hint=RoutingHint(action="intent_analysis"),
+        )
         if not result.get("success"):
             return None
         return self._parse_llm_json(result.get("content", ""))
@@ -399,13 +423,14 @@ class SemanticIntentAnalyzer:
                 "sub_sections": sub_sections,
             })
 
+        data_preloaded = llm_output.get("data_preloaded", False)
         return DeepIntentResult(
             primary_intent=primary_intent, intent_confidence=llm_output.get("confidence", 0.7),
             intent_reasoning=llm_output.get("reasoning", ""),
             research_types=research_types, primary_research_type=primary_research_type,
             secondary_research_types=secondary_research_types,
             requires_primary_data=requires_primary,
-            requires_secondary_data=llm_output.get("requires_secondary_data", True),
+            requires_secondary_data=not data_preloaded and llm_output.get("requires_secondary_data", True),
             complexity=complexity, aspect_count=llm_output.get("aspect_count", 0),
             estimated_effort=llm_output.get("estimated_effort", "standard"),
             execution_preference=llm_output.get("execution_preference", "sequential"),
@@ -429,7 +454,10 @@ class SemanticIntentAnalyzer:
                 if isinstance(s, dict)
             ],
             orchestration_strategy=llm_output.get("orchestration_strategy", "sequential"),
-            section_data_specs=section_data_specs)
+            section_data_specs=section_data_specs,
+            forensic_mode=llm_output.get("forensic_mode", False),
+            data_preloaded=data_preloaded,
+            causal_hypotheses=llm_output.get("causal_hypotheses", []))
 
     def _infer_skills_from_intent(self, intent: IntentType, hidden_requirements: List[str]) -> List[str]:
         skills = []
