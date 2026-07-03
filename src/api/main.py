@@ -881,6 +881,7 @@ async def list_llm_profiles():
     profiles = {}
     for name, p in settings.llm_profiles.profiles.items():
         d = asdict(p)
+        d.pop("api_key", None)
         d["hasApiKey"] = bool(p.api_key)
         d["apiKey"] = "***" if p.api_key else ""
         profiles[name] = d
@@ -900,6 +901,7 @@ async def get_llm_profile(profile_name: str):
     if not p:
         raise HTTPException(status_code=404, detail=f"Profile '{profile_name}' not found")
     d = asdict(p)
+    d.pop("api_key", None)
     d["hasApiKey"] = bool(p.api_key)
     d["apiKey"] = "***" if p.api_key else ""
     return d
