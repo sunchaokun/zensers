@@ -62,7 +62,7 @@ interface LLMProfileRegistry {
 }
 ```
 
-The existing `LLMConfig` type is replaced. `AppSettings` holds:
+The existing `LLMConfig` type is kept as a compat alias. `BackendLLMConfig` is kept but deprecated (still used by the old `GET /api/v1/llm/config` response format, which we no longer call but may need for fallback). `AppSettings` extends to:
 - `profiles: Record<string, LLMProfile>` — all profiles
 - `activeProfileName: string` — currently selected profile in the UI
 - `defaultProfileName: string` — which profile is default
@@ -88,12 +88,16 @@ New actions:
 - `updateRouting(config)` → `PUT /api/v1/llm/routing`
 
 Removed:
-- `persistLLMConfig()` — replaced by `updateProfile()`
-- `syncConfigToBackend()` — replaced by `loadProfiles()`
-- `llm` / `savedLlm` state — replaced by `profiles[activeProfileName]`
+- `persistLLMConfig()` — replaced by `updateProfile()` (auto-persists on every change)
+- `syncConfigToBackend()` — replaced by `loadProfiles()` on mount
+- `applyBackendConfig()` — replaced by `loadProfiles()` on mount
+- `savedLlm` state — dirty tracking moves to per-profile comparison
 
 Compatibility:
 - `llm` getter remains as a computed property that returns `profiles[activeProfileName]` mapped to the old `LLMConfig` shape. This ensures other components that read `settings.llm.model` etc. continue to work without changes.
+- `updateLLMConfig()` becomes a compat wrapper that calls `updateProfile(activeProfileName, ...)`
+- `switchProvider()` becomes a compat wrapper that updates the active profile's provider + defaults
+- `savedLlm` is removed — dirty tracking moves to per-profile comparison
 
 ### API Client Changes (`api.ts`)
 
@@ -156,20 +160,27 @@ Removed:
 
 ### Research/Chat Integration
 
-When starting research or sending chat messages, the frontend currently sends a flat `llmConfig` object. After migration:
-- The default profile's config is sent as the `llmConfig` (backward compat with backend's `session['llm_config']`)
-- Additionally, the `defaultProfileName` is sent so the backend can use its routing system
-- This is a minimal change: just change where the config values come from (from `settings.llm` to `settings.activeProfile`)
+When starting research or sending chat messages, the frontend currently sends a flat `llmConfig` object (in `useResearch.ts` lines 52-62 and 148-158). After migration:
+- The `llm` compat getter ensures `useResearch.ts` continues to work without changes — it reads `llm.model`, `llm.apiKey` etc., which are derived from `profiles[activeProfileName]`
+- Optionally, future work can send `profileName` alongside `llmConfig` so the backend can use its routing system instead of the flat config override
 
 ## Files to Modify
 
 | File | Change |
 |------|--------|
-| `web/src/types/settings.ts` | Add `LLMProfile`, `LLMProfileRegistry`, `RoutingConfig` types; remove `BackendLLMConfig` |
-| `web/src/store/useSettingsStore.ts` | Replace `llm`/`savedLlm` with `profiles`/`activeProfileName`; add profile CRUD actions; remove legacy API calls |
-| `web/src/lib/api.ts` | Add 8 profile/routing API methods; remove `/llm/config` calls |
+| `web/src/types/settings.ts` | Add `LLMProfile`, `LLMProfileRegistry`, `RoutingConfig` types; keep `LLMConfig` as compat alias |
+| `web/src/store/useSettingsStore.ts` | Add `profiles`/`activeProfileName`/`defaultProfileName`/`routingConfig` state; add profile CRUD actions; keep `llm` as computed getter for compat; keep `updateLLMConfig`/`switchProvider` as compat wrappers |
+| `web/src/lib/api.ts` | Add 8 profile/routing API methods; keep `POST /llm/config` removal only from store, not from api.ts (it may be used elsewhere) |
 | `web/src/components/settings/LLMConfigPanel.tsx` | Complete rewrite: left sidebar + right form + routing section |
-| `web/src/components/chat/ChatInput.tsx` | Read active profile instead of `settings.llm` for model display |
+| `web/src/hooks/useResearch.ts` | Change `llmConfig` construction to read from `activeProfile` instead of `llm` |
+| `web/src/components/chat/ChatInput.tsx` | Read active profile model instead of `llm.model` for display |
+
+### Compat Strategy
+
+The `llm` getter in the store returns `profiles[activeProfileName]` mapped to the old `LLMConfig` shape (camelCase). This ensures:
+- `useResearch.ts` can keep reading `llm.model`, `llm.apiKey` etc. — no change needed if we keep the getter
+- `ChatInput.tsx` can keep reading `llm.model` — no change needed if we keep the getter
+- Only `LLMConfigPanel.tsx` needs a full rewrite; other components are unaffected
 
 ## Not In Scope
 
@@ -178,3 +189,11 @@ When starting research or sending chat messages, the frontend currently sends a 
 - Profile usage statistics
 - Per-session profile override in chat
 - Visual companion/mockup tooling
+
+### localStorage Persistence
+
+The store currently persists `llm` to `localStorage` under `Zensers-settings-v2`. After migration:
+- `profiles`, `activeProfileName`, `defaultProfileName`, `routingConfig` are persisted to localStorage
+- On load: localStorage profiles are used as cache, then `loadProfiles()` fetches from backend and overwrites if backend has data
+- Migration path: if localStorage has old `llm` but no `profiles`, convert the old `llm` into a single "migrated" profile
+- The `llm` compat getter reads from `profiles[activeProfileName]`, so localStorage format changes but downstream consumers are unaffected
