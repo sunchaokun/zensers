@@ -1,7 +1,7 @@
 'use client';
 
 import { useSettingsStore } from '@/store/useSettingsStore';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Button } from '@/components/ui/button';
@@ -12,373 +12,656 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { PRESET_MODELS, PROVIDER_INFO, LLMProvider, BackendLLMConfig } from '@/types/settings';
-import { Eye, EyeOff, RefreshCw, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
-import { useState, useEffect, useRef, useMemo } from 'react';
+import { PRESET_MODELS, PROVIDER_INFO, LLMProvider, LLMProfile, DEFAULT_LLM_PROFILE, RoutingConfig } from '@/types/settings';
+import { Eye, EyeOff, Loader2, Star, Plus, Trash2, ChevronDown, ChevronRight, MoreVertical, AlertCircle, CheckCircle2 } from 'lucide-react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-const STORAGE_KEY = 'Zensers-settings-v2';
 
 export function LLMConfigPanel() {
-  const { llm, savedLlm, isSaving, saveError, updateLLMConfig, switchProvider, persistLLMConfig, applyBackendConfig, syncConfigToBackend } = useSettingsStore();
+  const {
+    profiles,
+    activeProfileName,
+    defaultProfileName,
+    routingConfig,
+    isLoadingProfiles,
+    isSaving,
+    saveError,
+    loadProfiles,
+    createProfile,
+    updateProfile,
+    deleteProfile,
+    setDefaultProfile,
+    switchProfile,
+    updateRouting,
+  } = useSettingsStore();
+
   const [mounted, setMounted] = useState(false);
   const [showApiKey, setShowApiKey] = useState(false);
-  const [backendConfig, setBackendConfig] = useState<BackendLLMConfig | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [apiKeyValue, setApiKeyValue] = useState('');
+  const [apiKeyModified, setApiKeyModified] = useState(false);
+  const [newProfileName, setNewProfileName] = useState('');
+  const [showNewProfileInput, setShowNewProfileInput] = useState(false);
+  const [routingExpanded, setRoutingExpanded] = useState(false);
+  const [menuOpen, setMenuOpen] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [resetting, setResetting] = useState(false);
+  const [successMsg, setSuccessMsg] = useState<string | null>(null);
+  const [modifiedFields, setModifiedFields] = useState<Set<string>>(new Set());
+  const [debounceTimer, setDebounceTimer] = useState<NodeJS.Timeout | null>(null);
 
-  const hasUnsavedChanges = useMemo(
-    () => JSON.stringify(llm) !== JSON.stringify(savedLlm),
-    [llm, savedLlm]
-  );
-
-  const hasUnsavedChangesRef = useRef(hasUnsavedChanges);
-  hasUnsavedChangesRef.current = hasUnsavedChanges;
+  const activeProfile = profiles[activeProfileName] || null;
+  const profileNames = Object.keys(profiles);
 
   useEffect(() => { setMounted(true); }, []);
 
   useEffect(() => {
-    return () => {
-      if (hasUnsavedChangesRef.current) {
-        console.warn('[LLMConfigPanel] Unsaved LLM config changes discarded on unmount');
-      }
-    };
-  }, []);
+    if (mounted) {
+      loadProfiles();
+    }
+  }, [mounted]);
 
   useEffect(() => {
-    let cancelled = false;
-
-    async function loadBackendConfig() {
-      try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 8000);
-        const response = await fetch(`${API_BASE_URL}/api/v1/llm/config`, { signal: controller.signal });
-        clearTimeout(timeoutId);
-        if (!response.ok) throw new Error('Failed to fetch backend config');
-        const config: BackendLLMConfig = await response.json();
-        if (cancelled) return;
-        setBackendConfig(config);
-        setError(null);
-
-        try {
-          if (typeof localStorage !== 'undefined') {
-            const raw = localStorage.getItem(STORAGE_KEY);
-            if (!raw) {
-              applyBackendConfig(config);
-            } else {
-              syncConfigToBackend();
-            }
-          }
-        } catch {}
-      } catch (err) {
-        if (cancelled) return;
-        console.error('Failed to load backend config:', err);
-        setError('Unable to load backend config, please check if backend service is running');
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
+    if (activeProfile) {
+      setApiKeyValue('');
+      setApiKeyModified(false);
+      setModifiedFields(new Set());
     }
+  }, [activeProfileName]);
 
-    loadBackendConfig();
-    return () => { cancelled = true; };
+  const showSuccess = useCallback((msg: string) => {
+    setSuccessMsg(msg);
+    setTimeout(() => setSuccessMsg(null), 3000);
   }, []);
 
-  if (!mounted) {
-    return <div className="space-y-6"><div className="min-h-[52px]" /></div>;
-  }
+  const showError = useCallback((msg: string) => {
+    setError(msg);
+    setTimeout(() => setError(null), 5000);
+  }, []);
 
-  const handleResetToBackendDefault = async () => {
-    setResetting(true);
+  const scheduleSave = useCallback((fields: Record<string, any>) => {
+    if (debounceTimer) clearTimeout(debounceTimer);
+    const timer = setTimeout(async () => {
+      try {
+        await updateProfile(activeProfileName, fields);
+        setModifiedFields(new Set());
+        showSuccess('已自动保存');
+      } catch (e: any) {
+        showError(e.message || '保存失败');
+      }
+    }, 800);
+    setDebounceTimer(timer);
+  }, [activeProfileName, debounceTimer]);
+
+  const handleFieldChange = (field: string, value: any) => {
+    if (field === 'api_key') {
+      setApiKeyValue(value);
+      setApiKeyModified(true);
+      setModifiedFields((prev) => new Set(prev).add('api_key'));
+      return;
+    }
+    setModifiedFields((prev) => new Set(prev).add(field));
+    scheduleSave({ [field]: value });
+  };
+
+  const handleSaveApiKey = async () => {
+    if (!apiKeyModified) return;
+    const fields: Record<string, any> = {};
+    if (apiKeyValue === '') {
+      fields.api_key = '';
+    } else if (apiKeyValue !== '***') {
+      fields.api_key = apiKeyValue;
+    }
     try {
-      const response = await fetch(`${API_BASE_URL}/api/v1/llm/config/reset`, {
-        method: 'POST',
-      });
-      if (!response.ok) throw new Error('Failed to reset backend config');
-      const config: BackendLLMConfig = await response.json();
-      setBackendConfig(config);
-      applyBackendConfig(config);
-      persistLLMConfig();
-      setError(null);
-    } catch {
-      setError('Unable to reset backend config');
-    } finally {
-      setResetting(false);
+      await updateProfile(activeProfileName, fields);
+      setApiKeyModified(false);
+      setApiKeyValue('');
+      setModifiedFields((prev) => { const n = new Set(prev); n.delete('api_key'); return n; });
+      showSuccess('API Key 已保存');
+    } catch (e: any) {
+      showError(e.message || '保存失败');
     }
   };
 
-  const handleSave = async () => {
-    await persistLLMConfig();
+  const handleCreateProfile = async () => {
+    const name = newProfileName.trim();
+    if (!name) return;
+    if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
+      showError('Profile 名称只能包含字母、数字、下划线和连字符');
+      return;
+    }
+    if (profiles[name]) {
+      showError('Profile 名称已存在');
+      return;
+    }
+    try {
+      await createProfile({ name, model: 'gpt-4o', provider: 'openai' });
+      switchProfile(name);
+      setNewProfileName('');
+      setShowNewProfileInput(false);
+      showSuccess('Profile 已创建');
+    } catch (e: any) {
+      showError(e.message || '创建失败');
+    }
   };
 
-  const providers = Object.entries(PROVIDER_INFO).map(([id, info]) => ({
-    id,
-    ...info,
-  }));
+  const handleDeleteProfile = async (name: string) => {
+    if (name === defaultProfileName) {
+      showError('无法删除默认 Profile');
+      return;
+    }
+    if (!confirm(`确认删除 Profile "${name}"？`)) return;
+    try {
+      await deleteProfile(name);
+      showSuccess('已删除');
+    } catch (e: any) {
+      showError(e.message || '删除失败');
+    }
+    setMenuOpen(null);
+  };
 
-  const filteredModels = PRESET_MODELS.filter(
-    (m) => m.provider === llm.provider || llm.provider === 'custom'
-  );
+  const handleSetDefault = async (name: string) => {
+    try {
+      await setDefaultProfile(name);
+      showSuccess('已设为默认');
+    } catch (e: any) {
+      showError(e.message || '设置失败');
+    }
+    setMenuOpen(null);
+  };
+
+  const handleRoutingChange = async (newConfig: RoutingConfig) => {
+    const existingNames = Object.keys(profiles);
+    for (const [, profileName] of Object.entries(newConfig.fixed_agent_routing)) {
+      if (!existingNames.includes(profileName)) {
+        showError(`Profile "${profileName}" 不存在`);
+        return;
+      }
+    }
+    for (const [, profileName] of Object.entries(newConfig.action_routing)) {
+      if (!existingNames.includes(profileName)) {
+        showError(`Profile "${profileName}" 不存在`);
+        return;
+      }
+    }
+    try {
+      await updateRouting(newConfig);
+      showSuccess('路由规则已保存');
+    } catch (e: any) {
+      showError(e.message || '保存失败');
+    }
+  };
+
+  if (!mounted) return null;
+
+  if (isLoadingProfiles && profileNames.length === 0) {
+    return (
+      <Card>
+        <CardContent className="flex items-center justify-center py-12">
+          <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+          <span className="ml-2 text-muted-foreground">加载配置中...</span>
+        </CardContent>
+      </Card>
+    );
+  }
 
   return (
-    <div className="space-y-6">
-      <div className="min-h-[52px]">
-        {loading && (
-          <div className="flex items-center gap-2 text-sm text-muted-foreground p-4 bg-muted/50 rounded-lg">
-            <RefreshCw className="h-4 w-4 animate-spin" />
-            <span>Loading backend config...</span>
-          </div>
-        )}
-
-        {error && !loading && (
-          <div className="flex items-center gap-2 text-sm text-amber-600 dark:text-amber-400 p-4 bg-amber-50 dark:bg-amber-950/20 rounded-lg">
-            <AlertCircle className="h-4 w-4" />
-            <span>{error} · Using local config</span>
-          </div>
-        )}
-
-        {!loading && !error && backendConfig && (
-          <div className="flex items-center justify-between p-4 bg-muted/30 rounded-lg">
-            <div className="flex items-center gap-2 text-sm text-muted-foreground">
-              <CheckCircle2 className="h-4 w-4" />
-              <span>
-                Backend env: <span className="font-medium">{backendConfig.model}</span> ({PROVIDER_INFO[backendConfig.provider as LLMProvider]?.name || backendConfig.provider})
-              </span>
+    <Card>
+      <CardHeader>
+        <CardTitle>LLM 配置</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="flex gap-6 min-h-[500px]">
+          {/* Left sidebar */}
+          <div className="w-48 flex-shrink-0 border-r pr-4">
+            <div className="space-y-1">
+              {profileNames.map((name) => {
+                const p = profiles[name];
+                const isDefault = name === defaultProfileName;
+                const isActive = name === activeProfileName;
+                return (
+                  <div
+                    key={name}
+                    className={`flex items-center justify-between group px-2 py-1.5 rounded cursor-pointer text-sm ${
+                      isActive ? 'bg-primary/10 text-primary font-medium' : 'hover:bg-muted'
+                    }`}
+                    onClick={() => switchProfile(name)}
+                  >
+                    <div className="flex items-center gap-1.5 truncate">
+                      {isDefault && <Star className="h-3.5 w-3.5 text-yellow-500 flex-shrink-0" />}
+                      <span className="truncate">{p.display_name || name}</span>
+                    </div>
+                    <div className="relative">
+                      <button
+                        className="opacity-0 group-hover:opacity-100 p-0.5 hover:bg-muted rounded"
+                        onClick={(e) => { e.stopPropagation(); setMenuOpen(menuOpen === name ? null : name); }}
+                      >
+                        <MoreVertical className="h-3.5 w-3.5" />
+                      </button>
+                      {menuOpen === name && (
+                        <div className="absolute right-0 top-6 z-10 bg-background border rounded shadow-md py-1 min-w-[120px]">
+                          {!isDefault && (
+                            <button
+                              className="w-full text-left px-3 py-1.5 text-xs hover:bg-muted"
+                              onClick={(e) => { e.stopPropagation(); handleSetDefault(name); }}
+                            >
+                              设为默认
+                            </button>
+                          )}
+                          {!isDefault && (
+                            <button
+                              className="w-full text-left px-3 py-1.5 text-xs text-destructive hover:bg-muted"
+                              onClick={(e) => { e.stopPropagation(); handleDeleteProfile(name); }}
+                            >
+                              删除
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={handleResetToBackendDefault}
-              disabled={resetting}
-            >
-              {resetting ? <RefreshCw className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
-              Reset to Default
-            </Button>
-          </div>
-        )}
-
-        {!loading && !error && !backendConfig && (
-          <div className="flex items-center gap-2 text-sm text-muted-foreground p-4 bg-muted/30 rounded-lg">
-            <CheckCircle2 className="h-4 w-4" />
-            <span>Using local config</span>
-          </div>
-        )}
-      </div>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>LLM Configuration</CardTitle>
-          <CardDescription>Configure your LLM API</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-6">
-          <div className="space-y-2">
-            <Label htmlFor="provider">Provider</Label>
-            <Select
-              value={llm.provider}
-              onValueChange={(v) => switchProvider(v as LLMProvider)}
-            >
-              <SelectTrigger id="provider">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {providers.map((p) => (
-                  <SelectItem key={p.id} value={p.id}>
-                    {p.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-
-          <div className="space-y-2">
-            <Label htmlFor="endpoint">API Endpoint</Label>
-            <Input
-              id="endpoint"
-              value={llm.apiEndpoint}
-              onChange={(e) => updateLLMConfig({ apiEndpoint: e.target.value })}
-              placeholder="https://api.example.com/v1"
-            />
-            {llm.provider === 'local' && (
-              <p className="text-xs text-muted-foreground">
-                Default ports: Ollama (11434), LocalAI (8080)
-              </p>
-            )}
-          </div>
-
-          <div className="space-y-2">
-            <Label htmlFor="apiKey">API Key</Label>
-            <div className="relative">
-              <Input
-                id="apiKey"
-                type={showApiKey ? 'text' : 'password'}
-                value={llm.apiKey}
-                onChange={(e) => updateLLMConfig({ apiKey: e.target.value })}
-                placeholder="sk-..."
-                className="pr-10"
-              />
-              <button
-                type="button"
-                onClick={() => setShowApiKey(!showApiKey)}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-              >
-                {showApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-              </button>
+            <div className="mt-4 pt-4 border-t">
+              {showNewProfileInput ? (
+                <div className="space-y-2">
+                  <Input
+                    placeholder="profile-name"
+                    value={newProfileName}
+                    onChange={(e) => setNewProfileName(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') handleCreateProfile(); if (e.key === 'Escape') setShowNewProfileInput(false); }}
+                    autoFocus
+                    className="h-8 text-xs"
+                  />
+                  <div className="flex gap-1">
+                    <Button size="sm" variant="ghost" className="h-7 text-xs flex-1" onClick={handleCreateProfile}>创建</Button>
+                    <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => { setShowNewProfileInput(false); setNewProfileName(''); }}>取消</Button>
+                  </div>
+                </div>
+              ) : (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="w-full text-xs"
+                  onClick={() => setShowNewProfileInput(true)}
+                >
+                  <Plus className="h-3.5 w-3.5 mr-1" /> 新建 Profile
+                </Button>
+              )}
             </div>
-            <p className="text-xs text-muted-foreground">
-              API Key is stored locally in the browser only, not uploaded to server
-            </p>
           </div>
 
-          <div className="space-y-2">
-            <Label htmlFor="model">Model</Label>
-            {llm.provider === 'custom' ? (
-              <Input
-                id="model"
-                value={llm.model}
-                onChange={(e) => updateLLMConfig({ model: e.target.value })}
-                placeholder="Enter model name"
-              />
+          {/* Right panel */}
+          <div className="flex-1 min-w-0">
+            {activeProfile ? (
+              <div className="space-y-4">
+                {/* Profile header */}
+                <div className="flex items-center gap-2">
+                  <h3 className="text-lg font-medium">{activeProfile.display_name || activeProfile.name}</h3>
+                  {activeProfile.is_default && (
+                    <span className="text-xs bg-yellow-100 text-yellow-700 px-2 py-0.5 rounded">默认</span>
+                  )}
+                </div>
+
+                {/* Provider */}
+                <div className="space-y-1.5">
+                  <Label>Provider</Label>
+                  <Select
+                    value={activeProfile.provider}
+                    onValueChange={(v) => handleFieldChange('provider', v)}
+                  >
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {(Object.keys(PROVIDER_INFO) as LLMProvider[]).map((p) => (
+                        <SelectItem key={p} value={p}>{PROVIDER_INFO[p].name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                {/* API Endpoint */}
+                <div className="space-y-1.5">
+                  <Label>API Endpoint</Label>
+                  <Input
+                    value={activeProfile.base_url}
+                    onChange={(e) => handleFieldChange('base_url', e.target.value)}
+                    placeholder="https://api.openai.com/v1"
+                  />
+                </div>
+
+                {/* API Key */}
+                <div className="space-y-1.5">
+                  <Label>API Key</Label>
+                  <div className="flex gap-2">
+                    <div className="relative flex-1">
+                      <Input
+                        type={showApiKey ? 'text' : 'password'}
+                        value={apiKeyModified ? apiKeyValue : ''}
+                        onChange={(e) => handleFieldChange('api_key', e.target.value)}
+                        placeholder={activeProfile.hasApiKey ? '•••••••• (已设置)' : 'sk-...'}
+                      />
+                      <button
+                        className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                        onClick={() => setShowApiKey(!showApiKey)}
+                        type="button"
+                      >
+                        {showApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                      </button>
+                    </div>
+                    {apiKeyModified && (
+                      <Button size="sm" onClick={handleSaveApiKey} disabled={isSaving}>
+                        {isSaving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : '保存 Key'}
+                      </Button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Model */}
+                <div className="space-y-1.5">
+                  <Label>Model</Label>
+                  {activeProfile.provider === 'custom' ? (
+                    <Input
+                      value={activeProfile.model}
+                      onChange={(e) => handleFieldChange('model', e.target.value)}
+                      placeholder="model-name"
+                    />
+                  ) : (
+                    <Select
+                      value={activeProfile.model}
+                      onValueChange={(v) => handleFieldChange('model', v)}
+                    >
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        {PRESET_MODELS
+                          .filter((m) => m.provider === activeProfile.provider)
+                          .map((m) => (
+                            <SelectItem key={m.id} value={m.id}>{m.name}</SelectItem>
+                          ))}
+                        <SelectItem value={activeProfile.model}>{activeProfile.model} (当前)</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  )}
+                </div>
+
+                {/* Temperature */}
+                <div className="space-y-1.5">
+                  <Label>Temperature ({activeProfile.temperature})</Label>
+                  <Input
+                    type="range"
+                    min="0"
+                    max="2"
+                    step="0.1"
+                    value={activeProfile.temperature}
+                    onChange={(e) => handleFieldChange('temperature', parseFloat(e.target.value))}
+                    className="cursor-pointer"
+                  />
+                </div>
+
+                {/* Max Tokens */}
+                <div className="space-y-1.5">
+                  <Label>Max Tokens</Label>
+                  <Input
+                    type="number"
+                    min="100"
+                    max="128000"
+                    value={activeProfile.max_tokens}
+                    onChange={(e) => handleFieldChange('max_tokens', parseInt(e.target.value) || 4096)}
+                  />
+                </div>
+
+                {/* Top P */}
+                <div className="space-y-1.5">
+                  <Label>Top P ({activeProfile.top_p})</Label>
+                  <Input
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.05"
+                    value={activeProfile.top_p}
+                    onChange={(e) => handleFieldChange('top_p', parseFloat(e.target.value))}
+                    className="cursor-pointer"
+                  />
+                </div>
+
+                {/* Frequency Penalty */}
+                <div className="space-y-1.5">
+                  <Label>Frequency Penalty ({activeProfile.frequency_penalty})</Label>
+                  <Input
+                    type="range"
+                    min="0"
+                    max="2"
+                    step="0.1"
+                    value={activeProfile.frequency_penalty}
+                    onChange={(e) => handleFieldChange('frequency_penalty', parseFloat(e.target.value))}
+                    className="cursor-pointer"
+                  />
+                </div>
+
+                {/* Presence Penalty */}
+                <div className="space-y-1.5">
+                  <Label>Presence Penalty ({activeProfile.presence_penalty})</Label>
+                  <Input
+                    type="range"
+                    min="0"
+                    max="2"
+                    step="0.1"
+                    value={activeProfile.presence_penalty}
+                    onChange={(e) => handleFieldChange('presence_penalty', parseFloat(e.target.value))}
+                    className="cursor-pointer"
+                  />
+                </div>
+
+                {/* Save status */}
+                <div className="flex items-center gap-2 h-5">
+                  {isSaving && (
+                    <span className="text-xs text-muted-foreground flex items-center gap-1">
+                      <Loader2 className="h-3 w-3 animate-spin" /> 保存中...
+                    </span>
+                  )}
+                  {saveError && (
+                    <span className="text-xs text-destructive flex items-center gap-1">
+                      <AlertCircle className="h-3 w-3" /> {saveError}
+                    </span>
+                  )}
+                  {successMsg && (
+                    <span className="text-xs text-green-600 flex items-center gap-1">
+                      <CheckCircle2 className="h-3 w-3" /> {successMsg}
+                    </span>
+                  )}
+                </div>
+
+                {/* Routing section */}
+                <div className="mt-6 border-t pt-4">
+                  <button
+                    className="flex items-center gap-1 text-sm font-medium text-muted-foreground hover:text-foreground"
+                    onClick={() => setRoutingExpanded(!routingExpanded)}
+                  >
+                    {routingExpanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                    路由规则
+                  </button>
+
+                  {routingExpanded && (
+                    <RoutingEditor
+                      config={routingConfig}
+                      profileNames={profileNames}
+                      onChange={handleRoutingChange}
+                    />
+                  )}
+                </div>
+              </div>
             ) : (
-              <Select
-                value={llm.model}
-                onValueChange={(v) => updateLLMConfig({ model: v })}
-              >
-                <SelectTrigger id="model">
-                  <SelectValue placeholder="Select model" />
-                </SelectTrigger>
-                <SelectContent>
-                  {filteredModels.map((m) => (
-                    <SelectItem key={m.id} value={m.id}>
-                      {m.name} ({Math.floor(m.maxTokens / 1000)}k)
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            )}
-          </div>
-
-          <div className="flex items-center justify-between pt-4 border-t">
-            <div>
-              <Button
-                onClick={handleSave}
-                disabled={!hasUnsavedChanges || isSaving}
-                variant={hasUnsavedChanges ? 'default' : 'outline'}
-              >
-                {isSaving ? (
-                  <>
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    Saving...
-                  </>
-                ) : hasUnsavedChanges ? (
-                  'Save'
-                ) : (
-                  <>
-                    <CheckCircle2 className="mr-2 h-4 w-4" />
-                    Saved
-                  </>
-                )}
-              </Button>
-            </div>
-            {saveError && (
-              <div className="flex items-center gap-2 text-sm text-red-600 dark:text-red-400">
-                <AlertCircle className="h-4 w-4" />
-                <span>{saveError}</span>
+              <div className="flex items-center justify-center h-full text-muted-foreground">
+                {profileNames.length === 0
+                  ? '暂无 Profile，请点击左侧「新建 Profile」创建'
+                  : '请选择一个 Profile'}
               </div>
             )}
           </div>
-        </CardContent>
-      </Card>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
 
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="text-base">Model Parameters</CardTitle>
-          <CardDescription>Adjust generation parameters</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-6">
-          <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <Label htmlFor="temperature">Temperature</Label>
-              <span className="text-sm font-medium tabular-nums">{llm.temperature}</span>
-            </div>
-            <input
-              id="temperature"
-              type="range"
-              min="0"
-              max="2"
-              step="0.1"
-              value={llm.temperature}
-              onChange={(e) => updateLLMConfig({ temperature: parseFloat(e.target.value) })}
-              className="w-full accent-primary h-2 bg-secondary rounded-lg appearance-none cursor-pointer"
-            />
-            <p className="text-xs text-muted-foreground">
-              Lower values are more deterministic, higher values are more creative
-            </p>
-          </div>
+// ===== Routing Editor Sub-component =====
 
-          <div className="space-y-2">
-            <Label htmlFor="maxTokens">Max Output Tokens</Label>
-            <Input
-              id="maxTokens"
-              type="number"
-              value={llm.maxTokens}
-              onChange={(e) => updateLLMConfig({ maxTokens: parseInt(e.target.value) || 4096 })}
-              min={100}
-              max={128000}
-            />
-          </div>
+function RoutingEditor({
+  config,
+  profileNames,
+  onChange,
+}: {
+  config: RoutingConfig;
+  profileNames: string[];
+  onChange: (config: RoutingConfig) => void;
+}) {
+  const [localConfig, setLocalConfig] = useState<RoutingConfig>(config);
 
-          <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <Label htmlFor="topP">Top P</Label>
-              <span className="text-sm font-medium tabular-nums">{llm.topP}</span>
-            </div>
-            <input
-              id="topP"
-              type="range"
-              min="0"
-              max="1"
-              step="0.05"
-              value={llm.topP}
-              onChange={(e) => updateLLMConfig({ topP: parseFloat(e.target.value) })}
-              className="w-full accent-primary h-2 bg-secondary rounded-lg appearance-none cursor-pointer"
-            />
-          </div>
+  useEffect(() => {
+    setLocalConfig(config);
+  }, [config]);
 
-          <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <Label htmlFor="frequencyPenalty">Frequency Penalty</Label>
-              <span className="text-sm font-medium tabular-nums">{llm.frequencyPenalty}</span>
-            </div>
-            <input
-              id="frequencyPenalty"
-              type="range"
-              min="0"
-              max="2"
-              step="0.1"
-              value={llm.frequencyPenalty}
-              onChange={(e) => updateLLMConfig({ frequencyPenalty: parseFloat(e.target.value) })}
-              className="w-full accent-primary h-2 bg-secondary rounded-lg appearance-none cursor-pointer"
-            />
-          </div>
+  const updateFixedAgent = (agent: string, profileName: string) => {
+    const newConfig = {
+      ...localConfig,
+      fixed_agent_routing: { ...localConfig.fixed_agent_routing, [agent]: profileName },
+    };
+    setLocalConfig(newConfig);
+  };
 
-          <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <Label htmlFor="presencePenalty">Presence Penalty</Label>
-              <span className="text-sm font-medium tabular-nums">{llm.presencePenalty}</span>
-            </div>
-            <input
-              id="presencePenalty"
-              type="range"
-              min="0"
-              max="2"
-              step="0.1"
-              value={llm.presencePenalty}
-              onChange={(e) => updateLLMConfig({ presencePenalty: parseFloat(e.target.value) })}
-              className="w-full accent-primary h-2 bg-secondary rounded-lg appearance-none cursor-pointer"
-            />
+  const removeFixedAgent = (agent: string) => {
+    const { [agent]: _, ...rest } = localConfig.fixed_agent_routing;
+    const newConfig = { ...localConfig, fixed_agent_routing: rest };
+    setLocalConfig(newConfig);
+  };
+
+  const updateAction = (action: string, profileName: string) => {
+    const newConfig = {
+      ...localConfig,
+      action_routing: { ...localConfig.action_routing, [action]: profileName },
+    };
+    setLocalConfig(newConfig);
+  };
+
+  const removeAction = (action: string) => {
+    const { [action]: _, ...rest } = localConfig.action_routing;
+    const newConfig = { ...localConfig, action_routing: rest };
+    setLocalConfig(newConfig);
+  };
+
+  const [newAgent, setNewAgent] = useState('');
+  const [newAction, setNewAction] = useState('');
+
+  const handleSave = () => {
+    const c = { ...localConfig };
+    if (newAgent.trim()) {
+      c.fixed_agent_routing = { ...c.fixed_agent_routing, [newAgent.trim()]: profileNames[0] || '' };
+      setNewAgent('');
+    }
+    if (newAction.trim()) {
+      c.action_routing = { ...c.action_routing, [newAction.trim()]: profileNames[0] || '' };
+      setNewAction('');
+    }
+    onChange(c);
+  };
+
+  return (
+    <div className="mt-3 space-y-4 text-sm">
+      {/* Fixed Agent Routing */}
+      <div className="space-y-2">
+        <h4 className="font-medium">Agent → Profile 映射</h4>
+        {Object.entries(localConfig.fixed_agent_routing).map(([agent, profileName]) => (
+          <div key={agent} className="flex items-center gap-2">
+            <span className="w-40 text-muted-foreground truncate" title={agent}>{agent}</span>
+            <span className="text-muted-foreground">→</span>
+            <Select value={profileName} onValueChange={(v) => updateFixedAgent(agent, v)}>
+              <SelectTrigger className="w-40 h-8 text-xs"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {profileNames.map((n) => <SelectItem key={n} value={n}>{n}</SelectItem>)}
+              </SelectContent>
+            </Select>
+            <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => removeFixedAgent(agent)}>
+              <Trash2 className="h-3.5 w-3.5" />
+            </Button>
           </div>
-        </CardContent>
-      </Card>
+        ))}
+        <div className="flex items-center gap-2">
+          <Input
+            placeholder="agent 名称"
+            value={newAgent}
+            onChange={(e) => setNewAgent(e.target.value)}
+            className="w-40 h-8 text-xs"
+          />
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-8 text-xs"
+            onClick={() => {
+              if (newAgent.trim()) {
+                updateFixedAgent(newAgent.trim(), profileNames[0] || '');
+                setNewAgent('');
+              }
+            }}
+          >
+            添加
+          </Button>
+        </div>
+      </div>
+
+      {/* Action Routing */}
+      <div className="space-y-2">
+        <h4 className="font-medium">Action → Profile 映射</h4>
+        {Object.entries(localConfig.action_routing).map(([action, profileName]) => (
+          <div key={action} className="flex items-center gap-2">
+            <span className="w-40 text-muted-foreground truncate" title={action}>{action}</span>
+            <span className="text-muted-foreground">→</span>
+            <Select value={profileName} onValueChange={(v) => updateAction(action, v)}>
+              <SelectTrigger className="w-40 h-8 text-xs"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {profileNames.map((n) => <SelectItem key={n} value={n}>{n}</SelectItem>)}
+              </SelectContent>
+            </Select>
+            <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => removeAction(action)}>
+              <Trash2 className="h-3.5 w-3.5" />
+            </Button>
+          </div>
+        ))}
+        <div className="flex items-center gap-2">
+          <Input
+            placeholder="action 名称"
+            value={newAction}
+            onChange={(e) => setNewAction(e.target.value)}
+            className="w-40 h-8 text-xs"
+          />
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-8 text-xs"
+            onClick={() => {
+              if (newAction.trim()) {
+                updateAction(newAction.trim(), profileNames[0] || '');
+                setNewAction('');
+              }
+            }}
+          >
+            添加
+          </Button>
+        </div>
+      </div>
+
+      {/* Fallback chain */}
+      <div className="space-y-2">
+        <h4 className="font-medium">Fallback Chain</h4>
+        <div className="flex items-center gap-1 flex-wrap">
+          {localConfig.fallback_chain.map((name, i) => (
+            <span key={i} className="bg-muted px-2 py-0.5 rounded text-xs">{name}</span>
+          ))}
+          {localConfig.fallback_chain.length === 0 && (
+            <span className="text-xs text-muted-foreground">未设置</span>
+          )}
+        </div>
+      </div>
+
+      <Button size="sm" onClick={handleSave}>保存路由规则</Button>
     </div>
   );
 }

@@ -2,6 +2,10 @@
 
 import axios, { AxiosInstance, AxiosError } from 'axios';
 import type {
+  LLMProfile,
+  RoutingConfig,
+} from '@/types/settings';
+import type {
   StartResearchResponse,
   InteractRequest,
   InteractResponse,
@@ -517,6 +521,52 @@ class ApiClient {
     models: Array<{ id: string; name: string; provider: string; max_tokens: number }>;
   }> {
     const { data } = await this.client.get('/api/v1/llm/models');
+    return data;
+  }
+
+  // ============ LLM Profiles ============
+
+  async getLLMProfiles(): Promise<{
+    profiles: Record<string, any>;
+    default_profile: string;
+    fallback_chain: string[];
+  }> {
+    const { data } = await this.client.get('/api/v1/llm/profiles');
+    return data;
+  }
+
+  async getLLMProfile(name: string): Promise<any> {
+    const { data } = await this.client.get(`/api/v1/llm/profiles/${name}`);
+    return data;
+  }
+
+  async createLLMProfile(profileData: Record<string, any>): Promise<{ success: boolean; profile_name: string }> {
+    const { data } = await this.client.post('/api/v1/llm/profiles', profileData);
+    return data;
+  }
+
+  async updateLLMProfile(name: string, updates: Record<string, any>): Promise<{ success: boolean; profile_name: string }> {
+    const { data } = await this.client.put(`/api/v1/llm/profiles/${name}`, updates);
+    return data;
+  }
+
+  async deleteLLMProfile(name: string): Promise<{ success: boolean; deleted: string }> {
+    const { data } = await this.client.delete(`/api/v1/llm/profiles/${name}`);
+    return data;
+  }
+
+  async setDefaultLLMProfile(name: string): Promise<{ success: boolean; default_profile: string }> {
+    const { data } = await this.client.post(`/api/v1/llm/profiles/${name}/default`);
+    return data;
+  }
+
+  async getLLMRouting(): Promise<RoutingConfig> {
+    const { data } = await this.client.get('/api/v1/llm/routing');
+    return data;
+  }
+
+  async updateLLMRouting(routingData: Partial<RoutingConfig>): Promise<{ success: boolean }> {
+    const { data } = await this.client.put('/api/v1/llm/routing', routingData);
     return data;
   }
 
