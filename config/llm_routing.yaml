@@ -11,6 +11,7 @@ fixed_agent_routing:
 
 # Action routing: action_name -> profile_name
 action_routing:
+  # General reasoning/utility
   analyze: strong
   generate: strong
   write: strong
@@ -24,3 +25,25 @@ action_routing:
   translate: fast
   format: fast
   vision: strong
+
+  # Quality assessment
+  quality_judge: strong
+  framework_match: fast
+  claim_extraction: fast
+
+  # Agent internal
+  keyword_expand: fast
+  decision_assist: fast
+  task_structure: strong
+  intent_analysis: strong
+  revision_intent: fast
+
+  # API actions
+  framework_modify: fast
+  section_inference: fast
+  param_extraction: fast
+
+  # Content operations
+  translation: fast
+  batch_revision: strong
+  entity_extraction: fast
