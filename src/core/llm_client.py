@@ -118,6 +118,8 @@ async def call_llm(
         temperature = temperature or profile.temperature
         api_key = api_key or profile.api_key
         base_url = base_url or profile.base_url
+    elif routing_hint is not None and _router is None:
+        logger.warning("routing_hint provided but LLM router not initialized; using default settings")
 
     model = model or settings.llm.model
     fallback_model = fallback_model or settings.llm.cheap_model

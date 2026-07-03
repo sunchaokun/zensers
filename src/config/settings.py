@@ -278,6 +278,7 @@ class Settings:
 
         # Load configuration
         self._load_config()
+        self._load_llm_profiles_from_disk()
         self._migrate_legacy_to_profile()
         self._initialized = True
 
@@ -594,6 +595,7 @@ class Settings:
         if profile.name in self.llm_profiles.profiles:
             raise ValueError(f"Profile '{profile.name}' already exists")
         self.llm_profiles.profiles[profile.name] = profile
+        self._persist_llm_profiles()
 
     def update_llm_profile(self, name: str, **kwargs) -> None:
         if name not in self.llm_profiles.profiles:
@@ -602,6 +604,7 @@ class Settings:
         for k, v in kwargs.items():
             if hasattr(p, k):
                 setattr(p, k, v)
+        self._persist_llm_profiles()
 
     def delete_llm_profile(self, name: str) -> None:
         if name == self.llm_profiles.default_profile:
@@ -609,12 +612,14 @@ class Settings:
         if name not in self.llm_profiles.profiles:
             raise KeyError(f"Profile '{name}' not found")
         del self.llm_profiles.profiles[name]
+        self._persist_llm_profiles()
 
     def set_default_llm_profile(self, name: str) -> None:
         if name not in self.llm_profiles.profiles:
             raise KeyError(f"Profile '{name}' not found")
         self.llm_profiles.default_profile = name
         self._sync_llm_config_from_profiles()
+        self._persist_llm_profiles()
 
     def list_llm_profiles(self) -> list:
         return list(self.llm_profiles.profiles.keys())
@@ -657,23 +662,10 @@ class Settings:
         if not self._llm_profiles_persist_path:
             return
         try:
+            from dataclasses import asdict
             path = Path(self._llm_profiles_persist_path)
             path.parent.mkdir(parents=True, exist_ok=True)
-            profiles_data = {}
-            for name, p in self.llm_profiles.profiles.items():
-                profiles_data[name] = {
-                    "name": p.name, "display_name": p.display_name,
-                    "provider": p.provider, "api_key": p.api_key,
-                    "base_url": p.base_url, "model": p.model,
-                    "fallback_model": p.fallback_model,
-                    "temperature": p.temperature, "max_tokens": p.max_tokens,
-                    "top_p": p.top_p, "frequency_penalty": p.frequency_penalty,
-                    "presence_penalty": p.presence_penalty,
-                    "max_context_tokens": p.max_context_tokens,
-                    "cost_limit_per_call": p.cost_limit_per_call,
-                    "is_default": p.is_default, "enabled": p.enabled,
-                    "created_at": p.created_at, "updated_at": p.updated_at,
-                }
+            profiles_data = {name: asdict(p) for name, p in self.llm_profiles.profiles.items()}
             data = {
                 "default_profile": self.llm_profiles.default_profile,
                 "fallback_chain": self.llm_profiles.fallback_chain,
@@ -699,7 +691,9 @@ class Settings:
             self.llm_profiles.fixed_agent_routing = data.get("fixed_agent_routing", self.llm_profiles.fixed_agent_routing)
             self.llm_profiles.action_routing = data.get("action_routing", self.llm_profiles.action_routing)
             for name, pdata in data.get("profiles", {}).items():
-                self.llm_profiles.profiles[name] = LLMProfile(**{k: v for k, v in pdata.items() if k in LLMProfile.__dataclass_fields__})
+                from dataclasses import fields as dc_fields
+                valid_keys = {f.name for f in dc_fields(LLMProfile)}
+                self.llm_profiles.profiles[name] = LLMProfile(**{k: v for k, v in pdata.items() if k in valid_keys})
             logger.info("LLM profiles loaded from %s", path)
         except Exception as e:
             logger.warning("Failed to load LLM profiles from disk: %s", e)
@@ -840,5 +834,8 @@ settings = Settings()
 
 
 def get_settings() -> Settings:
-    """Get configuration instance"""
-    return settings
+    """Get configuration instance — always returns current singleton."""
+    if Settings._instance is None:
+        global settings
+        settings = Settings()
+    return Settings._instance

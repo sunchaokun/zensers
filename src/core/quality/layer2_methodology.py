@@ -162,14 +162,6 @@ class Layer2MethodologyScorer:
 
     def _check_framework_match(self, content: str, framework: Dict[str, Any]) -> float:
         """LLM 框架匹配度评估"""
-        if not self._llm_client:
-            components = framework.get("components", [])
-            if components:
-                coverage = self._check_component_coverage(content, framework)
-                rate = sum(coverage.values()) / max(len(coverage), 1)
-                return round(rate * 100, 1)
-            return 50.0
-
         try:
             prompt = _FRAMEWORK_MATCH_PROMPT.format(
                 framework_name=framework.get("name", ""),
@@ -178,12 +170,23 @@ class Layer2MethodologyScorer:
             )
 
             result = self._call_llm(prompt)
+            if not result:
+                return self._regex_framework_fallback(content, framework)
             parsed = self._parse_match_response(result)
             return float(parsed.get("match_score", 50.0))
 
         except Exception as e:
             logger.warning(f"Layer 2 framework match LLM failed: {e}")
-            return 50.0
+            return self._regex_framework_fallback(content, framework)
+
+    def _regex_framework_fallback(self, content: str, framework: Dict[str, Any]) -> float:
+        """Regex fallback when LLM is unavailable"""
+        components = framework.get("components", [])
+        if components:
+            coverage = self._check_component_coverage(content, framework)
+            rate = sum(coverage.values()) / max(len(coverage), 1)
+            return round(rate * 100, 1)
+        return 50.0
 
     def _check_evidence(self, content: str, framework: Dict[str, Any]) -> float:
         """检查 evidence_required 中的数据源类型是否在内容中体现"""

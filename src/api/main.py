@@ -875,7 +875,8 @@ async def llm_health():
 
 @app.get("/api/v1/llm/profiles")
 async def list_llm_profiles():
-    from src.config.settings import settings
+    from src.config.settings import get_settings
+    settings = get_settings()
     from dataclasses import asdict
     profiles = {}
     for name, p in settings.llm_profiles.profiles.items():
@@ -892,7 +893,8 @@ async def list_llm_profiles():
 
 @app.get("/api/v1/llm/profiles/{profile_name}")
 async def get_llm_profile(profile_name: str):
-    from src.config.settings import settings
+    from src.config.settings import get_settings
+    settings = get_settings()
     from dataclasses import asdict
     p = settings.llm_profiles.profiles.get(profile_name)
     if not p:
@@ -905,13 +907,17 @@ async def get_llm_profile(profile_name: str):
 
 @app.post("/api/v1/llm/profiles")
 async def create_llm_profile(profile_data: Dict[str, Any]):
-    from src.config.settings import settings
+    from src.config.settings import get_settings
+    settings = get_settings()
     from src.config.llm_profiles import LLMProfile
+    from dataclasses import fields as dc_fields
     name = profile_data.get("name")
     if not name:
         raise HTTPException(status_code=400, detail="Profile name is required")
     try:
-        p = LLMProfile(**{k: v for k, v in profile_data.items() if k in LLMProfile.__dataclass_fields__})
+        valid_keys = {f.name for f in dc_fields(LLMProfile)}
+        filtered = {k: v for k, v in profile_data.items() if k in valid_keys and not (k == "api_key" and v == "***")}
+        p = LLMProfile(**filtered)
         settings.add_llm_profile(p)
         settings._persist_llm_profiles()
         return {"success": True, "profile_name": name}
@@ -921,9 +927,11 @@ async def create_llm_profile(profile_data: Dict[str, Any]):
 
 @app.put("/api/v1/llm/profiles/{profile_name}")
 async def update_llm_profile(profile_name: str, updates: Dict[str, Any]):
-    from src.config.settings import settings
+    from src.config.settings import get_settings
+    settings = get_settings()
+    filtered = {k: v for k, v in updates.items() if not (k == "api_key" and v == "***")}
     try:
-        settings.update_llm_profile(profile_name, **updates)
+        settings.update_llm_profile(profile_name, **filtered)
         settings._sync_llm_config_from_profiles()
         settings._persist_llm_profiles()
         return {"success": True, "profile_name": profile_name}
@@ -933,7 +941,8 @@ async def update_llm_profile(profile_name: str, updates: Dict[str, Any]):
 
 @app.delete("/api/v1/llm/profiles/{profile_name}")
 async def delete_llm_profile(profile_name: str):
-    from src.config.settings import settings
+    from src.config.settings import get_settings
+    settings = get_settings()
     try:
         settings.delete_llm_profile(profile_name)
         settings._persist_llm_profiles()
@@ -946,7 +955,8 @@ async def delete_llm_profile(profile_name: str):
 
 @app.post("/api/v1/llm/profiles/{profile_name}/default")
 async def set_default_llm_profile(profile_name: str):
-    from src.config.settings import settings
+    from src.config.settings import get_settings
+    settings = get_settings()
     try:
         settings.set_default_llm_profile(profile_name)
         settings._persist_llm_profiles()
@@ -957,7 +967,8 @@ async def set_default_llm_profile(profile_name: str):
 
 @app.get("/api/v1/llm/routing")
 async def get_llm_routing():
-    from src.config.settings import settings
+    from src.config.settings import get_settings
+    settings = get_settings()
     return {
         "fixed_agent_routing": settings.llm_profiles.fixed_agent_routing,
         "action_routing": settings.llm_profiles.action_routing,
@@ -967,7 +978,8 @@ async def get_llm_routing():
 
 @app.put("/api/v1/llm/routing")
 async def update_llm_routing(routing_data: Dict[str, Any]):
-    from src.config.settings import settings
+    from src.config.settings import get_settings
+    settings = get_settings()
     if "fixed_agent_routing" in routing_data:
         settings.llm_profiles.fixed_agent_routing = routing_data["fixed_agent_routing"]
     if "action_routing" in routing_data:
@@ -1084,6 +1096,7 @@ async def startup_event():
     from src.core.orchestrator.execution.task_utils import register_global_exception_handler
     register_global_exception_handler()
 
+    from src.config.settings import settings
     from src.core.llm_client import init_llm_infrastructure
     init_llm_infrastructure(settings.llm_profiles)
     logger.info("LLM infrastructure initialized with %d profiles", len(settings.llm_profiles.profiles))

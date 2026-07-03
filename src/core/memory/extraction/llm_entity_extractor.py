@@ -96,7 +96,7 @@ class LLMEntityExtractor:
 
         regex_entities = self._regex_extractor.extract(text, source)
 
-        if len(regex_entities) >= self._min_entities or not self._llm_client:
+        if len(regex_entities) >= self._min_entities:
             return regex_entities
 
         llm_entities = self._extract_via_llm_sync(text, source)
@@ -116,7 +116,7 @@ class LLMEntityExtractor:
 
         regex_entities = self._regex_extractor.extract(text, source)
 
-        if len(regex_entities) >= self._min_entities or not self._llm_client:
+        if len(regex_entities) >= self._min_entities:
             return regex_entities
 
         llm_entities = await self._extract_via_llm(text, source)
@@ -184,16 +184,11 @@ class LLMEntityExtractor:
         return self._parse_json_entities(content)
 
     def _extract_content(self, response: Any) -> Optional[str]:
-        """从不同格式的 LLM 响应中提取文本内容"""
+        """从 LLM 响应中提取文本内容（兼容 call_llm 格式）"""
         if isinstance(response, dict):
             if response.get("success") is False:
                 return None
-            data = response.get("data", response)
-            if isinstance(data, dict):
-                return data.get("content")
-            if isinstance(data, str):
-                return data
-            return str(data)
+            return response.get("content")
         if isinstance(response, str):
             return response
         return None

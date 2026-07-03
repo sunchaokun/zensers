@@ -103,11 +103,16 @@ class BatchRevisionService:
             timeout: 单次 LLM 调用超时时间（秒）
         """
         self._llm_client = llm_client
+        if llm_client is not None:
+            import warnings
+            warnings.warn(
+                "llm_client parameter is deprecated; LLM calls now use call_llm(routing_hint=...). "
+                "The llm_client parameter will be removed in a future version.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         self._max_retries = max_retries
         self._timeout = timeout
-        
-        if self._llm_client is None:
-            self._llm_client = None
     
     async def revise_multiple_sections(
         self,
