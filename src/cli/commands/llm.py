@@ -33,6 +33,26 @@ def register(parent: typer.Typer) -> None:
         """Check LLM connectivity."""
         asyncio.run(_llm_health_async())
 
+    @llm_app.command("set-config")
+    def llm_set_config_command(
+        provider: Optional[str] = typer.Option(None, "--provider", "-p", help="LLM provider"),
+        model: Optional[str] = typer.Option(None, "--model", "-m", help="Model name"),
+        api_key: Optional[str] = typer.Option(None, "--api-key", "-k", help="API key"),
+        api_endpoint: Optional[str] = typer.Option(None, "--api-endpoint", "-e", help="API endpoint URL"),
+        temperature: Optional[float] = typer.Option(None, "--temperature", "-t", help="Temperature"),
+        max_tokens: Optional[int] = typer.Option(None, "--max-tokens", help="Max tokens"),
+    ):
+        """Update LLM configuration."""
+        if not any([provider, model, api_key, api_endpoint, temperature is not None, max_tokens is not None]):
+            console.print("[red]Please specify at least one config option[/red]")
+            raise typer.Exit(1)
+        asyncio.run(_llm_set_config_async(provider, model, api_key, api_endpoint, temperature, max_tokens))
+
+    @llm_app.command("reset-config")
+    def llm_reset_config_command():
+        """Reset LLM configuration to defaults."""
+        asyncio.run(_llm_reset_config_async())
+
 
 async def _llm_models_async(provider: Optional[str] = None):
     from src.cli.client import ZensersClient
@@ -114,3 +134,25 @@ async def _llm_health_async():
     if result.get("error"):
         table.add_row("Error", result["error"])
     console.print(table)
+
+
+async def _llm_set_config_async(provider, model, api_key, api_endpoint, temperature, max_tokens):
+    from src.cli.client import ZensersClient, ZensersError
+    try:
+        async with ZensersClient() as client:
+            result = await client.llm_set_config(provider, model, api_key, api_endpoint, temperature, max_tokens)
+    except ZensersError as e:
+        console.print(f"[red]Failed to set LLM config: {e.message}[/red]")
+        raise typer.Exit(1)
+    console.print("[green]✓ LLM configuration updated[/green]")
+
+
+async def _llm_reset_config_async():
+    from src.cli.client import ZensersClient, ZensersError
+    try:
+        async with ZensersClient() as client:
+            result = await client.llm_reset_config()
+    except ZensersError as e:
+        console.print(f"[red]Failed to reset LLM config: {e.message}[/red]")
+        raise typer.Exit(1)
+    console.print("[green]✓ LLM configuration reset to defaults[/green]")
