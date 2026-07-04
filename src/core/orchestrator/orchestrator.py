@@ -1108,8 +1108,12 @@ class ResearchOrchestrator:
                         "section_weights": _fc_obj.section_weights,
                     }
 
+                    _task_structure_dict = self._build_task_structure_from_section_details(
+                        requirement.section_details, requirement.topic, task_id
+                    )
+
                     research_result_data = await _ro.generate_report(
-                        task_structure={},
+                        task_structure=_task_structure_dict,
                         framework_config=_fc_dict,
                         aggregated_result=aggregated,
                         topic=requirement.topic,
@@ -3830,6 +3834,128 @@ class ResearchOrchestrator:
             }
             details.append(detail)
         return details
+
+    _SECTION_ZH_NAMES = {
+        "investment_summary": "投资摘要",
+        "industry_overview": "行业概览",
+        "market_size": "市场规模与增长",
+        "competitive_landscape": "竞争格局",
+        "value_chain": "产业链分析",
+        "growth_drivers": "增长动力",
+        "policy_environment": "政策与监管",
+        "technology_trends": "技术趋势",
+        "company_analysis": "重点公司分析",
+        "financial_forecast": "财务预测与估值",
+        "risk_analysis": "风险分析",
+        "strategic_intent": "战略意图推断",
+        "rating_target": "评级与目标价",
+        "appendix": "附录",
+        "summary": "年报概述",
+        "business_review": "经营分析",
+        "financial_deep": "深度财务分析",
+        "cashflow_analysis": "现金流分析",
+        "governance": "治理与内控",
+        "strategy": "战略规划",
+        "outlook": "展望",
+        "investment_view": "投资评估",
+        "risks": "风险因素",
+    }
+
+    _SYNTHESIS_IDS = {
+        "investment_summary", "executive_summary", "summary",
+        "rating_target", "strategic_intent",
+    }
+
+    _DATA_COLLECTION_IDS = {"appendix", "references"}
+
+    def _build_task_structure_from_section_details(
+        self,
+        section_details: List[Dict[str, Any]],
+        topic: str,
+        task_id: str,
+    ) -> Dict[str, Any]:
+        if not section_details:
+            logger.warning(f"[{task_id}] No section_details, task_structure will be empty")
+            return {}
+
+        def _resolve_name(name_val, section_id):
+            if isinstance(name_val, dict):
+                val = name_val.get("zh", name_val.get("en", str(name_val)))
+            else:
+                val = str(name_val) if name_val else ""
+            if section_id in self._SECTION_ZH_NAMES:
+                return self._SECTION_ZH_NAMES[section_id]
+            return val
+
+        sections = []
+        for sd in section_details:
+            section_id = sd.get("id", "")
+            section_name = _resolve_name(sd.get("name", section_id), section_id)
+            section_desc = sd.get("description", sd.get("content", ""))
+
+            if section_id in self._SYNTHESIS_IDS:
+                role = "synthesis"
+            elif section_id in self._DATA_COLLECTION_IDS:
+                role = "data_collection"
+            else:
+                role = "analysis"
+
+            sections.append({
+                "section_id": section_id,
+                "section_name": section_name,
+                "section_role": role,
+                "role_reasoning": f"Auto-assigned from template section: {section_name}",
+                "content_dependency": [],
+                "dependency_reasoning": "",
+                "skill_requirements": [],
+                "estimated_complexity": "medium",
+                "can_parallel": role != "synthesis",
+                "priority": len(sections),
+                "config": {
+                    "description": section_desc if isinstance(section_desc, str) else str(section_desc),
+                },
+            })
+
+        analysis_ids = [s["section_id"] for s in sections if s["section_role"] == "analysis"]
+        synthesis_ids = [s["section_id"] for s in sections if s["section_role"] == "synthesis"]
+
+        dependencies = []
+        for sec in sections:
+            sid = sec["section_id"]
+            if sec["section_role"] == "synthesis":
+                sec["content_dependency"] = list(analysis_ids)
+                for aid in analysis_ids:
+                    dependencies.append({
+                        "from_section": aid,
+                        "to_section": sid,
+                        "dependency_type": "synthesis",
+                        "dependency_reason": "Synthesis section depends on analysis sections",
+                        "unlock_condition": "completion",
+                        "quality_threshold": 0.75,
+                    })
+                sec["can_parallel"] = False
+            elif sec["section_role"] == "analysis" and len(analysis_ids) > 1:
+                peers = [a for a in analysis_ids if a != sid]
+                sec["content_dependency"] = peers[:3]
+
+        parallel_groups = [analysis_ids] if analysis_ids else []
+        critical_path = analysis_ids + synthesis_ids
+
+        task_structure_dict = {
+            "task_id": task_id,
+            "topic": topic,
+            "sections": sections,
+            "dependencies": dependencies,
+            "execution_graph": {},
+            "parallel_groups": [parallel_groups],
+            "critical_path": critical_path,
+            "total_estimated_agents": len(sections),
+            "analysis_method": "rule_based",
+        }
+
+        logger.info(f"[{task_id}] Built task_structure from section_details: "
+                     f"{len(sections)} sections, {len(dependencies)} dependencies")
+        return task_structure_dict
 
     def _load_template_sections(
             self, template_id: str) -> List[Dict[str, Any]]:

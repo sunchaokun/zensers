@@ -93,7 +93,16 @@ class ChapterWriter:
         return DataPoint(**{k: v for k, v in coerced.items() if k in DATAPOINT_FIELDS})
 
     def _parse_output(self, raw: str, chapter_spec: Dict) -> ChapterWriteOutput:
-        _SKIP_TITLES = {"数据精准修补任务", "章节精修任务", "章节精修润色任务", "章节撰写任务"}
+        _SKIP_TITLES = {
+            "数据精准修补任务", "章节精修任务", "章节精修润色任务", "章节撰写任务",
+            "核心结论", "核心判断", "核心发现",
+            "论证与分析", "逻辑推导", "论证", "分析",
+            "数据支撑", "数据支持", "数据来源",
+            "风险提示", "风险与不确定性",
+            "核心结论与论证分析", "核心结论与论证",
+            "核心结论与数据支撑", "论证分析与数据支撑",
+        }
+        _GENERIC_PATTERNS = ("核心结论", "核心判断", "核心发现", "论证与分析", "数据支撑", "数据支持", "数据来源", "风险提示", "风险与不确定性")
         try:
             json_match = re.search(r'```json\s*(.*?)\s*```', raw, re.DOTALL)
             json_str = None
@@ -107,7 +116,7 @@ class ChapterWriter:
             if json_str:
                 data = json.loads(json_str)
                 title = data.get("title", chapter_spec.get("section_name", ""))
-                if title in _SKIP_TITLES:
+                if title in _SKIP_TITLES or any(p in title for p in _GENERIC_PATTERNS):
                     title = chapter_spec.get("section_name", "")
                 return ChapterWriteOutput(
                     chapter_id=chapter_spec.get("section_id", ""),

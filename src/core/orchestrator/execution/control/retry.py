@@ -46,7 +46,6 @@ class RetryConfig:
         "bad_request",
         "400",
         "401",
-        "403",
         "404",
     ])
 

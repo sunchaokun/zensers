@@ -9,6 +9,7 @@ MultiSearchSkill - Search Engine Integration Skill (v5.0 Simplified)
 """
 import asyncio
 import logging
+import os
 import re
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
@@ -94,8 +95,53 @@ class MultiSearchSkill(Skill):
 
     def __init__(self, config: Optional[SkillConfig] = None):
         super().__init__(config)
-        self.quality_filter = SearchQualityFilter(min_quality_score=40.0)
+        _min_quality = self._load_min_quality_score()
+        self.quality_filter = SearchQualityFilter(min_quality_score=_min_quality)
         self.timeout = 30
+        self._proxy = self._load_proxy()
+
+    @staticmethod
+    def _load_min_quality_score() -> float:
+        """Read min_quality_score from settings.yaml, fallback to 40.0."""
+        try:
+            import yaml
+            from pathlib import Path
+            for candidate in (
+                Path("config/settings.yaml"),
+                Path(__file__).resolve().parent.parent.parent / "config" / "settings.yaml",
+            ):
+                if candidate.exists():
+                    with open(candidate, "r", encoding="utf-8") as f:
+                        cfg = yaml.safe_load(f)
+                    val = cfg.get("search", {}).get("min_quality_score")
+                    if val is not None:
+                        return float(val)
+        except Exception:
+            pass
+        return 40.0
+
+    @staticmethod
+    def _load_proxy() -> str:
+        """Read proxy URL from settings.yaml or env vars."""
+        env_proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or os.environ.get("https_proxy") or os.environ.get("http_proxy")
+        if env_proxy:
+            return env_proxy
+        try:
+            import yaml
+            from pathlib import Path
+            for candidate in (
+                Path("config/settings.yaml"),
+                Path(__file__).resolve().parent.parent.parent / "config" / "settings.yaml",
+            ):
+                if candidate.exists():
+                    with open(candidate, "r", encoding="utf-8") as f:
+                        cfg = yaml.safe_load(f)
+                    val = cfg.get("search", {}).get("proxy", "")
+                    if val:
+                        return str(val)
+        except Exception:
+            pass
+        return ""
 
     @property
     def name(self) -> str:
@@ -208,7 +254,12 @@ class MultiSearchSkill(Skill):
                         r_with_score["quality_score"] = score.overall_score
                         scored_raw.append(r_with_score)
                 scored_raw.sort(key=lambda x: x.get("quality_score", 0), reverse=True)
-                filtered_results = scored_raw[:max_results] if scored_raw else raw_results[:max_results]
+                if scored_raw:
+                    filtered_results = scored_raw[:max_results]
+                    logger.warning(f"Quality filter too strict for query: {query}, using {len(filtered_results)} low-quality results")
+                else:
+                    logger.warning(f"All results filtered out for query: {query}, returning nothing rather than unfiltered")
+                    return self._failure("All results below quality threshold", "Search quality insufficient")
 
             filtered_results = filtered_results[:max_results]
             tier_counts = {}
@@ -259,7 +310,10 @@ class MultiSearchSkill(Skill):
             IS_NEW = False
 
         def sync_search():
-            with DDGS(timeout=self.timeout) as ddgs:
+            ddgs_kwargs = {"timeout": self.timeout}
+            if self._proxy:
+                ddgs_kwargs["proxy"] = self._proxy
+            with DDGS(**ddgs_kwargs) as ddgs:
                 kwargs = {"max_results": max_results}
                 if time_range:
                     kwargs["timelimit"] = time_range
@@ -313,9 +367,22 @@ class MultiSearchSkill(Skill):
             "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8",
         }
 
+        _UA_LIST = [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
+        ]
+
         try:
-            async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=True) as client:
+            client_kwargs = {"timeout": self.timeout, "follow_redirects": True}
+            if self._proxy:
+                client_kwargs["proxy"] = self._proxy
+            async with httpx.AsyncClient(**client_kwargs) as client:
                 response = await client.get(search_url, headers=headers)
+                if response.status_code == 403 and engine_id not in ("baidu",):
+                    alt_headers = dict(headers)
+                    alt_headers["User-Agent"] = _UA_LIST[1]
+                    response = await client.get(search_url, headers=alt_headers)
                 response.raise_for_status()
                 html = response.text
 

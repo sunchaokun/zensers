@@ -558,6 +558,7 @@ class GenericAgent(
                             # B-FIX-3: write key metrics to SharedMemory
                             if self._shared_memory and hasattr(self._shared_memory, 'write_canonical'):
                                 import re as _re
+                                _section_id = self.section_id
                                 for _dp in data_points[:10]:
                                     _c = _dp.get("content", "")
                                     _u = _dp.get("url", "")
@@ -570,8 +571,9 @@ class GenericAgent(
                                     ]:
                                         _m = _re.search(_p, _c)
                                         if _m:
+                                            _metric_key = _mn if not _section_id else f"{_section_id}/{_mn}"
                                             _conflict = await self._shared_memory.write_canonical(
-                                                metric=_mn,
+                                                metric=_metric_key,
                                                 value=float(_m.group(1)),
                                                 caliber="search_result",
                                                 source=_u,
@@ -1285,7 +1287,7 @@ class GenericAgent(
                         content_len = len(result.get("content", ""))
                         logger.info(f"GenericAgent {self.agent_id}: 内容长度={content_len} 字符")
                         
-                        # P0-3修复：生成数据图表
+                        # P0-3修复：生成数据图表（ChartPlannerAgent）
                         charts = await self._generate_charts_from_content(
                             content=result.get("content", ""),
                             topic=topic,
@@ -3959,6 +3961,8 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
             for focus in data_focus[:4]:
                 queries.append(f"{search_topic} {focus} {current_year}")
                 queries.append(f"{search_topic} {focus} 数据")
+                if aspect:
+                    queries.append(f"{search_topic} {aspect} {focus} {current_year}")
         
         # v3.4 R2: Check data_focus relevance to aspect
         if aspect and data_focus and not is_generic_data_focus:
@@ -5958,45 +5962,120 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
         """
         从LLM生成的内容中提取数据并生成图表
         
+        使用ChartPlannerAgent进行语义分析，替代正则提取。
+        当CHART_PLANNER_ENABLED=False时降级回原有正则逻辑。
+        
         Args:
             content: LLM生成的内容
             topic: 研究主题
             aspect: 研究维度
             
         Returns:
-            图表信息列表
+            图表信息列表（含insertion_anchor/anchor_type）
         """
+        from src.config import settings
+        planner_enabled = getattr(settings, 'chart_planner', None)
+        if planner_enabled is not None:
+            planner_enabled = getattr(planner_enabled, 'enabled', True)
+        else:
+            planner_enabled = True
+        
+        if planner_enabled:
+            return await self._generate_charts_with_planner(content, topic, aspect)
+        else:
+            return await self._generate_charts_legacy(content, topic, aspect)
+
+    async def _generate_charts_with_planner(
+        self,
+        content: str,
+        topic: str,
+        aspect: str,
+    ) -> List[Dict[str, Any]]:
+        """使用ChartPlannerAgent生成图表"""
         charts = []
         
         try:
-            # 延迟导入图表生成器
+            from src.services.chart_planner import ChartPlannerAgent
+            from src.services.chart_generator import ChartGenerator, ChartConfig
+            
+            output_dir = Path("output/charts")
+            output_dir.mkdir(parents=True, exist_ok=True)
+            
+            chart_planner = ChartPlannerAgent(output_dir=str(output_dir))
+            chart_plans = await chart_planner.plan(
+                content=content,
+                topic=topic,
+                section_title=aspect,
+            )
+            
+            if chart_plans:
+                chart_generator = ChartGenerator(output_dir=str(output_dir))
+                for plan in chart_plans:
+                    try:
+                        config = ChartConfig(
+                            chart_type=plan.chart_type,
+                            title=plan.title,
+                            data=plan.data,
+                            xlabel=plan.xlabel,
+                            ylabel=plan.ylabel,
+                            caption=plan.caption,
+                            source=plan.subtitle or f"{topic}研究数据",
+                        )
+                        render_result = chart_generator.generate(config)
+                        if render_result.success and render_result.image_path:
+                            charts.append({
+                                "chart_type": plan.chart_type.value,
+                                "title": plan.title,
+                                "path": render_result.image_path,
+                                "caption": plan.caption,
+                                "aspect": aspect,
+                                "insertion_anchor": plan.insertion_anchor,
+                                "anchor_type": plan.anchor_type,
+                            })
+                            logger.info(f"ChartPlanner: generated chart for '{aspect}': {render_result.image_path}")
+                    except Exception:
+                        logger.exception(f"Chart rendering failed for plan: {plan.title}")
+            
+        except ImportError:
+            logger.warning("ChartPlannerAgent not available, falling back to legacy")
+            return await self._generate_charts_legacy(content, topic, aspect)
+        except Exception:
+            logger.exception("ChartPlanner failed, falling back to legacy")
+            return await self._generate_charts_legacy(content, topic, aspect)
+        
+        return charts
+
+    async def _generate_charts_legacy(
+        self,
+        content: str,
+        topic: str,
+        aspect: str,
+    ) -> List[Dict[str, Any]]:
+        """原有正则提取图表生成逻辑（降级用）"""
+        charts = []
+        
+        try:
             from src.services.chart_generator import ChartGenerator, ChartConfig, ChartType
             
-            # 创建图表输出目录
             output_dir = Path("output/charts")
             output_dir.mkdir(parents=True, exist_ok=True)
             
             chart_generator = ChartGenerator(output_dir=str(output_dir))
             
-            # Normalize line endings to \n for consistent regex matching
             content_normalized = content.replace('\r\n', '\n').replace('\r', '\n')
             
-            # 从内容中提取数据表格（Markdown格式）
             table_pattern = r'\|(.+)\|\n\|[-\s|:]+\|\n((?:\|.+\|\n?)+)'
             tables = re.findall(table_pattern, content_normalized)
             
-            logger.info(f"Chart generation for '{aspect}': content_len={len(content)}, tables_found={len(tables)}")
+            logger.info(f"Chart generation (legacy) for '{aspect}': content_len={len(content)}, tables_found={len(tables)}")
             if not tables:
-                # Debug: log why no tables were found - check for pipe characters
                 pipe_count = content.count('|')
                 logger.debug(f"Chart generation: pipe_count={pipe_count}, content_preview={content[:200]}")
 
-            for i, (header_row, data_rows) in enumerate(tables[:3]):  # 最多处理3个表格
+            for i, (header_row, data_rows) in enumerate(tables[:3]):
                 try:
-                    # 解析表头
                     headers = [h.strip() for h in header_row.split('|') if h.strip()]
                     
-                    # 解析数据行
                     rows = []
                     for row in data_rows.strip().split('\n'):
                         cells = [c.strip() for c in row.split('|') if c.strip()]
@@ -6005,37 +6084,30 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
                     
                     if len(headers) >= 2 and len(rows) >= 2:
                         logger.info(f"Chart generation: table {i+1} - headers={headers[:3]}, rows={len(rows)}")
-                        # 判断是否适合生成柱状图
-                        # 第一列是类别，后面列是数值
                         categories = [row[0] for row in rows if len(row) > 0]
                         
-                        # 尝试找到数值列
                         for col_idx in range(1, min(len(headers), 3)):
                             values = []
                             for row in rows:
                                 if len(row) > col_idx:
                                     try:
-                                        # 提取数值（去掉百分号、单位等）
                                         val_str = re.sub(r'[^\d.]', '', row[col_idx])
                                         val = float(val_str) if val_str else 0
                                         values.append(val)
                                     except (ValueError, IndexError):
                                         values.append(0)
                             
-                            logger.info(f"Chart generation: col_idx={col_idx}, values={values[:5]}, sum={sum(values) if values else 0}")
-                            
                             if values and sum(values) > 0:
-                                # 生成柱状图
                                 config = ChartConfig(
                                     chart_type=ChartType.BAR,
                                     title=f"{aspect} - {headers[col_idx]}"[:50],
                                     data={
-                                        "categories": categories[:10],  # 最多10个类别
+                                        "categories": categories[:10],
                                         "values": values[:10],
                                     },
                                     xlabel=headers[0],
                                     ylabel=headers[col_idx],
-                                    source=f"{search_topic}研究数据",
+                                    source=f"{topic}研究数据",
                                 )
                                 
                                 result = chart_generator.generate(config)
@@ -6046,15 +6118,16 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
                                         "title": f"{headers[col_idx]}分析",
                                         "path": result.image_path,
                                         "aspect": aspect,
+                                        "insertion_anchor": "",
+                                        "anchor_type": "section_end",
                                     })
                                     logger.info(f"Generated chart for {aspect}: {result.image_path}")
-                                    break  # 每个表格只生成一个图表
+                                    break
                                     
                 except Exception:
                     logger.exception("Failed to generate chart from table")
                     continue
             
-            # 提取关键数据点生成图表（如市场份额）
             market_share_pattern = r'(\w+(?:\s+\w+)?)\s*[：:]\s*(\d+(?:\.\d+)?)\s*[%％]'
             market_data = re.findall(market_share_pattern, content)
             
@@ -6071,7 +6144,7 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
                             "values": values,
                         },
                         ylabel="占比 (%)",
-                        source=f"{search_topic}研究数据",
+                        source=f"{topic}研究数据",
                     )
                     
                     result = chart_generator.generate(config)
@@ -6082,6 +6155,8 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
                             "title": "市场份额分析",
                             "path": result.image_path,
                             "aspect": aspect,
+                            "insertion_anchor": "",
+                            "anchor_type": "section_end",
                         })
                         logger.info(f"Generated market share chart: {result.image_path}")
                         

@@ -338,13 +338,14 @@ class ResearchExecutor:
                 logger.info(f"Resuming with {len(skip_phases)} skip_phases: {skip_phases}")
             
             # === 从 session 中提取动态参数（/template 快速启动传入）===
+            _section_details = plan.get("section_details") or session.get("section_details", [])
             user_input_dict: Dict[str, Any] = {
                 "session_id": session_id,
                 "topic": topic or user_input,
                 "output_type": output_type,
                 "aspects": framework.get("sections", None),
                 "sections_tree": plan.get("sections_tree"),
-                "section_details": plan.get("section_details", []),
+                "section_details": _section_details,
             }
             # 从 session 读取动态参数（由 quick_start 存入）
             param_keys = ("region", "time_range", "depth", "company_name",

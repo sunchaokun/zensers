@@ -552,4 +552,85 @@ __all__ = [
     "AUTHORITY_SOURCES",
     "LOW_QUALITY_PATTERNS",
     "create_quality_filter",
+    "detect_anomalous_data",
+    "AnomalyFlag",
 ]
+
+
+@dataclass
+class AnomalyFlag:
+    metric: str
+    value: float
+    expected_range: str
+    reason: str
+    severity: str  # "warning" | "critical"
+
+
+_METRIC_RANGES = {
+    "营收": (1, 50000),
+    "净利润": (-5000, 10000),
+    "销量": (0, 5000),
+    "研发投入": (0, 5000),
+    "毛利率": (-50, 100),
+    "净利率": (-50, 80),
+    "市场份额": (0, 100),
+    "市盈率": (-100, 500),
+    "市净率": (-10, 50),
+    "ROE": (-50, 80),
+    "资产负债率": (0, 100),
+}
+
+
+def detect_anomalous_data(
+    data_points: List[Dict[str, Any]],
+    prev_values: Optional[Dict[str, float]] = None,
+) -> List[AnomalyFlag]:
+    """Detect anomalous data points (cliff drops, out-of-range, etc.).
+
+    Args:
+        data_points: List of data point dicts with 'metric', 'value', 'unit' keys.
+        prev_values: Optional previous period values for YoY/QoQ comparison.
+
+    Returns:
+        List of AnomalyFlag for suspicious data.
+    """
+    flags = []
+    prev_values = prev_values or {}
+
+    for dp in data_points:
+        metric = str(dp.get("metric", ""))
+        raw_val = dp.get("value")
+        if raw_val is None:
+            continue
+        try:
+            value = float(raw_val)
+        except (ValueError, TypeError):
+            continue
+
+        valid_range = _METRIC_RANGES.get(metric)
+        if valid_range:
+            lo, hi = valid_range
+            if value < lo or value > hi:
+                flags.append(AnomalyFlag(
+                    metric=metric, value=value,
+                    expected_range=f"[{lo}, {hi}]",
+                    reason=f"{metric}={value} outside expected range [{lo}, {hi}]",
+                    severity="critical",
+                ))
+                continue
+
+        if metric in prev_values:
+            prev = prev_values[metric]
+            if abs(prev) > 0.01:
+                change = abs(value - prev) / abs(prev)
+                sign_flip = (value > 0) != (prev > 0)
+                if sign_flip or change > 0.5:
+                    direction = "暴跌" if value < prev else "暴增"
+                    flags.append(AnomalyFlag(
+                        metric=metric, value=value,
+                        expected_range=f"~{prev:.1f} (prev period)",
+                        reason=f"{metric} {direction}: {prev:.1f} -> {value:.1f} ({change:.0%} change)",
+                        severity="critical" if sign_flip else "warning",
+                    ))
+
+    return flags
