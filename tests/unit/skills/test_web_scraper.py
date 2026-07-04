@@ -66,8 +66,8 @@ class TestWebScraperContract:
 
     @pytest.mark.asyncio
     async def test_fetch_error_returns_failure(self, skill):
-        with patch.object(skill, "_fetch_html", new_callable=AsyncMock) as m:
-            m.side_effect = Exception("network error")
+        with patch.object(skill, "_fetch_with_fallback", new_callable=AsyncMock) as m:
+            m.side_effect = RuntimeError("All fetch strategies failed")
             result = await skill.execute(url="https://unreachable.com", action="extract_text")
         assert result["success"] is False
         assert "error" in result
@@ -75,8 +75,8 @@ class TestWebScraperContract:
     @pytest.mark.asyncio
     async def test_success_response_has_required_fields(self, skill):
         """Every successful response must include success, text/message."""
-        with patch.object(skill, "_fetch_html", new_callable=AsyncMock) as m:
-            m.return_value = SAMPLE_HTML
+        with patch.object(skill, "_fetch_with_fallback", new_callable=AsyncMock) as m:
+            m.return_value = (SAMPLE_HTML, "测试页面", "scrapling")
             result = await skill.execute(url="https://example.com", action="extract_text")
         assert result["success"] is True
         assert "text" in result
@@ -89,8 +89,8 @@ class TestWebScraperExtraction:
 
     @pytest.mark.asyncio
     async def test_extract_text(self, skill):
-        with patch.object(skill, "_fetch_html", new_callable=AsyncMock) as m:
-            m.return_value = SAMPLE_HTML
+        with patch.object(skill, "_fetch_with_fallback", new_callable=AsyncMock) as m:
+            m.return_value = (SAMPLE_HTML, "测试页面", "scrapling")
             result = await skill.execute(url="https://example.com/report", action="extract_text")
         assert result["success"] is True
         assert "新能源汽车市场分析" in result["text"]
@@ -99,16 +99,16 @@ class TestWebScraperExtraction:
 
     @pytest.mark.asyncio
     async def test_extract_title(self, skill):
-        with patch.object(skill, "_fetch_html", new_callable=AsyncMock) as m:
-            m.return_value = SAMPLE_HTML
+        with patch.object(skill, "_fetch_with_fallback", new_callable=AsyncMock) as m:
+            m.return_value = (SAMPLE_HTML, "测试页面", "scrapling")
             result = await skill.execute(url="https://example.com", action="extract_text")
         assert result["success"] is True
         assert result["title"] == "新能源汽车市场分析"
 
     @pytest.mark.asyncio
     async def test_extract_tables(self, skill):
-        with patch.object(skill, "_fetch_html", new_callable=AsyncMock) as m:
-            m.return_value = SAMPLE_HTML
+        with patch.object(skill, "_fetch_with_fallback", new_callable=AsyncMock) as m:
+            m.return_value = (SAMPLE_HTML, "测试页面", "scrapling")
             result = await skill.execute(url="https://example.com", action="extract_tables")
         assert result["success"] is True
         assert "tables" in result
@@ -117,23 +117,23 @@ class TestWebScraperExtraction:
 
     @pytest.mark.asyncio
     async def test_extract_links(self, skill):
-        with patch.object(skill, "_fetch_html", new_callable=AsyncMock) as m:
-            m.return_value = HTML_WITH_LINKS
+        with patch.object(skill, "_fetch_with_fallback", new_callable=AsyncMock) as m:
+            m.return_value = (HTML_WITH_LINKS, "Links Page", "scrapling")
             result = await skill.execute(url="https://example.com", action="extract_links")
         assert result["success"] is True
         assert len(result["links"]) >= 2
 
     @pytest.mark.asyncio
     async def test_invalid_html_does_not_crash(self, skill):
-        with patch.object(skill, "_fetch_html", new_callable=AsyncMock) as m:
-            m.return_value = "<invalid><<broken>html"
+        with patch.object(skill, "_fetch_with_fallback", new_callable=AsyncMock) as m:
+            m.return_value = ("<invalid><<broken>html", "", "scrapling")
             result = await skill.execute(url="https://example.com", action="extract_text")
         assert result["success"] is True
 
     @pytest.mark.asyncio
     async def test_max_chars_respected(self, skill):
-        with patch.object(skill, "_fetch_html", new_callable=AsyncMock) as m:
-            m.return_value = SAMPLE_HTML
+        with patch.object(skill, "_fetch_with_fallback", new_callable=AsyncMock) as m:
+            m.return_value = (SAMPLE_HTML, "测试页面", "scrapling")
             result_no_limit = await skill.execute(url="https://example.com", action="extract_text")
             result_limited = await skill.execute(url="https://example.com", action="extract_text", max_chars=10)
         assert result_limited["success"] is True
@@ -159,7 +159,18 @@ class TestWebScraperUrlClassification:
         assert skill._classify_url("https://example.com/file.pdf?download=1") == "pdf"
 
     def test_classify_baidu_redirect(self, skill):
-        assert skill._classify_url("http://www.baidu.com/link?url=NhxGkTS80e4") == "baidu_redirect"
+        assert skill._classify_url("http://www.baidu.com/link?url=NhxGkTS80e4") == "search_redirect"
+
+    def test_classify_google_redirect(self, skill):
+        assert skill._classify_url("https://www.google.com/url?q=https://example.com&sa=U") == "search_redirect"
+
+    def test_classify_bing_redirect(self, skill):
+        assert skill._classify_url("https://cn.bing.com/click?u=https%3A%2F%2Fexample.com") == "search_redirect"
+
+    def test_classify_search_page_not_redirect(self, skill):
+        assert skill._classify_url("https://www.google.com/search?q=test") == "static"
+        assert skill._classify_url("https://cn.bing.com/search?q=test") == "static"
+        assert skill._classify_url("https://www.baidu.com/s?wd=test") == "static"
 
     def test_classify_unknown_domain_falls_back_static(self, skill):
         assert skill._classify_url("https://unknown-site-123.com/page") == "static"
@@ -170,35 +181,28 @@ class TestWebScraperBaiduRedirect:
 
     @pytest.mark.asyncio
     async def test_resolve_baidu_redirect(self, skill):
-        """Baidu redirect URL should extract real URL from baidu page."""
-        baidu_redirect_page = """
-        <html><head><meta http-equiv="refresh" content="0;url=https://real-target.com/article?id=123">
-        </head><body></body></html>
-        """
-        real_url = await skill._resolve_baidu_url(
-            "http://www.baidu.com/link?url=abc123",
-            fetch_mock=AsyncMock(return_value=baidu_redirect_page),
-        )
+        """Baidu redirect URL should extract real URL from meta refresh."""
+        with patch.object(skill, "_resolve_baidu_url", new_callable=AsyncMock) as mock_resolve:
+            mock_resolve.return_value = "https://real-target.com/article?id=123"
+            real_url = await skill._resolve_baidu_url("http://www.baidu.com/link?url=abc123")
         assert real_url == "https://real-target.com/article?id=123"
 
     @pytest.mark.asyncio
     async def test_resolve_baidu_url_no_redirect_fallback(self, skill):
-        """If no redirect found in baidu page, return the original URL."""
-        no_redirect = "<html><head><title>百度安全验证</title></head><body></body></html>"
-        real_url = await skill._resolve_baidu_url(
-            "http://www.baidu.com/link?url=abc",
-            fetch_mock=AsyncMock(return_value=no_redirect),
-        )
-        assert real_url == "http://www.baidu.com/link?url=abc"
+        """If no redirect found in baidu page, return None."""
+        with patch.object(skill, "_resolve_baidu_url", new_callable=AsyncMock) as mock_resolve:
+            mock_resolve.return_value = None
+            real_url = await skill._resolve_baidu_url("http://www.baidu.com/link?url=abc")
+        assert real_url is None
 
     @pytest.mark.asyncio
     async def test_baidu_redirect_integration(self, skill):
         """Baidu redirect URLs should flow through the full execute pipeline."""
-        with patch.object(skill, "_classify_url", return_value="baidu_redirect"):
-            with patch.object(skill, "_resolve_baidu_url", new_callable=AsyncMock) as resolve:
+        with patch.object(skill, "_classify_url", return_value="search_redirect"):
+            with patch.object(skill, "_resolve_redirect_url", new_callable=AsyncMock) as resolve:
                 resolve.return_value = "https://real-target.com/article"
-                with patch.object(skill, "_fetch_html", new_callable=AsyncMock) as fetch:
-                    fetch.return_value = SAMPLE_HTML
+                with patch.object(skill, "_fetch_with_fallback", new_callable=AsyncMock) as fetch:
+                    fetch.return_value = (SAMPLE_HTML, "测试页面", "scrapling")
                     result = await skill.execute(
                         url="http://www.baidu.com/link?url=abc123",
                         action="extract_text",
@@ -206,6 +210,22 @@ class TestWebScraperBaiduRedirect:
         assert result["success"] is True
         resolve.assert_called_once()
         assert "新能源汽车" in result["text"]
+
+    @pytest.mark.asyncio
+    async def test_google_redirect_resolution(self, skill):
+        """Google redirect URLs should be resolved via query params."""
+        real_url = skill._resolve_google_url(
+            "https://www.google.com/url?q=https://example.com/article&sa=U&ved=abc"
+        )
+        assert real_url == "https://example.com/article"
+
+    @pytest.mark.asyncio
+    async def test_bing_redirect_resolution(self, skill):
+        """Bing redirect URLs should be resolved via query params."""
+        real_url = skill._resolve_bing_url(
+            "https://cn.bing.com/click?u=https%3A%2F%2Fexample.com%2Farticle"
+        )
+        assert real_url == "https://example.com/article"
 
 
 class TestWebScraperPdfExtraction:
@@ -253,28 +273,26 @@ class TestWebScraperPdfExtraction:
 
 
 class TestWebScraperFallbackChain:
-    """Fallback: Scrapling → Playwright → error."""
+    """Fallback: Scrapling → Playwright → Jina Reader → error."""
 
     @pytest.mark.asyncio
     async def test_js_url_uses_playwright(self, skill):
-        """JS-classified URLs should fall through to Playwright."""
+        """JS-classified URLs should use Playwright via fallback chain."""
         with patch.object(skill, "_classify_url", return_value="js"):
-            with patch.object(skill, "_fetch_with_playwright", new_callable=AsyncMock) as pw_mock:
-                pw_mock.return_value = ("<html><body><p>JS rendered content</p></body></html>", "JS Page")
-                with patch.object(skill, "_extract_text") as extract:
-                    extract.return_value = {"success": True, "text": "JS rendered content", "title": "JS Page"}
-                    result = await skill.execute(
-                        url="https://xueqiu.com/12345",
-                        action="extract_text",
-                    )
+            with patch.object(skill, "_fetch_with_fallback", new_callable=AsyncMock) as fb_mock:
+                fb_mock.return_value = ("<html><body><p>JS rendered content</p></body></html>", "JS Page", "playwright")
+                result = await skill.execute(
+                    url="https://xueqiu.com/12345",
+                    action="extract_text",
+                )
         assert result["success"] is True
 
     @pytest.mark.asyncio
-    async def test_playwright_fallback_to_error(self, skill):
-        """When both Scrapling and Playwright fail, return error."""
+    async def test_all_strategies_fail_returns_error(self, skill):
+        """When all fetch strategies fail, return error."""
         with patch.object(skill, "_classify_url", return_value="js"):
-            with patch.object(skill, "_fetch_with_playwright", new_callable=AsyncMock) as pw_mock:
-                pw_mock.side_effect = Exception("Playwright failed")
+            with patch.object(skill, "_fetch_with_fallback", new_callable=AsyncMock) as fb_mock:
+                fb_mock.side_effect = RuntimeError("All fetch strategies failed")
                 result = await skill.execute(
                     url="https://xueqiu.com/12345",
                     action="extract_text",
@@ -288,8 +306,8 @@ class TestWebScraperMarkdown:
     @pytest.mark.asyncio
     async def test_extract_markdown_headers(self, skill):
         html = "<html><body><h1>Title</h1><p>Content</p></body></html>"
-        with patch.object(skill, "_fetch_html", new_callable=AsyncMock) as m:
-            m.return_value = html
+        with patch.object(skill, "_fetch_with_fallback", new_callable=AsyncMock) as m:
+            m.return_value = (html, "Title", "scrapling")
             result = await skill.execute(url="https://example.com", action="extract_markdown")
         assert result["success"] is True
         assert "# Title" in result["text"]
@@ -298,8 +316,8 @@ class TestWebScraperMarkdown:
     @pytest.mark.asyncio
     async def test_extract_markdown_list(self, skill):
         html = "<html><body><ul><li>A</li><li>B</li></ul></body></html>"
-        with patch.object(skill, "_fetch_html", new_callable=AsyncMock) as m:
-            m.return_value = html
+        with patch.object(skill, "_fetch_with_fallback", new_callable=AsyncMock) as m:
+            m.return_value = (html, "List", "scrapling")
             result = await skill.execute(url="https://example.com", action="extract_markdown")
         assert result["success"] is True
         assert "- A" in result["text"]

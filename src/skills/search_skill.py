@@ -122,7 +122,11 @@ class MultiSearchSkill(Skill):
 
     @staticmethod
     def _load_proxy() -> str:
-        """Read proxy URL from settings.yaml or env vars."""
+        """
+        Read proxy URL from settings.yaml or env vars.
+
+        Priority: env vars > settings.yaml proxy.url > settings.yaml search.proxy
+        """
         env_proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or os.environ.get("https_proxy") or os.environ.get("http_proxy")
         if env_proxy:
             return env_proxy
@@ -136,6 +140,9 @@ class MultiSearchSkill(Skill):
                 if candidate.exists():
                     with open(candidate, "r", encoding="utf-8") as f:
                         cfg = yaml.safe_load(f)
+                    val = cfg.get("proxy", {}).get("url", "")
+                    if val:
+                        return str(val)
                     val = cfg.get("search", {}).get("proxy", "")
                     if val:
                         return str(val)

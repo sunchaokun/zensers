@@ -26,6 +26,12 @@ class StockChartService:
     def __init__(self, output_dir: str = "output/charts"):
         self.generator = ChartGenerator(output_dir=output_dir)
     
+    def _extract_field(self, row: Dict, *keys) -> Any:
+        for k in keys:
+            if k in row and row[k] is not None:
+                return row[k]
+        return None
+
     async def price_chart(self, symbol: str, price_data: List[Dict]) -> Dict[str, Any]:
         """Generate price trend chart"""
         if not price_data:
@@ -35,15 +41,18 @@ class StockChartService:
             dates = []
             prices = []
             for row in price_data[:60]:
-                dates.append(str(row.get("date", ""))[-5:])
-                close = row.get("close", row.get("close", 0))
+                date_val = self._extract_field(row, "date", "日期", "trade_date")
+                dates.append(str(date_val)[-5:] if date_val else "")
+                close = self._extract_field(row, "close", "收盘", "close_price")
                 prices.append(float(close) if close else 0)
             
             config = ChartConfig(
                 chart_type=ChartType.LINE,
                 title=f"{symbol} Price Trend",
-                data={symbol: prices},
-                x_labels=dates,
+                data={
+                    "years": dates,
+                    "scenarios": {symbol: prices},
+                },
                 xlabel="Date",
                 ylabel="Close Price",
                 source="akshare/Stock Quotes",
@@ -66,9 +75,9 @@ class StockChartService:
             net_profit = []
             
             for row in income[:8]:
-                periods.append(str(row.get("period", ""))[-7:])
-                rev = row.get("revenue", 0)
-                np_ = row.get("net_profit", 0)
+                periods.append(str(self._extract_field(row, "period", "报告期", "REPORT_DATE", "截止日期", ""))[-7:])
+                rev = self._extract_field(row, "revenue", "营业总收入", "营业收入", "TOTAL_OPERATE_INCOME")
+                np_ = self._extract_field(row, "net_profit", "净利润", "归属净利润", "NET_PROFIT", "PARENT_NETPROFIT")
                 revenue.append(float(rev) if rev else 0)
                 net_profit.append(float(np_) if np_ else 0)
             
@@ -79,10 +88,12 @@ class StockChartService:
                 chart_type=ChartType.BAR_LINE,
                 title=f"{symbol} Revenue & Net Profit Trend",
                 data={
-                    "Revenue": revenue,
-                    "Net Profit": net_profit,
+                    "years": periods,
+                    "bar": revenue,
+                    "line": net_profit,
+                    "bar_label": "Revenue",
+                    "line_label": "Net Profit",
                 },
-                x_labels=periods,
                 xlabel="Period",
                 ylabel="Amount (CNY)",
                 source="akshare/Financial Statements",
@@ -102,8 +113,9 @@ class StockChartService:
             dates = []
             prices = []
             for row in price_data[:120]:
-                dates.append(str(row.get("date", ""))[-5:])
-                close = row.get("close", row.get("close", 0))
+                date_val = self._extract_field(row, "date", "日期", "trade_date")
+                dates.append(str(date_val)[-5:] if date_val else "")
+                close = self._extract_field(row, "close", "收盘", "close_price")
                 prices.append(float(close) if close else 0)
             
             if not prices:
@@ -117,11 +129,13 @@ class StockChartService:
                 chart_type=ChartType.LINE,
                 title=f"{symbol} Price & Valuation Band",
                 data={
-                    "Close Price": prices,
-                    "Upper Band": [upper] * len(prices),
-                    "Lower Band": [lower] * len(prices),
+                    "years": dates,
+                    "scenarios": {
+                        "Close Price": prices,
+                        "Upper Band": [upper] * len(prices),
+                        "Lower Band": [lower] * len(prices),
+                    },
                 },
-                x_labels=dates,
                 xlabel="Date",
                 ylabel="Price",
                 source="akshare/Stock Quotes",

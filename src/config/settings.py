@@ -207,6 +207,17 @@ class ConversationConfig:
 
 
 @dataclass
+class ChartPlannerConfig:
+    """Chart Planner Configuration"""
+    enabled: bool = True
+    max_per_section: int = 2
+    min_confidence: float = 0.5
+    data_fetch_timeout: int = 30
+    max_data_retries: int = 2
+    max_data_days: int = 365
+
+
+@dataclass
 class QualityConfig:
     """Quality Control Configuration"""
     # Quality thresholds
@@ -269,6 +280,7 @@ class Settings:
         self.system = SystemConfig()
         self.quality = QualityConfig()
         self.conversation = ConversationConfig()
+        self.chart_planner = ChartPlannerConfig()
 
         self.llm_profiles = LLMProfileRegistry(default_profile="migrated")
 

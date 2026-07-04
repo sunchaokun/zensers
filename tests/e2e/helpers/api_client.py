@@ -203,35 +203,58 @@ class ZensersClient:
     async def wait_for_research_result(
         self,
         task_id: str,
-        timeout: float = 900,
-        poll_interval: float = 10,
+        timeout: float = 1800,
+        poll_interval: float = 30,
     ) -> Dict[str, Any]:
+        from src.core.session_manager import SessionManager
         elapsed = 0.0
+        last_progress = -1.0
+        stall_count = 0
         while elapsed < timeout:
-            detail = await self.get_research_detail(task_id)
-            result = detail.get("result", {})
-            result_status = result.get("status", "")
-            session_status = detail.get("status", "")
-            if result_status in ("completed", "completed_with_warnings"):
-                return detail
-            if result_status in ("failed", "error", "cancelled"):
-                return detail
-            if session_status in ("completed",):
-                return detail
-            if result.get("report", {}).get("sections"):
-                from src.core.session_manager import SessionManager
+            try:
+                status = await self.get_status(task_id)
+            except Exception:
+                await asyncio.sleep(poll_interval)
+                elapsed += poll_interval
+                continue
+            cur = status.get("status", "unknown")
+            prog = status.get("progress", 0)
+            if cur in ("completed", "completed_with_warnings"):
+                return await self.get_research_detail(task_id)
+            if cur in ("failed", "error", "cancelled"):
+                return await self.get_research_detail(task_id)
+            if prog == last_progress:
+                stall_count += 1
+            else:
+                stall_count = 0
+                last_progress = prog
+            if stall_count >= 10:
                 sm = SessionManager.get_instance()
                 session = sm.get(task_id)
                 if session:
                     rr = session.get("research_result", {})
-                    rr_status = rr.get("status", "")
-                    if rr_status in ("completed", "completed_with_warnings"):
-                        detail["result"] = rr
-                        return detail
+                    if rr.get("status") in ("completed", "completed_with_warnings"):
+                        return await self.get_research_detail(task_id)
                     if rr.get("report", {}).get("sections"):
                         rr["status"] = rr.get("status") or "completed_with_warnings"
-                        detail["result"] = rr
-                        return detail
+                        session["research_result"] = rr
+                        return await self.get_research_detail(task_id)
+            if cur == "paused" and stall_count >= 3:
+                sm = SessionManager.get_instance()
+                session = sm.get(task_id)
+                if session:
+                    rr = session.get("research_result", {})
+                    if rr.get("status") in ("completed", "completed_with_warnings"):
+                        return await self.get_research_detail(task_id)
+                    session_status = session.get("status", "")
+                    if session_status in ("completed", "completed_with_warnings"):
+                        return await self.get_research_detail(task_id)
             await asyncio.sleep(poll_interval)
             elapsed += poll_interval
+        sm = SessionManager.get_instance()
+        session = sm.get(task_id)
+        if session:
+            rr = session.get("research_result", {})
+            if rr.get("status") in ("completed", "completed_with_warnings") or rr.get("report", {}).get("sections"):
+                return await self.get_research_detail(task_id)
         return {"status": "timeout", "task_id": task_id, "elapsed": elapsed}

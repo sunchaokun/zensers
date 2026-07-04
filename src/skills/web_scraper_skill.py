@@ -1,41 +1,111 @@
 """
-WebScraperSkill - Web Content Scraping Skill (v3.0)
+WebScraperSkill - Web Content Scraping Skill (v4.0)
 
-Multi-strategy content fetching:
-1. Static pages → httpx + BeautifulSoup (fast, no overhead)
-2. JS-rendered pages → Playwright (headless Chromium)
-3. PDF files → pdfplumber
-4. Baidu redirect links → extract real URL then re-classify
+Three-layer architecture:
+1. URL resolution  → strip search-engine redirects (Google/Bing/Baidu/Sogou/360/generic)
+2. Fetch strategy  → Scrapling → Playwright → Jina Reader (fallback chain)
+3. Content extract → text / markdown / tables / links
 """
 import asyncio
 import logging
 import re
-from typing import Any, Dict, List, Optional
-from urllib.parse import urljoin, urlparse
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import parse_qs, urljoin, urlparse, unquote
 
 from src.skills.base import Skill, SkillConfig
 
 logger = logging.getLogger(__name__)
 
 
-# Domains known to require JavaScript rendering
 JS_DOMAINS = [
     "eastmoney.com", "10jqka.com.cn", "xueqiu.com",
     "caifuhao.eastmoney.com", "sohu.com",
     "36kr.com", "hstong.com",
 ]
 
+_REDIRECT_DOMAINS = {
+    "google.com", "www.google.com",
+    "google.com.hk", "www.google.com.hk",
+    "bing.com", "cn.bing.com", "www.bing.com",
+    "baidu.com", "www.baidu.com",
+    "sogou.com", "www.sogou.com",
+    "so.com", "www.so.com",
+}
+
+_REDIRECT_PATHS = {
+    "/url", "/search/url", "/imgres",
+    "/link", "/click",
+    "/LINGROB/",
+}
+
+
+def _is_search_redirect(url: str) -> bool:
+    """Check if URL is a search-engine redirect (not a search results page)."""
+    parsed = urlparse(url)
+    path = parsed.path
+    for rp in _REDIRECT_PATHS:
+        if path.startswith(rp) or rp in path:
+            return True
+    return False
+
 
 class WebScraperSkill(Skill):
     """
-    Web Scraper Skill (v3.0)
+    Web Scraper Skill (v4.0)
 
-    Auto-routes URLs to the appropriate fetch strategy:
-    - Static HTML → httpx
-    - JS-heavy sites → Playwright
-    - PDF files → pdfplumber
-    - Baidu redirects → resolve then re-route
+    Three-layer pipeline:
+    - Layer 1: URL resolution (search-engine redirect → real URL)
+    - Layer 2: Fetch with fallback chain (Scrapling → Playwright → Jina Reader)
+    - Layer 3: Content extraction (text/markdown/tables/links)
     """
+
+    def __init__(self, config: Optional[SkillConfig] = None):
+        super().__init__(config)
+        self._proxy = self._load_proxy()
+
+    @staticmethod
+    def _load_proxy() -> str:
+        """
+        Read proxy URL from settings.yaml or env vars.
+
+        Priority: env vars > settings.yaml proxy.url > settings.yaml search.proxy
+        """
+        import os
+        env_proxy = (
+            os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
+            or os.environ.get("https_proxy") or os.environ.get("http_proxy")
+        )
+        if env_proxy:
+            return env_proxy
+        try:
+            import yaml
+            from pathlib import Path
+            for candidate in (
+                Path("config/settings.yaml"),
+                Path(__file__).resolve().parent.parent.parent / "config" / "settings.yaml",
+            ):
+                if candidate.exists():
+                    with open(candidate, "r", encoding="utf-8") as f:
+                        cfg = yaml.safe_load(f)
+                    # Global proxy first
+                    val = cfg.get("proxy", {}).get("url", "")
+                    if val:
+                        return str(val)
+                    # Legacy search.proxy fallback
+                    val = cfg.get("search", {}).get("proxy", "")
+                    if val:
+                        return str(val)
+        except Exception:
+            pass
+        return ""
+
+    def _httpx_client(self, timeout: int = 30, follow_redirects: bool = True, **kwargs):
+        """Create an httpx AsyncClient with proxy if configured."""
+        import httpx
+        client_kwargs = {"timeout": timeout, "follow_redirects": follow_redirects, **kwargs}
+        if self._proxy:
+            client_kwargs["proxy"] = self._proxy
+        return httpx.AsyncClient(**client_kwargs)
 
     @property
     def name(self) -> str:
@@ -50,7 +120,7 @@ class WebScraperSkill(Skill):
             "Supports markdown/text extraction, auto-filters ads and navigation."
         )
 
-    # ── URL classification ──────────────────────────────────────────
+    # ── Layer 1: URL classification ──────────────────────────────────
 
     @staticmethod
     def _classify_url(url: str) -> str:
@@ -58,62 +128,274 @@ class WebScraperSkill(Skill):
         path = urlparse(url).path.lower()
         if url.endswith(".pdf") or ".pdf?" in url or path.endswith(".pdf"):
             return "pdf"
-        if "baidu.com/link?" in url:
-            return "baidu_redirect"
         domain = urlparse(url).netloc.lower()
+        if domain in _REDIRECT_DOMAINS:
+            if _is_search_redirect(url):
+                return "search_redirect"
         for js_domain in JS_DOMAINS:
             if js_domain in domain:
                 return "js"
         return "static"
 
-    # ── Baidu redirect resolution ───────────────────────────────────
+    # ── Layer 1: Search-engine redirect resolution ────────────────────
 
-    async def _resolve_baidu_url(
-        self,
-        url: str,
-        fetch_mock: Optional[Any] = None,
-    ) -> str:
-        """
-        Resolve a Baidu redirect URL to the real target URL.
+    @staticmethod
+    def _resolve_google_url(url: str) -> Optional[str]:
+        """Resolve Google redirect: /url?q=REAL_URL&sa=..."""
+        parsed = urlparse(url)
+        if parsed.path not in ("/url", "/search/url", "/imgres"):
+            return None
+        qs = parse_qs(parsed.query)
+        real = qs.get("q", qs.get("url", qs.get("imgurl", [])))
+        if real and real[0].startswith("http"):
+            return unquote(real[0])
+        return None
 
-        Args:
-            url: Baidu redirect URL (http://www.baidu.com/link?url=...)
-            fetch_mock: Optional mock for testing (async callable returning HTML)
+    @staticmethod
+    def _resolve_bing_url(url: str) -> Optional[str]:
+        """Resolve Bing redirect via query params or /LINGROB/ path."""
+        parsed = urlparse(url)
+        if "/LINGROB/" in parsed.path or parsed.path.startswith("/click"):
+            qs = parse_qs(parsed.query)
+            real = qs.get("u", [])
+            if real:
+                return unquote(real[0])
+        return None
 
-        Returns:
-            Real target URL, or original URL if resolution fails.
-        """
+    @staticmethod
+    def _resolve_sogou_url(url: str) -> Optional[str]:
+        """Resolve Sogou redirect: /link?url=REAL_URL"""
+        parsed = urlparse(url)
+        qs = parse_qs(parsed.query)
+        real = qs.get("url", [])
+        if real and real[0].startswith("http"):
+            return unquote(real[0])
+        return None
+
+    @staticmethod
+    def _resolve_360_url(url: str) -> Optional[str]:
+        """Resolve 360 search redirect: /link?url=REAL_URL"""
+        parsed = urlparse(url)
+        qs = parse_qs(parsed.query)
+        real = qs.get("url", qs.get("q", []))
+        if real and real[0].startswith("http"):
+            return unquote(real[0])
+        return None
+
+    async def _resolve_baidu_url(self, url: str) -> Optional[str]:
+        """Resolve Baidu redirect: /link?url=... via HTTP meta/js parsing."""
         try:
-            if fetch_mock is not None:
-                html = await fetch_mock(url)
-            else:
-                import httpx
-                headers = {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                    "Accept-Language": "zh-CN,zh;q=0.9",
-                }
-                async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
-                    resp = await client.get(url, headers=headers)
-                    html = resp.text
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Accept-Language": "zh-CN,zh;q=0.9",
+            }
+            async with self._httpx_client(timeout=10, follow_redirects=False) as client:
+                resp = await client.get(url, headers=headers)
+                html = resp.text
 
-            # Try meta refresh redirect first
             m = re.search(
                 r'<meta\s+http-equiv=["\']refresh["\']\s+content=["\']\d+;url=([^"\']+)["\']',
-                html,
-                re.IGNORECASE,
+                html, re.IGNORECASE,
             )
             if m:
                 return m.group(1).strip()
 
-            # Try window.location redirect
             m = re.search(r'window\.location(?:\s*=\s*|\.href\s*=\s*["\'])([^"\'\s;]+)', html)
             if m:
                 return m.group(1).strip()
-
         except Exception as e:
             logger.debug(f"Baidu redirect resolution failed: {e}")
+        return None
+
+    async def _resolve_redirect_url(self, url: str) -> str:
+        """
+        Unified redirect resolution: detect search-engine redirect URLs
+        and extract the real target URL.
+
+        Falls back to HTTP HEAD follow-redirect for unknown redirect patterns.
+        """
+        parsed = urlparse(url)
+        domain = parsed.netloc.lower()
+
+        resolved = None
+
+        # Google
+        if domain in ("google.com", "www.google.com",
+                       "google.com.hk", "www.google.com.hk"):
+            resolved = self._resolve_google_url(url)
+
+        # Bing
+        elif domain in ("bing.com", "cn.bing.com", "www.bing.com"):
+            resolved = self._resolve_bing_url(url)
+
+        # Baidu
+        elif domain in ("baidu.com", "www.baidu.com"):
+            resolved = await self._resolve_baidu_url(url)
+
+        # Sogou
+        elif domain in ("sogou.com", "www.sogou.com"):
+            resolved = self._resolve_sogou_url(url)
+
+        # 360
+        elif domain in ("so.com", "www.so.com"):
+            resolved = self._resolve_360_url(url)
+
+        # Generic fallback: HTTP HEAD follow-redirect
+        if resolved is None and domain in _REDIRECT_DOMAINS:
+            resolved = await self._resolve_via_head(url)
+
+        if resolved:
+            logger.info(f"Redirect resolved: {url[:60]} -> {resolved[:60]}")
+            return resolved
 
         return url
+
+    async def _resolve_via_head(self, url: str) -> Optional[str]:
+        """Follow HTTP redirects (HEAD) to find the final URL."""
+        try:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            }
+            async with self._httpx_client(
+                timeout=10, follow_redirects=True, max_redirects=5
+            ) as client:
+                resp = await client.head(url, headers=headers)
+                final_url = str(resp.url)
+                if final_url != url:
+                    return final_url
+        except Exception as e:
+            logger.debug(f"HEAD redirect resolution failed: {e}")
+        return None
+
+    # ── Layer 2: Fetch strategies ────────────────────────────────────
+
+    async def _fetch_html(self, url: str, timeout: int = 30) -> str:
+        """Fetch a static HTML page via Scrapling (auto anti-bot detection)."""
+        from scrapling.fetchers.requests import AsyncFetcher
+
+        response = await AsyncFetcher.get(url)
+        if response is None:
+            raise IOError(f"Scrapling returned None: {url}")
+        if response.status >= 400:
+            raise IOError(f"HTTP {response.status}: {url}")
+        return response.body.decode(response.encoding or "utf-8")
+
+    async def _fetch_with_playwright(self, url: str, timeout: int = 30) -> Tuple[str, str]:
+        """
+        Fetch a JS-rendered page via Playwright.
+
+        Returns:
+            (html_string, title_string)
+        """
+        from playwright.async_api import async_playwright
+
+        launch_opts: dict = {"headless": True}
+        if self._proxy:
+            launch_opts["proxy"] = {"server": self._proxy}
+
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(**launch_opts)
+            try:
+                page = await browser.new_page()
+                await page.goto(url, timeout=timeout * 1000, wait_until="networkidle")
+                html = await page.content()
+                title = await page.title()
+                return html, title
+            finally:
+                await browser.close()
+
+    async def _fetch_with_jina(self, url: str, timeout: int = 30) -> str:
+        """Fetch via Jina Reader as last-resort fallback (returns markdown)."""
+        jina_url = f"https://r.jina.ai/{url}"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "text/plain",
+        }
+        async with self._httpx_client(timeout=timeout, follow_redirects=True) as client:
+            resp = await client.get(jina_url, headers=headers)
+            resp.raise_for_status()
+            return resp.text
+
+    async def _fetch_pdf(self, url: str, timeout: int = 30) -> Tuple[str, str]:
+        """
+        Fetch and extract text from a PDF file.
+
+        Returns:
+            (text_string, title_string)
+        """
+        import pdfplumber
+        import io
+
+        async with self._httpx_client(timeout=timeout, follow_redirects=True) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+
+        title = url.split("/")[-1] if "/" in url else url
+        text_parts = []
+        with pdfplumber.open(io.BytesIO(resp.content)) as pdf:
+            for page in pdf.pages:
+                t = page.extract_text()
+                if t:
+                    text_parts.append(t)
+
+        return "\n".join(text_parts), title
+
+    async def _fetch_with_fallback(
+        self, url: str, url_type: str, timeout: int = 30
+    ) -> Tuple[str, str, str]:
+        """
+        Execute fetch with full fallback chain.
+
+        Returns:
+            (html_or_text, title, strategy_used)
+        """
+        errors = []
+
+        if url_type == "js":
+            strategies = [
+                ("playwright", self._fetch_with_playwright),
+                ("jina", self._fetch_with_jina),
+            ]
+        else:
+            strategies = [
+                ("scrapling", self._fetch_html_as_tuple),
+                ("playwright", self._fetch_with_playwright),
+                ("jina", self._fetch_with_jina_as_tuple),
+            ]
+
+        for strategy_name, fetch_fn in strategies:
+            try:
+                result = await fetch_fn(url, timeout)
+                logger.info(f"Fetched {url[:50]} via {strategy_name}")
+                if isinstance(result, tuple):
+                    return result[0], result[1], strategy_name
+                return result, "", strategy_name
+            except Exception as e:
+                errors.append(f"{strategy_name}: {e}")
+                logger.debug(f"Strategy {strategy_name} failed for {url[:50]}: {e}")
+                continue
+
+        raise RuntimeError(
+            f"All fetch strategies failed for {url}: {'; '.join(errors)}"
+        )
+
+    async def _fetch_html_as_tuple(
+        self, url: str, timeout: int = 30
+    ) -> Tuple[str, str]:
+        """Wrapper so _fetch_html returns (html, title) like Playwright."""
+        html = await self._fetch_html(url, timeout)
+        title_match = re.search(r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
+        title = title_match.group(1).strip() if title_match else ""
+        return html, title
+
+    async def _fetch_with_jina_as_tuple(
+        self, url: str, timeout: int = 30
+    ) -> Tuple[str, str]:
+        """Wrapper so Jina returns (text, title) like Playwright."""
+        text = await self._fetch_with_jina(url, timeout)
+        title_match = re.search(r"^#\s+(.+)$", text, re.MULTILINE)
+        title = title_match.group(1).strip() if title_match else ""
+        return text, title
 
     # ── Main execute ────────────────────────────────────────────────
 
@@ -138,94 +420,46 @@ class WebScraperSkill(Skill):
         if handler is None:
             return self._failure(f"Unsupported action: {action}")
 
-        # URL classification & resolution
+        # Layer 1: URL resolution
         url_type = self._classify_url(url)
-        if url_type == "baidu_redirect":
-            resolved = await self._resolve_baidu_url(url)
+        original_url = url
+        if url_type == "search_redirect":
+            resolved = await self._resolve_redirect_url(url)
             if resolved != url:
-                logger.info(f"Baidu redirect resolved: {url[:50]} -> {resolved[:50]}")
                 url = resolved
                 url_type = self._classify_url(url)
 
-        # Fetch by type
+        # Layer 2+3: Fetch & extract
         try:
             if url_type == "pdf":
                 text, title = await self._fetch_pdf(url, timeout)
                 if max_chars and len(text) > max_chars:
                     text = text[:max_chars] + "\n...[content truncated]"
                 return self._success(
-                    {"text": text, "title": title, "url": url, "content_length": len(text)},
+                    {
+                        "text": text, "title": title,
+                        "url": url, "original_url": original_url,
+                        "content_length": len(text),
+                    },
                     "PDF extraction successful",
                 )
 
-            if url_type == "js":
-                html, title = await self._fetch_with_playwright(url, timeout)
-            else:
-                html = await self._fetch_html(url, timeout)
+            html, title, strategy = await self._fetch_with_fallback(url, url_type, timeout)
 
-            return await handler(html, url, max_chars)
+            result = await handler(html, url, max_chars)
+            if result.get("success"):
+                data = result.get("result", result)
+                if isinstance(data, dict):
+                    data["original_url"] = original_url
+                    data["fetch_strategy"] = strategy
+                    if url != original_url:
+                        data["resolved_url"] = url
+            return result
 
         except Exception as e:
             return self._failure(str(e), "Web scraping failed")
 
-    # ── Fetch strategies ────────────────────────────────────────────
-
-    async def _fetch_html(self, url: str, timeout: int = 30) -> str:
-        """Fetch a static HTML page via Scrapling (auto anti-bot detection)."""
-        from scrapling.fetchers.requests import AsyncFetcher
-
-        fetcher = AsyncFetcher.configure(adaptive=True)
-        response = await fetcher.get(url)
-        if response.status >= 400:
-            raise IOError(f"HTTP {response.status} {response.reason}: {url}")
-        return response.body.decode(response.encoding or "utf-8")
-
-    async def _fetch_with_playwright(self, url: str, timeout: int = 30) -> tuple:
-        """
-        Fetch a JS-rendered page via Playwright.
-
-        Returns:
-            (html_string, title_string)
-        """
-        from playwright.async_api import async_playwright
-
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            try:
-                page = await browser.new_page()
-                await page.goto(url, timeout=timeout * 1000, wait_until="networkidle")
-                html = await page.content()
-                title = await page.title()
-                return html, title
-            finally:
-                await browser.close()
-
-    async def _fetch_pdf(self, url: str, timeout: int = 30) -> tuple:
-        """
-        Fetch and extract text from a PDF file.
-
-        Returns:
-            (text_string, title_string)
-        """
-        import httpx
-        import pdfplumber
-        import io
-
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
-
-        title = url.split("/")[-1] if "/" in url else url
-        text_parts = []
-        with pdfplumber.open(io.BytesIO(resp.content)) as pdf:
-            for page in pdf.pages:
-                t = page.extract_text()
-                if t:
-                    text_parts.append(t)
-
-        return "\n".join(text_parts), title
-
-    # ── Content extraction (unchanged from v2) ──────────────────────
+    # ── Layer 3: Content extraction ──────────────────────────────────
 
     async def _extract_text(
         self, html: str, url: str, max_chars: Optional[int] = None

@@ -143,7 +143,7 @@ class TestBYDFinancialQuickStart:
             template_id="company_analysis",
             auto_confirm=True,
             region="China",
-            time_range="Last 3 years",
+            time_range="Last 1 year",
         )
         assert_no_error(qs_result, "quick_start")
         session_id = assert_session_id(qs_result)

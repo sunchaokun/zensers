@@ -308,20 +308,41 @@ class ContentOrchestrator:
                                 if os.path.abspath(resolved_path) != os.path.abspath(dst_str):
                                     import shutil
                                     shutil.copy2(resolved_path, dst_str)
-                                resolved.append({"path": f"charts/{dst.name}", "caption": c.get("caption", "")})
+                                resolved.append({
+                                    "path": f"charts/{dst.name}",
+                                    "caption": c.get("caption", ""),
+                                    "insertion_anchor": c.get("insertion_anchor", ""),
+                                    "anchor_type": c.get("anchor_type", "section_end"),
+                                    "title": c.get("title", ""),
+                                    "chart_type": c.get("chart_type", "bar"),
+                                })
                             else:
                                 # Legacy base64 mode: embed image data in HTML
                                 with open(resolved_path, "rb") as f:
                                     b64 = base64.b64encode(f.read()).decode()
                                 ext = os.path.splitext(resolved_path)[1].lower()
                                 mime = "image/png" if ext == ".png" else "image/jpeg"
-                                resolved.append({"path": f"data:{mime};base64,{b64}", "caption": c.get("caption", "")})
+                                resolved.append({
+                                    "path": f"data:{mime};base64,{b64}",
+                                    "caption": c.get("caption", ""),
+                                    "insertion_anchor": c.get("insertion_anchor", ""),
+                                    "anchor_type": c.get("anchor_type", "section_end"),
+                                    "title": c.get("title", ""),
+                                    "chart_type": c.get("chart_type", "bar"),
+                                })
                         except Exception:
                             logger.exception("Chart processing failed")
                             resolved.append(c)
                     else:
                         resolved.append(c)
-                section_dict["charts"] = resolved
+                
+                # HTML: anchor-based insertion into content
+                section_dict["content"] = self._insert_charts_into_html(
+                    section_dict["content"],
+                    resolved,
+                    section.content or "",
+                )
+                section_dict["charts"] = []
             else:
                 section_dict["charts"] = charts_data  # DOCX/PPTX: pass through (template skips)
             
@@ -405,6 +426,201 @@ class ContentOrchestrator:
         if not os.path.isabs(path):
             return (Path(__file__).resolve().parent.parent.parent / path).exists()
         return False
+
+    def _insert_charts_into_html(
+        self,
+        html: str,
+        charts: List[Dict[str, Any]],
+        original_content: str,
+    ) -> str:
+        """
+        在 HTML 中插入图表（锚点定位）
+
+        Args:
+            html: 已转换的 HTML 内容
+            charts: 图表信息列表（含 insertion_anchor, anchor_type, path, caption）
+            original_content: 原始 Markdown 内容（用于锚点定位）
+        """
+        if not charts:
+            return html
+
+        md_lines = original_content.split("\n")
+        html_lines = html.split("\n")
+
+        # Step 1: Build mapping from MD line number -> HTML line range
+        # Strategy: parse top-level HTML blocks and map them sequentially
+        # to non-empty MD lines (table blocks span multiple MD lines)
+        md_nonempty_indices = []
+        for md_line_no, md_line in enumerate(md_lines):
+            if md_line.strip():
+                md_nonempty_indices.append(md_line_no)
+
+        # Parse top-level HTML blocks: each starts with a top-level tag
+        html_blocks = []
+        i = 0
+        while i < len(html_lines):
+            line = html_lines[i].strip()
+            if not line:
+                i += 1
+                continue
+
+            start = i
+            # Detect multi-line blocks by opening tag
+            if "<table" in line:
+                while i < len(html_lines) and "</table>" not in html_lines[i]:
+                    i += 1
+                i += 1  # include the </table> line
+            elif "<figure" in line:
+                while i < len(html_lines) and "</figure>" not in html_lines[i]:
+                    i += 1
+                i += 1
+            elif line.startswith("<"):
+                i += 1  # single-line HTML element
+            else:
+                i += 1  # fallback
+
+            html_blocks.append((start, i - 1))
+
+        # Map MD non-empty lines to HTML blocks sequentially
+        # A table in MD spans multiple non-empty lines but maps to one HTML block
+        md_to_html_range: Dict[int, Tuple[int, int]] = {}
+        md_idx = 0
+        blk_idx = 0
+
+        while md_idx < len(md_nonempty_indices) and blk_idx < len(html_blocks):
+            md_line_no = md_nonempty_indices[md_idx]
+            md_line = md_lines[md_line_no].strip()
+            blk_start, blk_end = html_blocks[blk_idx]
+
+            # Check if this MD line starts a table block
+            is_table_start = bool(re.match(r"^\|(.+)\|$", md_line))
+            if is_table_start:
+                # Collect all consecutive pipe lines
+                table_md_lines = [md_line_no]
+                j = md_idx + 1
+                while j < len(md_nonempty_indices):
+                    next_line = md_lines[md_nonempty_indices[j]].strip()
+                    if re.match(r"^\|(.+)\|$", next_line):
+                        table_md_lines.append(md_nonempty_indices[j])
+                        j += 1
+                    else:
+                        break
+                # All these MD lines map to this single HTML block
+                for tmd in table_md_lines:
+                    md_to_html_range[tmd] = (blk_start, blk_end)
+                md_idx = j
+                blk_idx += 1
+            else:
+                # Single MD line -> single HTML block
+                md_to_html_range[md_line_no] = (blk_start, blk_end)
+                md_idx += 1
+                blk_idx += 1
+
+        # Step 2: Find anchor positions in MD
+        anchor_line_map: Dict[int, Optional[int]] = {}
+
+        for idx, chart in enumerate(charts):
+            anchor = chart.get("insertion_anchor", "")
+            anchor_type = chart.get("anchor_type", "section_end")
+
+            if anchor_type == "section_start":
+                anchor_line_map[idx] = 0
+                continue
+
+            if anchor_type == "section_end" or not anchor:
+                anchor_line_map[idx] = None
+                continue
+
+            best_line = None
+            if anchor_type == "after_table":
+                anchor_md_line = None
+                for line_no, line in enumerate(md_lines):
+                    if anchor in line:
+                        anchor_md_line = line_no
+                        break
+                if anchor_md_line is None:
+                    core_words = self._extract_core_words(anchor)
+                    for word in core_words[:3]:
+                        for line_no, line in enumerate(md_lines):
+                            if word in line:
+                                anchor_md_line = line_no
+                                break
+                        if anchor_md_line is not None:
+                            break
+                if anchor_md_line is not None:
+                    for line_no in range(anchor_md_line, len(md_lines)):
+                        if re.match(r"^\|(.+)\|$", md_lines[line_no].strip()):
+                            best_line = line_no
+                            break
+            else:
+                for line_no, line in enumerate(md_lines):
+                    if anchor in line:
+                        best_line = line_no
+                        break
+
+                if best_line is None:
+                    core_words = self._extract_core_words(anchor)
+                    for word in core_words[:3]:
+                        for line_no, line in enumerate(md_lines):
+                            if word in line:
+                                best_line = line_no
+                                break
+                        if best_line is not None:
+                            break
+
+            anchor_line_map[idx] = best_line
+
+        # Step 3: Determine insert positions
+        insertions: List[Tuple[int, str]] = []
+
+        for idx, chart in enumerate(charts):
+            chart_html = self._render_chart_figure(chart)
+            md_line = anchor_line_map.get(idx)
+            chart_anchor_type = chart.get("anchor_type", "section_end")
+
+            if md_line is None:
+                insertions.append((len(html_lines), chart_html))
+            elif md_line == 0 and chart_anchor_type == "section_start":
+                insertions.append((0, chart_html))
+            else:
+                html_range = md_to_html_range.get(md_line)
+                if html_range is not None:
+                    insert_after = html_range[1] + 1
+                    insertions.append((insert_after, chart_html))
+                else:
+                    insertions.append((len(html_lines), chart_html))
+
+        # Insert from back to front to avoid index shifting
+        # Use enumerated index to break ties (preserve original chart order at same position)
+        indexed_insertions = list(enumerate(insertions))
+        for enum_idx, (pos, chart_html) in sorted(
+            indexed_insertions, key=lambda x: (x[1][0], x[0]), reverse=True
+        ):
+            if 0 <= pos <= len(html_lines):
+                html_lines.insert(pos, chart_html)
+
+        return "\n".join(html_lines)
+
+    def _extract_core_words(self, anchor: str) -> List[str]:
+        chinese_words = re.findall(r"[\u4e00-\u9fff]{2,4}", anchor)
+        if chinese_words:
+            return chinese_words
+        english_words = re.findall(r"[a-zA-Z]{3,}", anchor)
+        return english_words
+
+    def _render_chart_figure(self, chart: Dict[str, Any]) -> str:
+        """渲染单个图表为HTML figure元素"""
+        path = chart.get("path", "")
+        caption = chart.get("caption", "")
+        title = chart.get("title", "")
+        alt_text = html.escape(caption or title or "Chart")
+        safe_path = html.escape(path, quote=True)
+        return (
+            f'<figure class="chart-container">'
+            f'<img src="{safe_path}" alt="{alt_text}" style="max-width:100%">'
+            f'<figcaption class="figure-caption">{html.escape(caption)}</figcaption>'
+            f'</figure>'
+        )
 
     @staticmethod
     def _parse_markdown_title(content: str) -> Dict[str, Any]:
