@@ -10,7 +10,7 @@
 
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-green.svg)]()
-[![Version](https://img.shields.io/badge/version-2.1.1-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-2.4.0-blue.svg)]()
 [![Next.js 14](https://img.shields.io/badge/Next.js-14-black.svg)]()
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-teal.svg)]()
 
@@ -34,7 +34,7 @@
 |---|---|
 | **10x 效率提升** | 数周的研究工作压缩至数小时，从需求到成品报告一键生成 |
 | **数据可信** | 多源交叉验证 + 来源白名单 + 事实溯源，宁可标注不确定也不传播错误 |
-| **专业级输出** | 麦肯锡风格排版，10 种专业图表，DOCX/PPTX/PDF/Markdown 多格式导出 |
+| **专业级输出** | 麦肯锡风格排版，12 种专业图表，DOCX/PPTX/PDF/Markdown 多格式导出 |
 | **持续进化** | 双轨学习系统（Wisdom + Knowledge），每次研究都让系统更聪明 |
 
 ---
@@ -58,6 +58,7 @@ Zensers 编排一支专业 Agent 团队，每个 Agent 负责研究流程中的�
 | QualityCheckAgent | 数据准确性、内容完整性、逻辑连贯性、格式规范 |
 | ResultCalibrationAgent | 结果校准、数据修补、质量收敛 |
 | DocumentGenerationAgent | Word/PPT/PDF/HTML 多格式专业排版输出 |
+| ChartPlannerAgent | 报告内容分析、主动数据获取、12种专业图表规划与生成 |
 | SurveyAnalysisAgent | 问卷数据分析与可视化 |
 
 ### 七层架构
@@ -109,7 +110,7 @@ Zensers 的约束层确保研究质量，而非盲目信任 LLM 输出：
 | HTML | 响应式布局、样式表、图表嵌入 |
 | Markdown | 结构化文本、图表描述 |
 
-支持 10 种专业图表：柱状图、水平柱状图、柱线组合图、饼图、折线图、雷达图、散点图、气泡图、瀑布图、象限图
+支持 12 种专业图表：柱状图、水平柱状图、柱线组合图、饼图、折线图、雷达图、散点图、气泡图、瀑布图、象限图、分组柱状图、多实体雷达图
 
 ### 研究框架
 
@@ -213,7 +214,7 @@ result = await orchestrator.research("分析中国新能源汽车市场", intera
 | 图表 | matplotlib · seaborn · plotly |
 | 存储 | SQLite · PostgreSQL · Redis · WAL |
 | 协议 | MCP (Model Context Protocol) |
-| 测试 | pytest · 439+ 测试用例 |
+| 测试 | pytest · 2,200+ 测试用例 |
 
 ---
 
@@ -221,13 +222,13 @@ result = await orchestrator.research("分析中国新能源汽车市场", intera
 
 | 指标 | 数值 |
 |------|------|
-| 源文件 | 110+ |
-| 代码行数 | ~38,500 |
-| 测试文件 | 74+ |
-| 测试用例 | 2,050+ |
-| Agent 数量 | 8+ |
+| 源文件 | 120+ |
+| 代码行数 | ~42,000 |
+| 测试文件 | 80+ |
+| 测试用例 | 2,200+ |
+| Agent 数量 | 9+ |
 | 研究框架 | 6 种 |
-| 图表类型 | 10 种 |
+| 图表类型 | 12 种 |
 | 输出格式 | 5 种 |
 
 ---
@@ -262,7 +263,7 @@ zensers/
 │   │   ├── storage/            # 存储引擎
 │   │   └── workflow/           # 工作流引擎
 │   ├── methodologies/          # 研究方法论框架
-│   ├── services/               # 图表生成与数据提取
+│   ├── services/               # 图表规划、图表生成与数据提取
 │   ├── skills/                 # 技能插件系统
 │   └── survey/                 # 问卷系统
 ├── web/                        # Next.js 前端

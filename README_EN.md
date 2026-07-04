@@ -10,7 +10,7 @@
 
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-green.svg)]()
-[![Version](https://img.shields.io/badge/version-2.1.1-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-2.4.0-blue.svg)]()
 [![Next.js 14](https://img.shields.io/badge/Next.js-14-black.svg)]()
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-teal.svg)]()
 
@@ -34,7 +34,7 @@ Traditional industry research relies on analysts spending weeks on manual work: 
 |---|---|
 | **10x Efficiency** | Weeks of research compressed into hours — from question to polished report in one flow |
 | **Trusted Data** | Multi-source cross-validation + source whitelists + fact tracing — prefer uncertainty over misinformation |
-| **Professional Output** | McKinsey-style formatting, 10 chart types, DOCX/PPTX/PDF/Markdown export |
+| **Professional Output** | McKinsey-style formatting, 12 chart types, DOCX/PPTX/PDF/Markdown export |
 | **Continuous Evolution** | Dual-track learning system (Wisdom + Knowledge) — every research task makes the system smarter |
 
 ---
@@ -58,6 +58,7 @@ Requirement Parsing → Smart Clarification → Intent Analysis → Task Decompo
 | QualityCheckAgent | Data accuracy, content completeness, logical coherence, format standards |
 | ResultCalibrationAgent | Result calibration, data repair, quality convergence |
 | DocumentGenerationAgent | Professional multi-format output (Word/PPT/PDF/HTML) |
+| ChartPlannerAgent | Report content analysis, proactive data fetching, 12 chart type planning & generation |
 | SurveyAnalysisAgent | Survey data analysis and visualization |
 
 ### Seven-Layer Architecture
@@ -109,7 +110,7 @@ Zensers' constraint layer ensures research quality rather than blindly trusting 
 | HTML | Responsive layout, stylesheets, chart embedding |
 | Markdown | Structured text, chart descriptions |
 
-Supports 10 professional chart types: Bar, Horizontal Bar, Bar+Line Combo, Pie, Line, Radar, Scatter, Bubble, Waterfall, Quadrant
+Supports 12 professional chart types: Bar, Horizontal Bar, Bar+Line Combo, Pie, Line, Radar, Scatter, Bubble, Waterfall, Quadrant, Grouped Bar, Multi-entity Radar
 
 ### Research Frameworks
 
@@ -213,7 +214,7 @@ Or via the web interface: visit `http://localhost:3000`
 | Charts | matplotlib · seaborn · plotly |
 | Storage | SQLite · PostgreSQL · Redis · WAL |
 | Protocol | MCP (Model Context Protocol) |
-| Testing | pytest · 439+ test cases |
+| Testing | pytest · 2,200+ test cases |
 
 ---
 
@@ -221,13 +222,13 @@ Or via the web interface: visit `http://localhost:3000`
 
 | Metric | Value |
 |--------|-------|
-| Source files | 110+ |
-| Lines of code | ~38,500 |
-| Test files | 74+ |
-| Test cases | 2,050+ |
-| Agents | 8+ |
+| Source files | 120+ |
+| Lines of code | ~42,000 |
+| Test files | 80+ |
+| Test cases | 2,200+ |
+| Agents | 9+ |
 | Research frameworks | 6 |
-| Chart types | 10 |
+| Chart types | 12 |
 | Output formats | 5 |
 
 ---
@@ -262,7 +263,7 @@ zensers/
 │   │   ├── storage/            # Storage engine
 │   │   └── workflow/           # Workflow engine
 │   ├── methodologies/          # Research methodology frameworks
-│   ├── services/               # Chart generation & data extraction
+│   ├── services/               # Chart planning, chart generation & data extraction
 │   ├── skills/                 # Skill plugin system
 │   └── survey/                 # Survey system
 ├── web/                        # Next.js frontend
