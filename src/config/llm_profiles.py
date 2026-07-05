@@ -1,5 +1,7 @@
 from dataclasses import dataclass, field
 from typing import Optional, Dict, List
+import os
+import yaml
 
 
 @dataclass
@@ -27,8 +29,8 @@ class LLMProfile:
 @dataclass
 class LLMProfileRegistry:
     profiles: Dict[str, LLMProfile] = field(default_factory=dict)
-    default_profile: str = "fast"
-    fallback_chain: List[str] = field(default_factory=lambda: ["strong", "fast", "local"])
+    default_profile: str = "deepseek"
+    fallback_chain: List[str] = field(default_factory=lambda: ["deepseek", "zhipu", "local"])
     fixed_agent_routing: Dict[str, str] = field(default_factory=dict)
     action_routing: Dict[str, str] = field(default_factory=dict)
 
@@ -39,3 +41,47 @@ class RoutingHint:
     action: Optional[str] = None
     profile_name: Optional[str] = None
     force_profile: bool = False
+
+
+@dataclass
+class CatalogProvider:
+    id: str
+    name: str
+    description: str = ""
+    default_endpoint: str = ""
+
+
+@dataclass
+class CatalogModel:
+    id: str
+    name: str
+    provider: str
+    max_tokens: int = 128000
+    supports_vision: bool = False
+
+
+def load_llm_catalog(catalog_path: str = "") -> Dict:
+    if not catalog_path:
+        catalog_path = os.path.join(os.path.dirname(__file__), "..", "..", "config", "llm_catalog.yaml")
+    if not os.path.exists(catalog_path):
+        return {"providers": {}, "models": []}
+    with open(catalog_path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    providers = {}
+    for pid, pinfo in data.get("providers", {}).items():
+        providers[pid] = CatalogProvider(
+            id=pid,
+            name=pinfo.get("name", pid),
+            description=pinfo.get("description", ""),
+            default_endpoint=pinfo.get("default_endpoint", ""),
+        )
+    models = []
+    for m in data.get("models", []):
+        models.append(CatalogModel(
+            id=m.get("id", ""),
+            name=m.get("name", m.get("id", "")),
+            provider=m.get("provider", ""),
+            max_tokens=m.get("max_tokens", 128000),
+            supports_vision=m.get("supports_vision", False),
+        ))
+    return {"providers": providers, "models": models}

@@ -1,3 +1,4 @@
+from typing import List, Optional
 from src.config.llm_profiles import LLMProfile, LLMProfileRegistry, RoutingHint
 
 
@@ -17,44 +18,47 @@ class LLMRouter:
         self.registry = registry
 
     def resolve(self, hint: RoutingHint) -> LLMProfile:
+        candidates = self.resolve_candidates(hint)
+        if candidates:
+            return candidates[0]
+        raise RuntimeError("No enabled LLM profile available")
+
+    def resolve_candidates(self, hint: RoutingHint) -> List[LLMProfile]:
+        seen = set()
+        candidates = []
+
+        def _add(profile: Optional[LLMProfile], force: bool = False):
+            if profile and (force or profile.enabled) and profile.name not in seen:
+                seen.add(profile.name)
+                candidates.append(profile)
+
         if hint.profile_name:
             profile = self.registry.profiles.get(hint.profile_name)
-            if profile and (hint.force_profile or profile.enabled):
-                return profile
+            _add(profile, force=hint.force_profile)
 
         if hint.agent_type:
             profile_name = self.registry.fixed_agent_routing.get(hint.agent_type)
             if profile_name:
-                profile = self.registry.profiles.get(profile_name)
-                if profile and profile.enabled:
-                    return profile
+                _add(self.registry.profiles.get(profile_name))
 
         if hint.action:
             profile_name = self.registry.action_routing.get(hint.action)
             if profile_name:
-                profile = self.registry.profiles.get(profile_name)
-                if profile and profile.enabled:
-                    return profile
+                _add(self.registry.profiles.get(profile_name))
 
         if hint.action:
             action_lower = hint.action.lower()
             if any(kw in action_lower for kw in self.REASONING_KEYWORDS):
-                for name in ["strong", "default"]:
-                    profile = self.registry.profiles.get(name)
-                    if profile and profile.enabled:
-                        return profile
+                for name in self.registry.fallback_chain:
+                    _add(self.registry.profiles.get(name))
             elif any(kw in action_lower for kw in self.UTILITY_KEYWORDS):
-                for name in ["fast", "default"]:
-                    profile = self.registry.profiles.get(name)
-                    if profile and profile.enabled:
-                        return profile
+                for name in reversed(self.registry.fallback_chain):
+                    _add(self.registry.profiles.get(name))
 
         default = self.registry.profiles.get(self.registry.default_profile)
-        if default and default.enabled:
-            return default
+        _add(default)
 
         for profile in self.registry.profiles.values():
-            if profile.enabled:
-                return profile
+            _add(profile)
 
-        raise RuntimeError("No enabled LLM profile available")
+        return candidates

@@ -3,7 +3,7 @@
 /**
  * LLM Provider
  */
-export type LLMProvider = 'openai' | 'deepseek' | 'kimi' | 'zhipu' | 'local' | 'custom';
+export type LLMProvider = string;
 
 /**
  * LLM Model config
@@ -15,6 +15,13 @@ export interface LLMModel {
   maxTokens: number;
   supportsVision?: boolean;
   supportsFunctionCalling?: boolean;
+}
+
+export interface LLMProviderInfo {
+  id: string;
+  name: string;
+  description: string;
+  defaultEndpoint: string;
 }
 
 /**
@@ -42,119 +49,6 @@ export interface LLMConfig {
   customHeaders?: Record<string, string>;
   timeout?: number;
 }
-
-/**
- * Preset model list - mainstream OpenAI compatible APIs
- */
-export const PRESET_MODELS: LLMModel[] = [
-  // OpenAI
-  { id: 'gpt-4o', name: 'GPT-4o', provider: 'openai', maxTokens: 128000, supportsVision: true },
-  { id: 'gpt-4o-mini', name: 'GPT-4o Mini', provider: 'openai', maxTokens: 128000, supportsVision: true },
-  { id: 'gpt-4-turbo', name: 'GPT-4 Turbo', provider: 'openai', maxTokens: 128000, supportsVision: true },
-  { id: 'gpt-4', name: 'GPT-4', provider: 'openai', maxTokens: 8192 },
-  { id: 'gpt-3.5-turbo', name: 'GPT-3.5 Turbo', provider: 'openai', maxTokens: 16385 },
-  { id: 'o1-preview', name: 'O1 Preview', provider: 'openai', maxTokens: 128000 },
-  { id: 'o1-mini', name: 'O1 Mini', provider: 'openai', maxTokens: 128000 },
-  
-  // DeepSeek
-  { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', provider: 'deepseek', maxTokens: 128000 },
-  { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro', provider: 'deepseek', maxTokens: 128000 },
-  { id: 'deepseek-chat', name: 'DeepSeek Chat (即将弃用)', provider: 'deepseek', maxTokens: 64000 },
-  { id: 'deepseek-reasoner', name: 'DeepSeek Reasoner (即将弃用)', provider: 'deepseek', maxTokens: 64000 },
-  
-  // Kimi (Moonshot)
-  { id: 'kimi-k2.7-code', name: 'Kimi K2.7 Code', provider: 'kimi', maxTokens: 256000 },
-  { id: 'kimi-k2.7-code-highspeed', name: 'Kimi K2.7 Code 高速版', provider: 'kimi', maxTokens: 256000 },
-  { id: 'kimi-k2.6', name: 'Kimi K2.6', provider: 'kimi', maxTokens: 256000 },
-  { id: 'kimi-k2.5', name: 'Kimi K2.5', provider: 'kimi', maxTokens: 256000 },
-  { id: 'moonshot-v1-8k', name: 'Moonshot V1 8K', provider: 'kimi', maxTokens: 8192 },
-  { id: 'moonshot-v1-32k', name: 'Moonshot V1 32K', provider: 'kimi', maxTokens: 32768 },
-  { id: 'moonshot-v1-128k', name: 'Moonshot V1 128K', provider: 'kimi', maxTokens: 131072 },
-  
-  // 智谱 (Zhipu / GLM)
-  { id: 'glm-4.7', name: 'GLM-4.7', provider: 'zhipu', maxTokens: 128000 },
-  { id: 'glm-5.1', name: 'GLM-5.1', provider: 'zhipu', maxTokens: 128000 },
-  { id: 'glm-5.2', name: 'GLM-5.2', provider: 'zhipu', maxTokens: 128000 },
-  
-  // Local models (Ollama)
-  { id: 'llama3.1', name: 'LLaMA 3.1', provider: 'local', maxTokens: 128000 },
-  { id: 'llama3.2', name: 'LLaMA 3.2', provider: 'local', maxTokens: 128000 },
-  { id: 'mistral', name: 'Mistral', provider: 'local', maxTokens: 32000 },
-  { id: 'codellama', name: 'CodeLLaMA', provider: 'local', maxTokens: 16000 },
-  { id: 'qwen2.5', name: 'Qwen 2.5', provider: 'local', maxTokens: 32000 },
-];
-
-/**
- * Provider default configs
- */
-export const PROVIDER_DEFAULTS: Record<LLMProvider, Partial<LLMConfig>> = {
-  openai: {
-    apiEndpoint: 'https://api.openai.com/v1',
-    model: 'gpt-4o',
-    maxTokens: 4096,
-  },
-  deepseek: {
-    apiEndpoint: 'https://api.deepseek.com/v1',
-    model: 'deepseek-v4-flash',
-    maxTokens: 4096,
-  },
-  kimi: {
-    apiEndpoint: 'https://api.moonshot.cn/v1',
-    model: 'kimi-k2.7-code',
-    maxTokens: 4096,
-  },
-  zhipu: {
-    apiEndpoint: 'https://open.bigmodel.cn/api/paas/v4',
-    model: 'glm-5.2',
-    maxTokens: 4096,
-  },
-  local: {
-    apiEndpoint: 'http://localhost:11434/v1',
-    model: 'llama3.1',
-    maxTokens: 4096,
-  },
-  custom: {
-    apiEndpoint: '',
-    model: '',
-    maxTokens: 4096,
-  },
-};
-
-/**
- * Provider info
- */
-export const PROVIDER_INFO: Record<LLMProvider, { name: string; description: string; defaultEndpoint: string }> = {
-  openai: {
-    name: 'OpenAI',
-    description: 'GPT-4o, GPT-4, GPT-3.5 and other models',
-    defaultEndpoint: 'https://api.openai.com/v1',
-  },
-  deepseek: {
-    name: 'DeepSeek',
-    description: 'DeepSeek Chat, DeepSeek Reasoner',
-    defaultEndpoint: 'https://api.deepseek.com/v1',
-  },
-  kimi: {
-    name: 'Kimi (月之暗面)',
-    description: 'Kimi K2.7 Code, K2.6, K2.5, Moonshot',
-    defaultEndpoint: 'https://api.moonshot.cn/v1',
-  },
-  zhipu: {
-    name: '智谱 (GLM)',
-    description: 'GLM-4.7, GLM-5.1, GLM-5.2',
-    defaultEndpoint: 'https://open.bigmodel.cn/api/paas/v4',
-  },
-  local: {
-    name: 'Local Model',
-    description: 'Ollama, LocalAI and other local deployments',
-    defaultEndpoint: 'http://localhost:11434/v1',
-  },
-  custom: {
-    name: 'Custom',
-    description: 'Any OpenAI compatible API',
-    defaultEndpoint: '',
-  },
-};
 
 /**
  * Theme config

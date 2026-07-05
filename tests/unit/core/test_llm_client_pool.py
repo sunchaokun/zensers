@@ -35,8 +35,8 @@ class TestLLMClientPoolGetClient:
     @pytest.mark.asyncio
     async def test_different_profiles_get_different_clients(self):
         pool = LLMClientPool()
-        p1 = _mock_profile(name="strong")
-        p2 = _mock_profile(name="fast")
+        p1 = _mock_profile(name="deepseek")
+        p2 = _mock_profile(name="zhipu")
         with patch("src.core.llm_client_pool.AsyncOpenAI") as mock_openai:
             mock1 = MagicMock()
             mock2 = MagicMock()
@@ -64,7 +64,7 @@ class TestLLMClientPoolInvalidate:
 
     def test_invalidate_all_clears_cache(self):
         pool = LLMClientPool()
-        pool._clients["strong"] = MagicMock()
-        pool._clients["fast"] = MagicMock()
+        pool._clients["deepseek"] = MagicMock()
+        pool._clients["zhipu"] = MagicMock()
         pool.invalidate_all()
         assert pool._clients == {}

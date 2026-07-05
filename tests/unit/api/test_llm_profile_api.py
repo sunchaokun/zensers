@@ -47,7 +47,7 @@ class TestGetProfile:
 class TestCreateProfile:
     def test_create_profile(self, client):
         resp = client.post("/api/v1/llm/profiles", json={
-            "name": "strong", "model": "gpt-4o", "api_key": "sk-s", "base_url": "https://s.api/v1"
+            "name": "deepseek", "model": "gpt-4o", "api_key": "sk-s", "base_url": "https://s.api/v1"
         })
         assert resp.status_code == 200
         assert resp.json()["success"] is True
@@ -72,10 +72,10 @@ class TestCreateProfile:
 
 class TestUpdateProfile:
     def test_update_profile(self, client):
-        client.post("/api/v1/llm/profiles", json={"name": "fast", "model": "gpt-4o-mini"})
-        resp = client.put("/api/v1/llm/profiles/fast", json={"model": "gpt-4o"})
+        client.post("/api/v1/llm/profiles", json={"name": "zhipu", "model": "gpt-4o-mini"})
+        resp = client.put("/api/v1/llm/profiles/zhipu", json={"model": "gpt-4o"})
         assert resp.status_code == 200
-        get_resp = client.get("/api/v1/llm/profiles/fast")
+        get_resp = client.get("/api/v1/llm/profiles/zhipu")
         assert get_resp.json()["model"] == "gpt-4o"
 
     def test_update_profile_updates_timestamp(self, client):
@@ -111,11 +111,11 @@ class TestDeleteProfile:
 
 class TestSetDefaultProfile:
     def test_set_default(self, client):
-        client.post("/api/v1/llm/profiles", json={"name": "fast"})
-        resp = client.post("/api/v1/llm/profiles/fast/default")
+        client.post("/api/v1/llm/profiles", json={"name": "zhipu"})
+        resp = client.post("/api/v1/llm/profiles/zhipu/default")
         assert resp.status_code == 200
         list_resp = client.get("/api/v1/llm/profiles")
-        assert list_resp.json()["default_profile"] == "fast"
+        assert list_resp.json()["default_profile"] == "zhipu"
 
     def test_set_default_nonexistent_404(self, client):
         resp = client.post("/api/v1/llm/profiles/ghost/default")

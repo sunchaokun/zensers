@@ -25,8 +25,8 @@ class TestLLMProfile:
 
     def test_custom_values(self):
         profile = LLMProfile(
-            name="strong",
-            display_name="GPT-4o Strong",
+            name="deepseek",
+            display_name="GPT-4o DeepSeek",
             provider="openai",
             api_key="sk-xxx",
             base_url="https://api.openai.com/v1",
@@ -35,8 +35,8 @@ class TestLLMProfile:
             max_tokens=8000,
             cost_limit_per_call=0.5,
         )
-        assert profile.name == "strong"
-        assert profile.display_name == "GPT-4o Strong"
+        assert profile.name == "deepseek"
+        assert profile.display_name == "GPT-4o DeepSeek"
         assert profile.temperature == 0.3
         assert profile.max_tokens == 8000
         assert profile.cost_limit_per_call == 0.5
@@ -46,22 +46,22 @@ class TestLLMProfileRegistry:
     def test_default_values(self):
         registry = LLMProfileRegistry()
         assert registry.profiles == {}
-        assert registry.default_profile == "fast"
-        assert registry.fallback_chain == ["strong", "fast", "local"]
+        assert registry.default_profile == "deepseek"
+        assert registry.fallback_chain == ["deepseek", "zhipu", "local"]
         assert registry.fixed_agent_routing == {}
         assert registry.action_routing == {}
 
     def test_with_profiles(self):
-        strong = LLMProfile(name="strong", model="gpt-4o")
-        fast = LLMProfile(name="fast", model="deepseek-v4-flash", is_default=True)
+        deepseek = LLMProfile(name="deepseek", model="gpt-4o")
+        zhipu = LLMProfile(name="zhipu", model="deepseek-v4-flash", is_default=True)
         registry = LLMProfileRegistry(
-            profiles={"strong": strong, "fast": fast},
-            default_profile="fast",
-            fallback_chain=["strong", "fast"],
+            profiles={"deepseek": deepseek, "zhipu": zhipu},
+            default_profile="zhipu",
+            fallback_chain=["deepseek", "zhipu"],
         )
         assert len(registry.profiles) == 2
-        assert registry.profiles["strong"].model == "gpt-4o"
-        assert registry.default_profile == "fast"
+        assert registry.profiles["deepseek"].model == "gpt-4o"
+        assert registry.default_profile == "zhipu"
 
 
 class TestRoutingHint:
@@ -78,6 +78,6 @@ class TestRoutingHint:
         assert hint.action == "analyze"
 
     def test_explicit_override(self):
-        hint = RoutingHint(profile_name="strong", force_profile=True)
-        assert hint.profile_name == "strong"
+        hint = RoutingHint(profile_name="deepseek", force_profile=True)
+        assert hint.profile_name == "deepseek"
         assert hint.force_profile is True

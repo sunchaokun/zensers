@@ -3,47 +3,42 @@
 
 # Fixed agent routing: agent_type -> profile_name
 fixed_agent_routing:
-  quality_check: strong
-  data_collection: fast
-  report_generation: strong
-  requirement_analysis: strong
-  survey_simulation: fast
+  quality_check: deepseek
+  data_collection: deepseek
+  report_generation: deepseek
+  requirement_analysis: deepseek
+  survey_simulation: deepseek
 
 # Action routing: action_name -> profile_name
 action_routing:
-  # General reasoning/utility
-  analyze: strong
-  generate: strong
-  write: strong
-  review: strong
-  judge: strong
-  evaluate: strong
-  search: fast
-  scrape: fast
-  extract: fast
-  classify: fast
-  translate: fast
-  format: fast
-  vision: strong
+  analyze: deepseek
+  generate: deepseek
+  write: deepseek
+  review: deepseek
+  judge: deepseek
+  evaluate: deepseek
+  search: deepseek
+  scrape: deepseek
+  extract: deepseek
+  classify: deepseek
+  translate: deepseek
+  format: deepseek
+  vision: deepseek
 
-  # Quality assessment
-  quality_judge: strong
-  framework_match: fast
-  claim_extraction: fast
+  quality_judge: deepseek
+  framework_match: deepseek
+  claim_extraction: deepseek
 
-  # Agent internal
-  keyword_expand: fast
-  decision_assist: fast
-  task_structure: strong
-  intent_analysis: strong
-  revision_intent: fast
+  keyword_expand: deepseek
+  decision_assist: deepseek
+  task_structure: deepseek
+  intent_analysis: deepseek
+  revision_intent: deepseek
 
-  # API actions
-  framework_modify: fast
-  section_inference: fast
-  param_extraction: fast
+  framework_modify: deepseek
+  section_inference: deepseek
+  param_extraction: deepseek
 
-  # Content operations
-  translation: fast
-  batch_revision: strong
-  entity_extraction: fast
+  translation: deepseek
+  batch_revision: deepseek
+  entity_extraction: deepseek

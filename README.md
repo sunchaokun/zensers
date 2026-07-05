@@ -10,7 +10,7 @@
 
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-green.svg)]()
-[![Version](https://img.shields.io/badge/version-2.4.0-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-2.6.0-blue.svg)]()
 [![Next.js 14](https://img.shields.io/badge/Next.js-14-black.svg)]()
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-teal.svg)]()
 
@@ -174,11 +174,11 @@ cd web && npm install && cd ..
 ### 启动
 
 ```bash
-# 方式一：开发模式（推荐）
-uvicorn src.main:app --reload
-
-# 方式二：桌面应用
+# 方式一：桌面应用（一键启动，推荐）
 python desktop_app.py
+
+# 方式二：开发模式
+uvicorn src.api.main:app --reload
 
 # 方式三：Docker
 docker compose up -d
@@ -186,6 +186,8 @@ docker compose up -d
 # 方式四：生产部署
 bash start.prod.sh
 ```
+
+> **桌面应用特性**：独立 Watchdog 进程守护，强制关闭窗口后自动清理后端/前端子进程，无僵尸进程残留。
 
 ### 使用
 

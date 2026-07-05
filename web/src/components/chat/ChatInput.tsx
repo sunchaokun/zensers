@@ -13,7 +13,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { useSettingsStore } from '@/store/useSettingsStore';
-import { PRESET_MODELS, PROVIDER_INFO, LLMProvider } from '@/types/settings';
+import { LLMProvider } from '@/types/settings';
 import { Paperclip, Send, Square, X, FileIcon, Sparkles, Loader2, Settings } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import Link from 'next/link';
@@ -67,10 +67,10 @@ export function ChatInput({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  const { llm, sendOnEnter, updateLLMConfig, switchProvider, availableModels: storeModels } = useSettingsStore();
+  const { llm, sendOnEnter, updateLLMConfig, switchProvider, availableModels: storeModels, availableProviders } = useSettingsStore();
 
   // Use store's dynamic models, fall back to PRESET_MODELS
-  const availableModels = (storeModels.length > 0 ? storeModels : PRESET_MODELS).filter(
+  const availableModels = storeModels.filter(
     (m) => m.provider === llm.provider || llm.provider === 'custom'
   );
 
@@ -126,16 +126,16 @@ export function ChatInput({
   };
 
   // Get provider list
-  const providers = Object.entries(PROVIDER_INFO).map(([id, info]) => ({
-    id,
-    name: info.name,
+  const providers = (availableProviders.length > 0 ? availableProviders : []).map(p => ({
+    id: p.id,
+    name: p.name,
   }));
 
   // show stop when API loading, or research running with no input
   const showStop = isLoading || isWaitingForReply || (isRunning && !text.trim() && attachments.length === 0);
   const canSend = (text.trim() || attachments.length > 0) && !disabled;
-  const currentModelName = availableModels.find(m => m.id === llm.model)?.name || PRESET_MODELS.find(m => m.id === llm.model)?.name || llm.model;
-  const currentProviderName = PROVIDER_INFO[llm.provider]?.name || llm.provider;
+  const currentModelName = availableModels.find(m => m.id === llm.model)?.name || llm.model;
+  const currentProviderName = availableProviders.find(p => p.id === llm.provider)?.name || llm.provider;
 
   return (
     <div className="space-y-2 w-full">

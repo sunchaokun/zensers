@@ -111,21 +111,50 @@ async def call_llm(
         On failure: success=False, message=str, error=str
     """
     if routing_hint is not None and _router is not None:
-        profile = _router.resolve(routing_hint)
-        model = model or profile.model
-        fallback_model = fallback_model or profile.fallback_model
-        max_tokens = max_tokens or profile.max_tokens
-        temperature = temperature or profile.temperature
-        api_key = api_key or profile.api_key
-        base_url = base_url or profile.base_url
-        if profile.cost_limit_per_call > 0:
-            estimated_cost = (max_tokens / 1000) * 0.01
-            if estimated_cost > profile.cost_limit_per_call:
-                return {
-                    "success": False,
-                    "message": f"Estimated cost ${estimated_cost:.4f} exceeds per-call limit ${profile.cost_limit_per_call:.2f} (profile: {profile.name})",
-                    "error": "cost_limit_per_call",
-                }
+        candidates = _router.resolve_candidates(routing_hint)
+        first_err = None
+        for profile in candidates:
+            p_model = model or profile.model
+            p_fallback = fallback_model or profile.fallback_model
+            p_max_tokens = max_tokens or profile.max_tokens
+            p_temperature = temperature or profile.temperature
+            p_api_key = api_key or profile.api_key
+            p_base_url = base_url or profile.base_url
+            if profile.cost_limit_per_call > 0:
+                estimated_cost = (p_max_tokens / 1000) * 0.01
+                if estimated_cost > profile.cost_limit_per_call:
+                    if first_err is None:
+                        first_err = f"Profile {profile.name}: estimated cost ${estimated_cost:.4f} exceeds limit ${profile.cost_limit_per_call:.2f}"
+                    continue
+            try:
+                response = await _call_llm_api(prompt=prompt, model=p_model, system_prompt=system_prompt,
+                                               max_tokens=p_max_tokens, temperature=p_temperature,
+                                               api_key=p_api_key, base_url=p_base_url)
+                result = _parse_response(response, p_model)
+                if profile != candidates[0]:
+                    result["fallback_used"] = True
+                    result["fallback_profile"] = profile.name
+                    logger.info(f"LLM call succeeded on fallback profile '{profile.name}' (model: {p_model})")
+                return result
+            except Exception as err:
+                if first_err is None:
+                    first_err = str(err)
+                logger.warning(f"LLM call failed on profile '{profile.name}' (model: {p_model}): {err}")
+                if p_fallback and p_fallback != p_model:
+                    try:
+                        response = await _call_llm_api(prompt=prompt, model=p_fallback, system_prompt=system_prompt,
+                                                       max_tokens=p_max_tokens, temperature=p_temperature,
+                                                       api_key=p_api_key, base_url=p_base_url)
+                        result = _parse_response(response, p_fallback)
+                        result["fallback_used"] = True
+                        if profile != candidates[0]:
+                            result["fallback_profile"] = profile.name
+                        logger.info(f"LLM call succeeded on profile '{profile.name}' fallback model '{p_fallback}'")
+                        return result
+                    except Exception as fb_err:
+                        logger.warning(f"LLM fallback model '{p_fallback}' also failed on profile '{profile.name}': {fb_err}")
+                continue
+        return {"success": False, "message": first_err or "All LLM profiles failed", "error": "llm_call_failed"}
     elif routing_hint is not None and _router is None:
         logger.warning("routing_hint provided but LLM router not initialized; using default settings")
 

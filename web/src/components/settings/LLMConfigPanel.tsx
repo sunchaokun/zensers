@@ -12,8 +12,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { PRESET_MODELS, PROVIDER_INFO, PROVIDER_DEFAULTS, LLMProvider, LLMProfile, DEFAULT_LLM_PROFILE, RoutingConfig } from '@/types/settings';
-import { Eye, EyeOff, Loader2, Star, Plus, Trash2, ChevronDown, ChevronRight, MoreVertical, AlertCircle, CheckCircle2 } from 'lucide-react';
+import { LLMProvider, LLMProfile, LLMProviderInfo, DEFAULT_LLM_PROFILE, RoutingConfig } from '@/types/settings';
+import { Eye, EyeOff, Loader2, Plus, Trash2, ChevronDown, ChevronRight, MoreVertical, AlertCircle, CheckCircle2 } from 'lucide-react';
 import { useState, useEffect, useRef, useCallback } from 'react';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
@@ -22,7 +22,6 @@ export function LLMConfigPanel() {
   const {
     profiles,
     activeProfileName,
-    defaultProfileName,
     routingConfig,
     isLoadingProfiles,
     isSaving,
@@ -31,9 +30,11 @@ export function LLMConfigPanel() {
     createProfile,
     updateProfile,
     deleteProfile,
-    setDefaultProfile,
     switchProfile,
     updateRouting,
+    availableProviders,
+    availableModels,
+    loadModels,
   } = useSettingsStore();
 
   const [mounted, setMounted] = useState(false);
@@ -42,6 +43,8 @@ export function LLMConfigPanel() {
   const [apiKeyModified, setApiKeyModified] = useState(false);
   const [newProfileName, setNewProfileName] = useState('');
   const [showNewProfileInput, setShowNewProfileInput] = useState(false);
+  const [newProfileProvider, setNewProfileProvider] = useState<string>('openai');
+  const [newProfileCustomProvider, setNewProfileCustomProvider] = useState('');
   const [routingExpanded, setRoutingExpanded] = useState(false);
   const [menuOpen, setMenuOpen] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -51,12 +54,27 @@ export function LLMConfigPanel() {
 
   const activeProfile = profiles[activeProfileName] || null;
   const profileNames = Object.keys(profiles);
+  const models = availableModels;
+  const knownProviderIds = availableProviders.map(p => p.id);
+
+  const getProviderName = (providerId: string) => {
+    return availableProviders.find(p => p.id === providerId)?.name || providerId;
+  };
+
+  const getProviderDefaultEndpoint = (providerId: string) => {
+    return availableProviders.find(p => p.id === providerId)?.defaultEndpoint || '';
+  };
+
+  const getProviderDefaultModel = (providerId: string) => {
+    return models.find(m => m.provider === providerId)?.id || '';
+  };
 
   useEffect(() => { setMounted(true); }, []);
 
   useEffect(() => {
     if (mounted) {
       loadProfiles();
+      loadModels();
     }
   }, [mounted]);
 
@@ -122,21 +140,16 @@ export function LLMConfigPanel() {
   };
 
   const handleProviderChange = (newProvider: string) => {
-    const defaults = PROVIDER_DEFAULTS[newProvider as LLMProvider];
-    if (!defaults) {
-      handleFieldChange('provider', newProvider);
-      return;
-    }
     const fields: Record<string, any> = { provider: newProvider };
-    if (defaults.apiEndpoint) fields.base_url = defaults.apiEndpoint;
-    if (defaults.model) fields.model = defaults.model;
-    if (defaults.maxTokens) fields.max_tokens = defaults.maxTokens;
+    const endpoint = getProviderDefaultEndpoint(newProvider);
+    const model = getProviderDefaultModel(newProvider);
+    if (endpoint) fields.base_url = endpoint;
+    if (model) fields.model = model;
     setModifiedFields((prev) => {
       const n = new Set(prev);
       n.add('provider');
-      if (defaults.apiEndpoint) n.add('base_url');
-      if (defaults.model) n.add('model');
-      if (defaults.maxTokens) n.add('max_tokens');
+      if (endpoint) n.add('base_url');
+      if (model) n.add('model');
       return n;
     });
     scheduleSave(fields);
@@ -153,10 +166,24 @@ export function LLMConfigPanel() {
       showError('Profile 名称已存在');
       return;
     }
+    const provider = newProfileProvider === '__custom__' ? newProfileCustomProvider.trim() : newProfileProvider;
+    if (!provider) {
+      showError('请输入供应商名称');
+      return;
+    }
+    const defaultEndpoint = getProviderDefaultEndpoint(provider);
+    const defaultModel = getProviderDefaultModel(provider);
     try {
-      await createProfile({ name, model: 'gpt-4o', provider: 'openai' });
+      await createProfile({
+        name,
+        provider,
+        model: defaultModel,
+        base_url: defaultEndpoint,
+        max_tokens: 4096,
+      });
       switchProfile(name);
       setNewProfileName('');
+      setNewProfileCustomProvider('');
       setShowNewProfileInput(false);
       showSuccess('Profile 已创建');
     } catch (e: any) {
@@ -165,26 +192,12 @@ export function LLMConfigPanel() {
   };
 
   const handleDeleteProfile = async (name: string) => {
-    if (name === defaultProfileName) {
-      showError('无法删除默认 Profile');
-      return;
-    }
     if (!confirm(`确认删除 Profile "${name}"？`)) return;
     try {
       await deleteProfile(name);
       showSuccess('已删除');
     } catch (e: any) {
       showError(e.message || '删除失败');
-    }
-    setMenuOpen(null);
-  };
-
-  const handleSetDefault = async (name: string) => {
-    try {
-      await setDefaultProfile(name);
-      showSuccess('已设为默认');
-    } catch (e: any) {
-      showError(e.message || '设置失败');
     }
     setMenuOpen(null);
   };
@@ -236,8 +249,8 @@ export function LLMConfigPanel() {
             <div className="space-y-1">
               {profileNames.map((name) => {
                 const p = profiles[name];
-                const isDefault = name === defaultProfileName;
                 const isActive = name === activeProfileName;
+                const providerLabel = getProviderName(p.provider);
                 return (
                   <div
                     key={name}
@@ -246,12 +259,9 @@ export function LLMConfigPanel() {
                     }`}
                     onClick={() => switchProfile(name)}
                   >
-                    <div className="flex items-center gap-1.5 truncate">
-                      {isDefault && <Star className="h-3.5 w-3.5 text-yellow-500 flex-shrink-0" />}
-                      <span className="truncate">{p.display_name || name}</span>
-                      <span className="text-[10px] text-muted-foreground bg-muted px-1 rounded flex-shrink-0">
-                        {PROVIDER_INFO[p.provider as LLMProvider]?.name || p.provider}
-                      </span>
+                    <div className="flex flex-col truncate min-w-0">
+                      <span className="truncate font-medium">{providerLabel}</span>
+                      <span className="text-[10px] text-muted-foreground truncate pl-0">{p.model || name}</span>
                     </div>
                     <div className="relative">
                       <button
@@ -262,22 +272,12 @@ export function LLMConfigPanel() {
                       </button>
                       {menuOpen === name && (
                         <div className="absolute right-0 top-6 z-10 bg-background border rounded shadow-md py-1 min-w-[120px]">
-                          {!isDefault && (
-                            <button
-                              className="w-full text-left px-3 py-1.5 text-xs hover:bg-muted"
-                              onClick={(e) => { e.stopPropagation(); handleSetDefault(name); }}
-                            >
-                              设为默认
-                            </button>
-                          )}
-                          {!isDefault && (
-                            <button
-                              className="w-full text-left px-3 py-1.5 text-xs text-destructive hover:bg-muted"
-                              onClick={(e) => { e.stopPropagation(); handleDeleteProfile(name); }}
-                            >
-                              删除
-                            </button>
-                          )}
+                          <button
+                            className="w-full text-left px-3 py-1.5 text-xs text-destructive hover:bg-muted"
+                            onClick={(e) => { e.stopPropagation(); handleDeleteProfile(name); }}
+                          >
+                            删除
+                          </button>
                         </div>
                       )}
                     </div>
@@ -296,9 +296,26 @@ export function LLMConfigPanel() {
                     autoFocus
                     className="h-8 text-xs"
                   />
+                  <Select value={newProfileProvider} onValueChange={setNewProfileProvider}>
+                    <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {availableProviders.map((p) => (
+                        <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>
+                      ))}
+                      <SelectItem value="__custom__">自定义供应商...</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  {newProfileProvider === '__custom__' && (
+                    <Input
+                      placeholder="供应商名称 (如 volcengine)"
+                      value={newProfileCustomProvider}
+                      onChange={(e) => setNewProfileCustomProvider(e.target.value)}
+                      className="h-8 text-xs"
+                    />
+                  )}
                   <div className="flex gap-1">
                     <Button size="sm" variant="ghost" className="h-7 text-xs flex-1" onClick={handleCreateProfile}>创建</Button>
-                    <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => { setShowNewProfileInput(false); setNewProfileName(''); }}>取消</Button>
+                    <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => { setShowNewProfileInput(false); setNewProfileName(''); setNewProfileCustomProvider(''); }}>取消</Button>
                   </div>
                 </div>
               ) : (
@@ -320,26 +337,38 @@ export function LLMConfigPanel() {
               <div className="space-y-4">
                 {/* Profile header */}
                 <div className="flex items-center gap-2">
-                  <h3 className="text-lg font-medium">{activeProfile.display_name || activeProfile.name}</h3>
-                  {activeProfile.is_default && (
-                    <span className="text-xs bg-yellow-100 text-yellow-700 px-2 py-0.5 rounded">默认</span>
-                  )}
+                  <h3 className="text-lg font-medium">{getProviderName(activeProfile.provider)}</h3>
+                  <span className="text-xs text-muted-foreground">{activeProfile.model}</span>
                 </div>
 
                 {/* Provider */}
                 <div className="space-y-1.5">
                   <Label>供应商</Label>
                   <Select
-                    value={activeProfile.provider}
-                    onValueChange={handleProviderChange}
+                    value={knownProviderIds.includes(activeProfile.provider) ? activeProfile.provider : '__custom__'}
+                    onValueChange={(v) => {
+                      if (v === '__custom__') return;
+                      handleProviderChange(v);
+                    }}
                   >
                     <SelectTrigger><SelectValue /></SelectTrigger>
                     <SelectContent>
-                      {(Object.keys(PROVIDER_INFO) as LLMProvider[]).map((p) => (
-                        <SelectItem key={p} value={p}>{PROVIDER_INFO[p].name}</SelectItem>
+                      {availableProviders.map((p) => (
+                        <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>
                       ))}
+                      {!knownProviderIds.includes(activeProfile.provider) && (
+                        <SelectItem value="__custom__">{activeProfile.provider} (自定义)</SelectItem>
+                      )}
                     </SelectContent>
                   </Select>
+                  {!knownProviderIds.includes(activeProfile.provider) && (
+                    <Input
+                      value={activeProfile.provider}
+                      onChange={(e) => handleFieldChange('provider', e.target.value)}
+                      placeholder="自定义供应商名称"
+                      className="h-8 text-xs"
+                    />
+                  )}
                 </div>
 
                 {/* API Endpoint */}
@@ -382,31 +411,12 @@ export function LLMConfigPanel() {
                 {/* Model */}
                 <div className="space-y-1.5">
                   <Label>模型</Label>
-                  {activeProfile.provider === 'custom' ? (
-                    <Input
-                      value={activeProfile.model}
-                      onChange={(e) => handleFieldChange('model', e.target.value)}
-                      placeholder="model-name"
-                    />
-                  ) : (
-                    <Select
-                      value={activeProfile.model}
-                      onValueChange={(v) => handleFieldChange('model', v)}
-                    >
-                      <SelectTrigger><SelectValue /></SelectTrigger>
-                      <SelectContent>
-                        {PRESET_MODELS
-                          .filter((m) => m.provider === activeProfile.provider)
-                          .map((m) => (
-                            <SelectItem key={m.id} value={m.id}>{m.name}</SelectItem>
-                          ))}
-                        {PRESET_MODELS.filter((m) => m.provider === activeProfile.provider).length === 0 &&
-                          !PRESET_MODELS.some((m) => m.id === activeProfile.model) && (
-                          <SelectItem value={activeProfile.model}>{activeProfile.model}</SelectItem>
-                        )}
-                      </SelectContent>
-                    </Select>
-                  )}
+                  <ModelSelector
+                    provider={activeProfile.provider}
+                    model={activeProfile.model}
+                    models={models}
+                    onChange={(v) => handleFieldChange('model', v)}
+                  />
                 </div>
 
                 {/* Temperature */}
@@ -510,6 +520,7 @@ export function LLMConfigPanel() {
                     <RoutingEditor
                       config={routingConfig}
                       profileNames={profileNames}
+                      profiles={profiles}
                       onChange={handleRoutingChange}
                     />
                   )}
@@ -529,17 +540,85 @@ export function LLMConfigPanel() {
   );
 }
 
+// ===== Model Selector Sub-component =====
+
+function ModelSelector({
+  provider,
+  model,
+  models,
+  onChange,
+}: {
+  provider: string;
+  model: string;
+  models: { id: string; name: string; provider: string }[];
+  onChange: (value: string) => void;
+}) {
+  const [useCustom, setUseCustom] = useState(false);
+  const [customValue, setCustomValue] = useState('');
+
+  const providerModels = models.filter(m => m.provider === provider);
+  const isPreset = providerModels.some(m => m.id === model);
+
+  useEffect(() => {
+    setUseCustom(false);
+  }, [provider]);
+
+  if (useCustom) {
+    return (
+      <div className="flex gap-2">
+        <Input
+          value={customValue}
+          onChange={(e) => setCustomValue(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter' && customValue.trim()) { onChange(customValue.trim()); setUseCustom(false); } }}
+          placeholder="输入自定义模型名称"
+          autoFocus
+          className="h-9"
+        />
+        <Button size="sm" variant="outline" onClick={() => setUseCustom(false)}>取消</Button>
+        <Button size="sm" onClick={() => { if (customValue.trim()) { onChange(customValue.trim()); setUseCustom(false); } }}>确定</Button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex gap-2">
+      <Select value={model} onValueChange={onChange}>
+        <SelectTrigger className="flex-1"><SelectValue /></SelectTrigger>
+        <SelectContent>
+          {providerModels.map(m => (
+            <SelectItem key={m.id} value={m.id}>{m.name}</SelectItem>
+          ))}
+          {!isPreset && model && (
+            <SelectItem value={model}>{model} (自定义)</SelectItem>
+          )}
+        </SelectContent>
+      </Select>
+      <Button size="sm" variant="outline" onClick={() => { setCustomValue(''); setUseCustom(true); }}>
+        自定义
+      </Button>
+    </div>
+  );
+}
+
 // ===== Routing Editor Sub-component =====
 
 function RoutingEditor({
   config,
   profileNames,
+  profiles,
   onChange,
 }: {
   config: RoutingConfig;
   profileNames: string[];
+  profiles: Record<string, LLMProfile>;
   onChange: (config: RoutingConfig) => void;
 }) {
+  const { availableProviders } = useSettingsStore();
+
+  const getProviderName = (providerId: string) => {
+    return availableProviders.find(p => p.id === providerId)?.name || providerId;
+  };
+
   const [localConfig, setLocalConfig] = useState<RoutingConfig>(config);
 
   useEffect(() => {
@@ -574,26 +653,59 @@ function RoutingEditor({
     setLocalConfig(newConfig);
   };
 
+  const moveFallbackUp = (index: number) => {
+    if (index <= 0) return;
+    const chain = [...localConfig.fallback_chain];
+    [chain[index - 1], chain[index]] = [chain[index], chain[index - 1]];
+    setLocalConfig({ ...localConfig, fallback_chain: chain });
+  };
+
+  const moveFallbackDown = (index: number) => {
+    if (index >= localConfig.fallback_chain.length - 1) return;
+    const chain = [...localConfig.fallback_chain];
+    [chain[index], chain[index + 1]] = [chain[index + 1], chain[index]];
+    setLocalConfig({ ...localConfig, fallback_chain: chain });
+  };
+
+  const removeFallback = (index: number) => {
+    const chain = localConfig.fallback_chain.filter((_, i) => i !== index);
+    setLocalConfig({ ...localConfig, fallback_chain: chain });
+  };
+
+  const addFallback = (profileName: string) => {
+    if (localConfig.fallback_chain.includes(profileName)) return;
+    setLocalConfig({ ...localConfig, fallback_chain: [...localConfig.fallback_chain, profileName] });
+  };
+
   const [newAgent, setNewAgent] = useState('');
   const [newAction, setNewAction] = useState('');
+  const [newFallback, setNewFallback] = useState('');
 
   const handleSave = () => {
     onChange(localConfig);
+  };
+
+  const profileLabel = (n: string) => {
+    const p = profiles[n];
+    const providerLabel = p ? getProviderName(p.provider) : '';
+    return `${providerLabel} · ${p?.model || n}`;
   };
 
   return (
     <div className="mt-3 space-y-4 text-sm">
       {/* Fixed Agent Routing */}
       <div className="space-y-2">
-        <h4 className="font-medium">Agent → Profile 映射</h4>
+        <h4 className="font-medium">Agent → 模型 映射</h4>
         {Object.entries(localConfig.fixed_agent_routing).map(([agent, profileName]) => (
           <div key={agent} className="flex items-center gap-2">
             <span className="w-40 text-muted-foreground truncate" title={agent}>{agent}</span>
             <span className="text-muted-foreground">→</span>
             <Select value={profileName} onValueChange={(v) => updateFixedAgent(agent, v)}>
-              <SelectTrigger className="w-40 h-8 text-xs"><SelectValue /></SelectTrigger>
+              <SelectTrigger className="w-56 h-8 text-xs"><SelectValue /></SelectTrigger>
               <SelectContent>
-                {profileNames.map((n) => <SelectItem key={n} value={n}>{n}</SelectItem>)}
+                {profileNames.map((n) => (
+                  <SelectItem key={n} value={n}>{profileLabel(n)}</SelectItem>
+                ))}
               </SelectContent>
             </Select>
             <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => removeFixedAgent(agent)}>
@@ -626,15 +738,17 @@ function RoutingEditor({
 
       {/* Action Routing */}
       <div className="space-y-2">
-        <h4 className="font-medium">Action → Profile 映射</h4>
+        <h4 className="font-medium">Action → 模型 映射</h4>
         {Object.entries(localConfig.action_routing).map(([action, profileName]) => (
           <div key={action} className="flex items-center gap-2">
             <span className="w-40 text-muted-foreground truncate" title={action}>{action}</span>
             <span className="text-muted-foreground">→</span>
             <Select value={profileName} onValueChange={(v) => updateAction(action, v)}>
-              <SelectTrigger className="w-40 h-8 text-xs"><SelectValue /></SelectTrigger>
+              <SelectTrigger className="w-56 h-8 text-xs"><SelectValue /></SelectTrigger>
               <SelectContent>
-                {profileNames.map((n) => <SelectItem key={n} value={n}>{n}</SelectItem>)}
+                {profileNames.map((n) => (
+                  <SelectItem key={n} value={n}>{profileLabel(n)}</SelectItem>
+                ))}
               </SelectContent>
             </Select>
             <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => removeAction(action)}>
@@ -667,14 +781,37 @@ function RoutingEditor({
 
       {/* Fallback chain */}
       <div className="space-y-2">
-        <h4 className="font-medium">Fallback Chain</h4>
-        <div className="flex items-center gap-1 flex-wrap">
-          {localConfig.fallback_chain.map((name, i) => (
-            <span key={i} className="bg-muted px-2 py-0.5 rounded text-xs">{name}</span>
-          ))}
+        <h4 className="font-medium">Fallback Chain (回退顺序)</h4>
+        <div className="space-y-1">
+          {localConfig.fallback_chain.map((name, i) => {
+            const p = profiles[name];
+            const providerLabel = p ? getProviderName(p.provider) : '';
+            return (
+              <div key={i} className="flex items-center gap-1">
+                <span className="text-muted-foreground text-xs w-4">{i + 1}.</span>
+                <span className="bg-muted px-2 py-0.5 rounded text-xs flex-1">
+                  {providerLabel} · {p?.model || name}
+                </span>
+                <button className="p-0.5 hover:bg-muted rounded text-muted-foreground" onClick={() => moveFallbackUp(i)} disabled={i === 0}>↑</button>
+                <button className="p-0.5 hover:bg-muted rounded text-muted-foreground" onClick={() => moveFallbackDown(i)} disabled={i === localConfig.fallback_chain.length - 1}>↓</button>
+                <button className="p-0.5 hover:bg-muted rounded text-destructive" onClick={() => removeFallback(i)}>×</button>
+              </div>
+            );
+          })}
           {localConfig.fallback_chain.length === 0 && (
             <span className="text-xs text-muted-foreground">未设置</span>
           )}
+        </div>
+        <div className="flex items-center gap-2">
+          <Select value={newFallback} onValueChange={setNewFallback}>
+            <SelectTrigger className="w-56 h-8 text-xs"><SelectValue placeholder="添加 Profile..." /></SelectTrigger>
+            <SelectContent>
+              {profileNames.filter(n => !localConfig.fallback_chain.includes(n)).map((n) => (
+                <SelectItem key={n} value={n}>{profileLabel(n)}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Button variant="outline" size="sm" className="h-8 text-xs" onClick={() => { if (newFallback) { addFallback(newFallback); setNewFallback(''); } }}>添加</Button>
         </div>
       </div>
 

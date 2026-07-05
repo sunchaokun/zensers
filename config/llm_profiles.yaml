@@ -3,14 +3,14 @@
 # Environment variables can be referenced with ${VAR_NAME} syntax.
 
 profiles:
-  strong:
-    name: strong
-    display_name: Strong (GPT-4o)
-    provider: openai
+  deepseek:
+    name: deepseek
+    display_name: DeepSeek
+    provider: deepseek
     api_key: ${LLM_API_KEY}
     base_url: ${LLM_BASE_URL}
-    model: gpt-4o
-    fallback_model: gpt-4o-mini
+    model: deepseek-v4-pro
+    fallback_model: deepseek-v4-flash
     temperature: 0.7
     max_tokens: 4096
     top_p: 1.0
@@ -20,14 +20,14 @@ profiles:
     cost_limit_per_call: 0.0
     enabled: true
 
-  fast:
-    name: fast
-    display_name: Fast (GPT-4o-mini)
-    provider: openai
-    api_key: ${LLM_API_KEY}
-    base_url: ${LLM_BASE_URL}
-    model: gpt-4o-mini
-    fallback_model: gpt-3.5-turbo
+  zhipu:
+    name: zhipu
+    display_name: 智谱
+    provider: zhipu
+    api_key: ${ZHIPU_API_KEY}
+    base_url: https://open.bigmodel.cn/api/paas/v4
+    model: glm-5.2
+    fallback_model: glm-5.1
     temperature: 0.7
     max_tokens: 4096
     top_p: 1.0
@@ -39,8 +39,8 @@ profiles:
 
   local:
     name: local
-    display_name: Local (Ollama)
-    provider: ollama
+    display_name: Ollama
+    provider: local
     api_key: ""
     base_url: http://localhost:11434/v1
     model: qwen2.5
@@ -54,8 +54,8 @@ profiles:
     cost_limit_per_call: 0.0
     enabled: false
 
-default_profile: fast
+default_profile: deepseek
 fallback_chain:
-  - strong
-  - fast
+  - deepseek
+  - zhipu
   - local

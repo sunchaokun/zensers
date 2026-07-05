@@ -663,6 +663,8 @@ class Settings:
     def _migrate_legacy_to_profile(self) -> None:
         if "migrated" in self.llm_profiles.profiles:
             return
+        if self.llm_profiles.profiles:
+            return
         self.llm_profiles.profiles["migrated"] = LLMProfile(
             name="migrated",
             provider=self.llm.provider,

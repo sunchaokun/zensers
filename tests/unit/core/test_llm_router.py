@@ -4,25 +4,25 @@ from src.core.llm_router import LLMRouter
 
 
 def _make_registry():
-    strong = LLMProfile(name="strong", model="gpt-4o", enabled=True)
-    fast = LLMProfile(name="fast", model="deepseek-v4-flash", is_default=True, enabled=True)
+    deepseek = LLMProfile(name="deepseek", model="gpt-4o", enabled=True)
+    zhipu = LLMProfile(name="zhipu", model="deepseek-v4-flash", is_default=True, enabled=True)
     local = LLMProfile(name="local", model="qwen2.5", enabled=False)
     vision = LLMProfile(name="vision", model="gpt-4o-vision", enabled=True)
     return LLMProfileRegistry(
-        profiles={"strong": strong, "fast": fast, "local": local, "vision": vision},
-        default_profile="fast",
-        fallback_chain=["strong", "fast", "local"],
-        fixed_agent_routing={"quality_check": "strong", "data_collection": "fast"},
-        action_routing={"analyze": "strong", "search": "fast", "vision": "vision"},
+        profiles={"deepseek": deepseek, "zhipu": zhipu, "local": local, "vision": vision},
+        default_profile="zhipu",
+        fallback_chain=["deepseek", "zhipu", "local"],
+        fixed_agent_routing={"quality_check": "deepseek", "data_collection": "zhipu"},
+        action_routing={"analyze": "deepseek", "search": "zhipu", "vision": "vision"},
     )
 
 
 class TestLLMRouterExplicitOverride:
     def test_explicit_profile_name_returns_that_profile(self):
         router = LLMRouter(_make_registry())
-        hint = RoutingHint(profile_name="strong")
+        hint = RoutingHint(profile_name="deepseek")
         result = router.resolve(hint)
-        assert result.name == "strong"
+        assert result.name == "deepseek"
 
     def test_force_profile_uses_disabled_profile(self):
         router = LLMRouter(_make_registry())
@@ -34,13 +34,13 @@ class TestLLMRouterExplicitOverride:
         router = LLMRouter(_make_registry())
         hint = RoutingHint(profile_name="local")
         result = router.resolve(hint)
-        assert result.name == "fast"
+        assert result.name == "zhipu"
 
     def test_nonexistent_profile_falls_to_default(self):
         router = LLMRouter(_make_registry())
         hint = RoutingHint(profile_name="nonexistent")
         result = router.resolve(hint)
-        assert result.name == "fast"
+        assert result.name == "zhipu"
 
 
 class TestLLMRouterFixedAgentMapping:
@@ -48,13 +48,13 @@ class TestLLMRouterFixedAgentMapping:
         router = LLMRouter(_make_registry())
         hint = RoutingHint(agent_type="quality_check")
         result = router.resolve(hint)
-        assert result.name == "strong"
+        assert result.name == "deepseek"
 
     def test_unknown_agent_type_falls_to_default(self):
         router = LLMRouter(_make_registry())
         hint = RoutingHint(agent_type="unknown_agent")
         result = router.resolve(hint)
-        assert result.name == "fast"
+        assert result.name == "zhipu"
 
 
 class TestLLMRouterActionMapping:
@@ -62,13 +62,13 @@ class TestLLMRouterActionMapping:
         router = LLMRouter(_make_registry())
         hint = RoutingHint(action="analyze")
         result = router.resolve(hint)
-        assert result.name == "strong"
+        assert result.name == "deepseek"
 
-    def test_known_fast_action_returns_fast_profile(self):
+    def test_known_secondary_action_returns_zhipu_profile(self):
         router = LLMRouter(_make_registry())
         hint = RoutingHint(action="search")
         result = router.resolve(hint)
-        assert result.name == "fast"
+        assert result.name == "zhipu"
 
     def test_vision_action_returns_vision_profile(self):
         router = LLMRouter(_make_registry())
@@ -78,23 +78,23 @@ class TestLLMRouterActionMapping:
 
 
 class TestLLMRouterKeywordAutoClassification:
-    def test_reasoning_keyword_maps_to_strong(self):
+    def test_reasoning_keyword_maps_to_first_in_fallback_chain(self):
         router = LLMRouter(_make_registry())
         hint = RoutingHint(action="generate_report")
         result = router.resolve(hint)
-        assert result.name == "strong"
+        assert result.name == "deepseek"
 
-    def test_utility_keyword_maps_to_fast(self):
+    def test_utility_keyword_maps_to_last_enabled_in_fallback_chain(self):
         router = LLMRouter(_make_registry())
         hint = RoutingHint(action="extract_data")
         result = router.resolve(hint)
-        assert result.name == "fast"
+        assert result.name == "zhipu"
 
     def test_unknown_action_no_keyword_match_falls_to_default(self):
         router = LLMRouter(_make_registry())
         hint = RoutingHint(action="custom_thing")
         result = router.resolve(hint)
-        assert result.name == "fast"
+        assert result.name == "zhipu"
 
 
 class TestLLMRouterDefaultFallback:
@@ -102,15 +102,15 @@ class TestLLMRouterDefaultFallback:
         router = LLMRouter(_make_registry())
         hint = RoutingHint()
         result = router.resolve(hint)
-        assert result.name == "fast"
+        assert result.name == "zhipu"
 
     def test_no_enabled_profiles_raises_error(self):
         empty_registry = LLMProfileRegistry(
             profiles={
-                "strong": LLMProfile(name="strong", enabled=False),
-                "fast": LLMProfile(name="fast", enabled=False),
+                "deepseek": LLMProfile(name="deepseek", enabled=False),
+                "zhipu": LLMProfile(name="zhipu", enabled=False),
             },
-            default_profile="fast",
+            default_profile="zhipu",
         )
         router = LLMRouter(empty_registry)
         hint = RoutingHint()
@@ -120,29 +120,86 @@ class TestLLMRouterDefaultFallback:
     def test_default_disabled_falls_to_any_enabled(self):
         registry = LLMProfileRegistry(
             profiles={
-                "fast": LLMProfile(name="fast", is_default=True, enabled=False),
-                "strong": LLMProfile(name="strong", enabled=True),
+                "zhipu": LLMProfile(name="zhipu", is_default=True, enabled=False),
+                "deepseek": LLMProfile(name="deepseek", enabled=True),
             },
-            default_profile="fast",
+            default_profile="zhipu",
         )
         router = LLMRouter(registry)
         hint = RoutingHint()
         result = router.resolve(hint)
-        assert result.name == "strong"
+        assert result.name == "deepseek"
 
 
 class TestLLMRouterPriorityOrder:
     def test_explicit_override_takes_priority_over_agent_mapping(self):
         router = LLMRouter(_make_registry())
-        hint = RoutingHint(agent_type="quality_check", profile_name="fast")
+        hint = RoutingHint(agent_type="quality_check", profile_name="zhipu")
         result = router.resolve(hint)
-        assert result.name == "fast"
+        assert result.name == "zhipu"
 
     def test_agent_mapping_takes_priority_over_action_mapping(self):
         registry = _make_registry()
-        registry.fixed_agent_routing["quality_check"] = "strong"
-        registry.action_routing["quality_check"] = "fast"
+        registry.fixed_agent_routing["quality_check"] = "deepseek"
+        registry.action_routing["quality_check"] = "zhipu"
         router = LLMRouter(registry)
         hint = RoutingHint(agent_type="quality_check", action="quality_check")
         result = router.resolve(hint)
-        assert result.name == "strong"
+        assert result.name == "deepseek"
+
+
+class TestLLMRouterResolveCandidates:
+    def test_candidates_deduplication(self):
+        router = LLMRouter(_make_registry())
+        hint = RoutingHint(agent_type="quality_check", action="analyze")
+        candidates = router.resolve_candidates(hint)
+        names = [c.name for c in candidates]
+        assert len(names) == len(set(names))
+
+    def test_candidates_first_is_best_match(self):
+        router = LLMRouter(_make_registry())
+        hint = RoutingHint(agent_type="quality_check")
+        candidates = router.resolve_candidates(hint)
+        assert candidates[0].name == "deepseek"
+
+    def test_candidates_includes_default_as_fallback(self):
+        router = LLMRouter(_make_registry())
+        hint = RoutingHint(profile_name="nonexistent")
+        candidates = router.resolve_candidates(hint)
+        names = [c.name for c in candidates]
+        assert "zhipu" in names
+
+    def test_candidates_skips_disabled(self):
+        router = LLMRouter(_make_registry())
+        hint = RoutingHint()
+        candidates = router.resolve_candidates(hint)
+        names = [c.name for c in candidates]
+        assert "local" not in names
+
+    def test_candidates_empty_when_all_disabled(self):
+        empty_registry = LLMProfileRegistry(
+            profiles={
+                "deepseek": LLMProfile(name="deepseek", enabled=False),
+                "zhipu": LLMProfile(name="zhipu", enabled=False),
+            },
+            default_profile="zhipu",
+        )
+        router = LLMRouter(empty_registry)
+        hint = RoutingHint()
+        candidates = router.resolve_candidates(hint)
+        assert candidates == []
+
+    def test_force_profile_includes_disabled_in_candidates(self):
+        router = LLMRouter(_make_registry())
+        hint = RoutingHint(profile_name="local", force_profile=True)
+        candidates = router.resolve_candidates(hint)
+        assert candidates[0].name == "local"
+
+    def test_candidates_after_primary_includes_other_enabled_profiles(self):
+        router = LLMRouter(_make_registry())
+        hint = RoutingHint(agent_type="quality_check")
+        candidates = router.resolve_candidates(hint)
+        names = [c.name for c in candidates]
+        assert names[0] == "deepseek"
+        assert "zhipu" in names
+        assert "vision" in names

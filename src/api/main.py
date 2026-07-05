@@ -773,35 +773,62 @@ async def session_stream(session_id: str):
 
 @app.get("/api/v1/llm/models")
 async def list_llm_models():
-    return {"providers": [
-        {"id": "openai", "name": "OpenAI", "default_endpoint": "https://api.openai.com/v1"},
-        {"id": "anthropic", "name": "Anthropic", "default_endpoint": "https://api.anthropic.com/v1"},
-        {"id": "deepseek", "name": "DeepSeek", "default_endpoint": "https://api.deepseek.com/v1"},
-        {"id": "azure", "name": "Azure OpenAI", "default_endpoint": ""},
-        {"id": "local", "name": "Local Model", "default_endpoint": "http://localhost:11434/v1"},
-        {"id": "custom", "name": "Custom", "default_endpoint": ""},
-    ], "models": [
-        {"id": "gpt-4o", "name": "GPT-4o", "provider": "openai", "max_tokens": 128000},
-        {"id": "gpt-4o-mini", "name": "GPT-4o Mini", "provider": "openai", "max_tokens": 128000},
-        {"id": "gpt-4-turbo", "name": "GPT-4 Turbo", "provider": "openai", "max_tokens": 128000},
-        {"id": "gpt-4", "name": "GPT-4", "provider": "openai", "max_tokens": 8192},
-        {"id": "gpt-3.5-turbo", "name": "GPT-3.5 Turbo", "provider": "openai", "max_tokens": 16385},
-        {"id": "o1-preview", "name": "O1 Preview", "provider": "openai", "max_tokens": 128000},
-        {"id": "o1-mini", "name": "O1 Mini", "provider": "openai", "max_tokens": 128000},
-        {"id": "claude-3-5-sonnet-20241022", "name": "Claude 3.5 Sonnet", "provider": "anthropic", "max_tokens": 200000},
-        {"id": "claude-3-opus-20240229", "name": "Claude 3 Opus", "provider": "anthropic", "max_tokens": 200000},
-        {"id": "claude-3-sonnet-20240229", "name": "Claude 3 Sonnet", "provider": "anthropic", "max_tokens": 200000},
-        {"id": "claude-3-haiku-20240307", "name": "Claude 3 Haiku", "provider": "anthropic", "max_tokens": 200000},
-        {"id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro", "provider": "deepseek", "max_tokens": 128000},
-        {"id": "deepseek-v4-flash", "name": "DeepSeek V4 Flash", "provider": "deepseek", "max_tokens": 128000},
-        {"id": "azure-gpt-4o", "name": "Azure GPT-4o", "provider": "azure", "max_tokens": 128000},
-        {"id": "azure-gpt-4", "name": "Azure GPT-4", "provider": "azure", "max_tokens": 8192},
-        {"id": "llama3.1", "name": "LLaMA 3.1", "provider": "local", "max_tokens": 128000},
-        {"id": "llama3.2", "name": "LLaMA 3.2", "provider": "local", "max_tokens": 128000},
-        {"id": "mistral", "name": "Mistral", "provider": "local", "max_tokens": 32000},
-        {"id": "codellama", "name": "CodeLLaMA", "provider": "local", "max_tokens": 16000},
-        {"id": "qwen2.5", "name": "Qwen 2.5", "provider": "local", "max_tokens": 32000},
-    ]}
+    from src.config.llm_profiles import load_llm_catalog
+    from src.config.settings import get_settings
+    catalog = load_llm_catalog()
+    s = get_settings()
+
+    providers = {}
+    for pid, pinfo in catalog.get("providers", {}).items():
+        providers[pid] = {
+            "id": pid,
+            "name": pinfo.name,
+            "description": pinfo.description,
+            "default_endpoint": pinfo.default_endpoint,
+        }
+
+    for profile in s.llm_profiles.profiles.values():
+        pid = profile.provider
+        if pid not in providers:
+            providers[pid] = {
+                "id": pid,
+                "name": pid,
+                "description": "",
+                "default_endpoint": profile.base_url,
+            }
+
+    models = {}
+    for m in catalog.get("models", []):
+        models[m.id] = {
+            "id": m.id,
+            "name": m.name,
+            "provider": m.provider,
+            "max_tokens": m.max_tokens,
+            "supports_vision": m.supports_vision,
+        }
+
+    for profile in s.llm_profiles.profiles.values():
+        mid = profile.model
+        if mid and mid not in models:
+            models[mid] = {
+                "id": mid,
+                "name": mid,
+                "provider": profile.provider,
+                "max_tokens": profile.max_context_tokens,
+            }
+        fmid = profile.fallback_model
+        if fmid and fmid not in models:
+            models[fmid] = {
+                "id": fmid,
+                "name": fmid,
+                "provider": profile.provider,
+                "max_tokens": profile.max_context_tokens,
+            }
+
+    return {
+        "providers": list(providers.values()),
+        "models": list(models.values()),
+    }
 
 
 @app.get("/api/v1/llm/config")

@@ -43,10 +43,10 @@ class TestSettingsProfileRegistry:
 class TestSettingsProfileCRUD:
     def test_add_profile(self):
         s = Settings()
-        p = _profile("strong", "gpt-4o", "sk-strong")
+        p = _profile("deepseek", "gpt-4o", "sk-deepseek")
         s.add_llm_profile(p)
-        assert "strong" in s.llm_profiles.profiles
-        assert s.llm_profiles.profiles["strong"].model == "gpt-4o"
+        assert "deepseek" in s.llm_profiles.profiles
+        assert s.llm_profiles.profiles["deepseek"].model == "gpt-4o"
 
     def test_add_profile_sets_created_at(self):
         s = Settings()
@@ -67,15 +67,15 @@ class TestSettingsProfileCRUD:
 
     def test_add_duplicate_name_raises(self):
         s = Settings()
-        s.add_llm_profile(_profile("strong"))
+        s.add_llm_profile(_profile("deepseek"))
         with pytest.raises(ValueError, match="already exists"):
-            s.add_llm_profile(_profile("strong"))
+            s.add_llm_profile(_profile("deepseek"))
 
     def test_update_profile(self):
         s = Settings()
-        s.add_llm_profile(_profile("strong", "gpt-4o"))
-        s.update_llm_profile("strong", model="gpt-4o-mini")
-        assert s.llm_profiles.profiles["strong"].model == "gpt-4o-mini"
+        s.add_llm_profile(_profile("deepseek", "gpt-4o"))
+        s.update_llm_profile("deepseek", model="gpt-4o-mini")
+        assert s.llm_profiles.profiles["deepseek"].model == "gpt-4o-mini"
 
     def test_update_nonexistent_raises(self):
         s = Settings()
@@ -84,9 +84,9 @@ class TestSettingsProfileCRUD:
 
     def test_delete_profile(self):
         s = Settings()
-        s.add_llm_profile(_profile("fast"))
-        s.delete_llm_profile("fast")
-        assert "fast" not in s.llm_profiles.profiles
+        s.add_llm_profile(_profile("zhipu"))
+        s.delete_llm_profile("zhipu")
+        assert "zhipu" not in s.llm_profiles.profiles
 
     def test_delete_default_profile_raises(self):
         s = Settings()
@@ -95,9 +95,9 @@ class TestSettingsProfileCRUD:
 
     def test_set_default_profile(self):
         s = Settings()
-        s.add_llm_profile(_profile("fast"))
-        s.set_default_llm_profile("fast")
-        assert s.llm_profiles.default_profile == "fast"
+        s.add_llm_profile(_profile("zhipu"))
+        s.set_default_llm_profile("zhipu")
+        assert s.llm_profiles.default_profile == "zhipu"
 
     def test_set_default_nonexistent_raises(self):
         s = Settings()
@@ -106,12 +106,12 @@ class TestSettingsProfileCRUD:
 
     def test_list_profiles(self):
         s = Settings()
-        s.add_llm_profile(_profile("strong"))
-        s.add_llm_profile(_profile("fast"))
+        s.add_llm_profile(_profile("deepseek"))
+        s.add_llm_profile(_profile("zhipu"))
         names = s.list_llm_profiles()
         assert "migrated" in names
-        assert "strong" in names
-        assert "fast" in names
+        assert "deepseek" in names
+        assert "zhipu" in names
 
 
 class TestSettingsSyncLlmFromProfiles:

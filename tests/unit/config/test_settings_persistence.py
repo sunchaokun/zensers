@@ -22,49 +22,49 @@ class TestProfileDiskPersistence:
         persist_path = str(tmp_path / "llm_profiles.json")
         s = Settings()
         s._llm_profiles_persist_path = persist_path
-        s.add_llm_profile(LLMProfile(name="strong", model="gpt-4o", api_key="sk-s"))
+        s.add_llm_profile(LLMProfile(name="deepseek", model="gpt-4o", api_key="sk-s"))
         s._persist_llm_profiles()
         data = json.loads(Path(persist_path).read_text(encoding="utf-8"))
         assert "profiles" in data
-        assert "strong" in data["profiles"]
-        assert data["profiles"]["strong"]["model"] == "gpt-4o"
+        assert "deepseek" in data["profiles"]
+        assert data["profiles"]["deepseek"]["model"] == "gpt-4o"
 
     def test_load_profiles_from_disk(self, tmp_path):
         persist_path = str(tmp_path / "llm_profiles.json")
         data = {
-            "default_profile": "fast",
-            "fallback_chain": ["strong", "fast"],
-            "fixed_agent_routing": {"quality_check": "strong"},
-            "action_routing": {"analyze": "strong"},
+            "default_profile": "zhipu",
+            "fallback_chain": ["deepseek", "zhipu"],
+            "fixed_agent_routing": {"quality_check": "deepseek"},
+            "action_routing": {"analyze": "deepseek"},
             "profiles": {
-                "fast": {"name": "fast", "model": "gpt-4o-mini", "api_key": "sk-f", "base_url": "https://f.api/v1"},
-                "strong": {"name": "strong", "model": "gpt-4o", "api_key": "sk-s", "base_url": "https://s.api/v1"},
+                "zhipu": {"name": "zhipu", "model": "gpt-4o-mini", "api_key": "sk-f", "base_url": "https://f.api/v1"},
+                "deepseek": {"name": "deepseek", "model": "gpt-4o", "api_key": "sk-s", "base_url": "https://s.api/v1"},
             },
         }
         Path(persist_path).write_text(json.dumps(data), encoding="utf-8")
         s = Settings()
         s._llm_profiles_persist_path = persist_path
         s._load_llm_profiles_from_disk()
-        assert "fast" in s.llm_profiles.profiles
-        assert "strong" in s.llm_profiles.profiles
-        assert s.llm_profiles.default_profile == "fast"
-        assert s.llm_profiles.profiles["strong"].model == "gpt-4o"
+        assert "zhipu" in s.llm_profiles.profiles
+        assert "deepseek" in s.llm_profiles.profiles
+        assert s.llm_profiles.default_profile == "zhipu"
+        assert s.llm_profiles.profiles["deepseek"].model == "gpt-4o"
 
     def test_persist_and_load_roundtrip(self, tmp_path):
         persist_path = str(tmp_path / "llm_profiles.json")
         s = Settings()
         s._llm_profiles_persist_path = persist_path
-        s.add_llm_profile(LLMProfile(name="strong", model="gpt-4o", api_key="sk-s", base_url="https://s.api/v1"))
-        s.add_llm_profile(LLMProfile(name="fast", model="gpt-4o-mini", api_key="sk-f", base_url="https://f.api/v1"))
+        s.add_llm_profile(LLMProfile(name="deepseek", model="gpt-4o", api_key="sk-s", base_url="https://s.api/v1"))
+        s.add_llm_profile(LLMProfile(name="zhipu", model="gpt-4o-mini", api_key="sk-f", base_url="https://f.api/v1"))
         s._persist_llm_profiles()
 
         Settings._reset_instance()
         s2 = Settings()
         s2._llm_profiles_persist_path = persist_path
         s2._load_llm_profiles_from_disk()
-        assert "strong" in s2.llm_profiles.profiles
-        assert "fast" in s2.llm_profiles.profiles
-        assert s2.llm_profiles.profiles["strong"].model == "gpt-4o"
+        assert "deepseek" in s2.llm_profiles.profiles
+        assert "zhipu" in s2.llm_profiles.profiles
+        assert s2.llm_profiles.profiles["deepseek"].model == "gpt-4o"
 
     def test_no_persist_path_skips_silently(self):
         s = Settings()

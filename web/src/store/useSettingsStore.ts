@@ -1,8 +1,8 @@
 import { create } from 'zustand';
-import type { LLMConfig, ThemeConfig, UploadedFile, LLMModel, AppSettings, LLMProfile, RoutingConfig } from '@/types/settings';
-import { DEFAULT_SETTINGS, PROVIDER_DEFAULTS, PRESET_MODELS, DEFAULT_LLM_PROFILE, normalizeProfileResponse, profileToLLMConfig, migrateLlmToProfile } from '@/types/settings';
+import type { LLMConfig, ThemeConfig, UploadedFile, LLMModel, LLMProviderInfo, AppSettings, LLMProfile, RoutingConfig } from '@/types/settings';
+import { DEFAULT_SETTINGS, DEFAULT_LLM_PROFILE, normalizeProfileResponse, profileToLLMConfig, migrateLlmToProfile } from '@/types/settings';
 
-const STORAGE_KEY = 'Zensers-settings-v2';
+const STORAGE_KEY = 'Zensers-settings-v3';
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
 function loadFromStorage(): Record<string, any> | null {
@@ -83,6 +83,7 @@ interface SettingsState {
 
   uploadedFiles: UploadedFile[];
   availableModels: LLMModel[];
+  availableProviders: LLMProviderInfo[];
 }
 
 const INITIAL_PROFILES: Record<string, LLMProfile> = {};
@@ -107,24 +108,23 @@ function getInitialState(): Omit<SettingsState, keyof SettingsMethods> {
       showTokenCount: DEFAULT_SETTINGS.showTokenCount,
       autoSaveDraft: DEFAULT_SETTINGS.autoSaveDraft,
       uploadedFiles: [],
-      availableModels: PRESET_MODELS,
+      availableModels: [],
+      availableProviders: [],
     };
   }
 
   const persisted = loadFromStorage();
-  if (persisted?.state?.profiles && Object.keys(persisted.state.profiles).length > 0) {
+  if (persisted?.state) {
     const st = persisted.state;
-    const activeProfile = st.profiles[st.activeProfileName];
-    const llm = activeProfile ? profileToLLMConfig(activeProfile) : { ...DEFAULT_SETTINGS.llm };
     return {
-      profiles: st.profiles,
-      savedProfiles: st.savedProfiles || st.profiles,
-      activeProfileName: st.activeProfileName || '',
-      defaultProfileName: st.defaultProfileName || '',
-      routingConfig: st.routingConfig || INITIAL_ROUTING,
+      profiles: INITIAL_PROFILES,
+      savedProfiles: INITIAL_PROFILES,
+      activeProfileName: '',
+      defaultProfileName: '',
+      routingConfig: INITIAL_ROUTING,
       isLoadingProfiles: false,
-      llm,
-      savedLlm: { ...llm },
+      llm: { ...DEFAULT_SETTINGS.llm },
+      savedLlm: { ...DEFAULT_SETTINGS.llm },
       isSaving: false,
       saveError: null,
       theme: { ...DEFAULT_SETTINGS.theme, ...(st.theme || {}) },
@@ -133,30 +133,8 @@ function getInitialState(): Omit<SettingsState, keyof SettingsMethods> {
       showTokenCount: st.showTokenCount ?? DEFAULT_SETTINGS.showTokenCount,
       autoSaveDraft: st.autoSaveDraft ?? DEFAULT_SETTINGS.autoSaveDraft,
       uploadedFiles: [],
-      availableModels: PRESET_MODELS,
-    };
-  }
-
-  if (persisted?.state?.llm) {
-    const profile = migrateLlmToProfile(persisted.state.llm);
-    return {
-      profiles: { migrated: profile },
-      savedProfiles: { migrated: profile },
-      activeProfileName: 'migrated',
-      defaultProfileName: 'migrated',
-      routingConfig: INITIAL_ROUTING,
-      isLoadingProfiles: false,
-      llm: { ...DEFAULT_SETTINGS.llm, ...persisted.state.llm },
-      savedLlm: { ...DEFAULT_SETTINGS.llm, ...persisted.state.llm },
-      isSaving: false,
-      saveError: null,
-      theme: { ...DEFAULT_SETTINGS.theme, ...(persisted.state.theme || {}) },
-      language: persisted.state.language ?? DEFAULT_SETTINGS.language,
-      sendOnEnter: persisted.state.sendOnEnter ?? DEFAULT_SETTINGS.sendOnEnter,
-      showTokenCount: persisted.state.showTokenCount ?? DEFAULT_SETTINGS.showTokenCount,
-      autoSaveDraft: persisted.state.autoSaveDraft ?? DEFAULT_SETTINGS.autoSaveDraft,
-      uploadedFiles: [],
-      availableModels: PRESET_MODELS,
+      availableModels: [],
+      availableProviders: [],
     };
   }
 
@@ -177,7 +155,8 @@ function getInitialState(): Omit<SettingsState, keyof SettingsMethods> {
     showTokenCount: DEFAULT_SETTINGS.showTokenCount,
     autoSaveDraft: DEFAULT_SETTINGS.autoSaveDraft,
     uploadedFiles: [],
-    availableModels: PRESET_MODELS,
+    availableModels: [],
+    availableProviders: [],
   };
 }
 
@@ -265,6 +244,7 @@ export const useSettingsStore = create<SettingsState & SettingsMethods>()((set, 
         return { profiles, savedProfiles: { ...state.savedProfiles, [name]: { ...profile } }, llm, savedLlm: { ...llm } };
       });
       saveToStorage(get());
+      get().loadModels();
     } catch (e: any) {
       throw e;
     }
@@ -304,6 +284,7 @@ export const useSettingsStore = create<SettingsState & SettingsMethods>()((set, 
         };
       });
       saveToStorage(get());
+      if (fields.provider || fields.model) get().loadModels();
     } catch (e: any) {
       const msg = e?.name === 'AbortError' ? 'Request timed out' : String(e?.message || e);
       set({ isSaving: false, saveError: msg });
@@ -337,6 +318,7 @@ export const useSettingsStore = create<SettingsState & SettingsMethods>()((set, 
       return { profiles, savedProfiles, activeProfileName, llm, savedLlm: { ...llm } };
     });
     saveToStorage(get());
+    get().loadModels();
   },
 
   setDefaultProfile: async (name) => {
@@ -533,21 +515,33 @@ export const useSettingsStore = create<SettingsState & SettingsMethods>()((set, 
       const res = await fetch(`${API_BASE_URL}/api/v1/llm/models`);
       if (res.ok) {
         const data = await res.json();
-        if (data.models?.length) {
-          const mapped: LLMModel[] = data.models.map((m: any) => ({
-            id: m.id,
-            name: m.name,
-            provider: m.provider,
-            maxTokens: m.max_tokens ?? 128000,
-          }));
-          set({ availableModels: mapped });
-        }
+        const providers: LLMProviderInfo[] = (data.providers || []).map((p: any) => ({
+          id: p.id,
+          name: p.name,
+          description: p.description || '',
+          defaultEndpoint: p.default_endpoint || '',
+        }));
+        const models: LLMModel[] = (data.models || []).map((m: any) => ({
+          id: m.id,
+          name: m.name,
+          provider: m.provider,
+          maxTokens: m.max_tokens ?? 128000,
+          supportsVision: m.supports_vision ?? false,
+        }));
+        set({ availableModels: models, availableProviders: providers });
       }
     } catch {}
   },
 
   switchProvider: (provider) => {
-    const defaults = PROVIDER_DEFAULTS[provider];
+    const state = get();
+    const pInfo = state.availableProviders.find(p => p.id === provider);
+    const defaultModel = state.availableModels.find(m => m.provider === provider)?.id || '';
+    const defaults = pInfo ? {
+      apiEndpoint: pInfo.defaultEndpoint,
+      model: defaultModel,
+      maxTokens: 4096,
+    } : {};
     set((state) => ({
       llm: {
         ...state.llm,

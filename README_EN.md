@@ -10,7 +10,7 @@
 
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-green.svg)]()
-[![Version](https://img.shields.io/badge/version-2.4.0-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-2.6.0-blue.svg)]()
 [![Next.js 14](https://img.shields.io/badge/Next.js-14-black.svg)]()
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-teal.svg)]()
 
@@ -174,11 +174,11 @@ cd web && npm install && cd ..
 ### Launch
 
 ```bash
-# Option 1: Development mode (recommended)
-uvicorn src.main:app --reload
-
-# Option 2: Desktop application
+# Option 1: Desktop application (one-click start, recommended)
 python desktop_app.py
+
+# Option 2: Development mode
+uvicorn src.api.main:app --reload
 
 # Option 3: Docker
 docker compose up -d
@@ -186,6 +186,8 @@ docker compose up -d
 # Option 4: Production deployment
 bash start.prod.sh
 ```
+
+> **Desktop App Features**: Independent watchdog process guard — automatically cleans up backend/frontend child processes even when the window is force-closed, with no zombie processes left behind.
 
 ### Usage
 
