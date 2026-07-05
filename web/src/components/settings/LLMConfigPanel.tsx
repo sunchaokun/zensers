@@ -12,7 +12,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { PRESET_MODELS, PROVIDER_INFO, LLMProvider, LLMProfile, DEFAULT_LLM_PROFILE, RoutingConfig } from '@/types/settings';
+import { PRESET_MODELS, PROVIDER_INFO, PROVIDER_DEFAULTS, LLMProvider, LLMProfile, DEFAULT_LLM_PROFILE, RoutingConfig } from '@/types/settings';
 import { Eye, EyeOff, Loader2, Star, Plus, Trash2, ChevronDown, ChevronRight, MoreVertical, AlertCircle, CheckCircle2 } from 'lucide-react';
 import { useState, useEffect, useRef, useCallback } from 'react';
 
@@ -119,6 +119,27 @@ export function LLMConfigPanel() {
     } catch (e: any) {
       showError(e.message || '保存失败');
     }
+  };
+
+  const handleProviderChange = (newProvider: string) => {
+    const defaults = PROVIDER_DEFAULTS[newProvider as LLMProvider];
+    if (!defaults) {
+      handleFieldChange('provider', newProvider);
+      return;
+    }
+    const fields: Record<string, any> = { provider: newProvider };
+    if (defaults.apiEndpoint) fields.base_url = defaults.apiEndpoint;
+    if (defaults.model) fields.model = defaults.model;
+    if (defaults.maxTokens) fields.max_tokens = defaults.maxTokens;
+    setModifiedFields((prev) => {
+      const n = new Set(prev);
+      n.add('provider');
+      if (defaults.apiEndpoint) n.add('base_url');
+      if (defaults.model) n.add('model');
+      if (defaults.maxTokens) n.add('max_tokens');
+      return n;
+    });
+    scheduleSave(fields);
   };
 
   const handleCreateProfile = async () => {
@@ -228,6 +249,9 @@ export function LLMConfigPanel() {
                     <div className="flex items-center gap-1.5 truncate">
                       {isDefault && <Star className="h-3.5 w-3.5 text-yellow-500 flex-shrink-0" />}
                       <span className="truncate">{p.display_name || name}</span>
+                      <span className="text-[10px] text-muted-foreground bg-muted px-1 rounded flex-shrink-0">
+                        {PROVIDER_INFO[p.provider as LLMProvider]?.name || p.provider}
+                      </span>
                     </div>
                     <div className="relative">
                       <button
@@ -304,10 +328,10 @@ export function LLMConfigPanel() {
 
                 {/* Provider */}
                 <div className="space-y-1.5">
-                  <Label>Provider</Label>
+                  <Label>供应商</Label>
                   <Select
                     value={activeProfile.provider}
-                    onValueChange={(v) => handleFieldChange('provider', v)}
+                    onValueChange={handleProviderChange}
                   >
                     <SelectTrigger><SelectValue /></SelectTrigger>
                     <SelectContent>
@@ -320,7 +344,7 @@ export function LLMConfigPanel() {
 
                 {/* API Endpoint */}
                 <div className="space-y-1.5">
-                  <Label>API Endpoint</Label>
+                  <Label>API 地址</Label>
                   <Input
                     value={activeProfile.base_url}
                     onChange={(e) => handleFieldChange('base_url', e.target.value)}
@@ -357,7 +381,7 @@ export function LLMConfigPanel() {
 
                 {/* Model */}
                 <div className="space-y-1.5">
-                  <Label>Model</Label>
+                  <Label>模型</Label>
                   {activeProfile.provider === 'custom' ? (
                     <Input
                       value={activeProfile.model}
@@ -376,7 +400,10 @@ export function LLMConfigPanel() {
                           .map((m) => (
                             <SelectItem key={m.id} value={m.id}>{m.name}</SelectItem>
                           ))}
-                        <SelectItem value={activeProfile.model}>{activeProfile.model} (当前)</SelectItem>
+                        {PRESET_MODELS.filter((m) => m.provider === activeProfile.provider).length === 0 &&
+                          !PRESET_MODELS.some((m) => m.id === activeProfile.model) && (
+                          <SelectItem value={activeProfile.model}>{activeProfile.model}</SelectItem>
+                        )}
                       </SelectContent>
                     </Select>
                   )}
@@ -384,7 +411,7 @@ export function LLMConfigPanel() {
 
                 {/* Temperature */}
                 <div className="space-y-1.5">
-                  <Label>Temperature ({activeProfile.temperature})</Label>
+                  <Label>Temperature 温度 ({activeProfile.temperature})</Label>
                   <Input
                     type="range"
                     min="0"
@@ -398,7 +425,7 @@ export function LLMConfigPanel() {
 
                 {/* Max Tokens */}
                 <div className="space-y-1.5">
-                  <Label>Max Tokens</Label>
+                  <Label>最大 Tokens</Label>
                   <Input
                     type="number"
                     min="100"
@@ -424,7 +451,7 @@ export function LLMConfigPanel() {
 
                 {/* Frequency Penalty */}
                 <div className="space-y-1.5">
-                  <Label>Frequency Penalty ({activeProfile.frequency_penalty})</Label>
+                  <Label>频率惩罚 ({activeProfile.frequency_penalty})</Label>
                   <Input
                     type="range"
                     min="0"
@@ -438,7 +465,7 @@ export function LLMConfigPanel() {
 
                 {/* Presence Penalty */}
                 <div className="space-y-1.5">
-                  <Label>Presence Penalty ({activeProfile.presence_penalty})</Label>
+                  <Label>存在惩罚 ({activeProfile.presence_penalty})</Label>
                   <Input
                     type="range"
                     min="0"
