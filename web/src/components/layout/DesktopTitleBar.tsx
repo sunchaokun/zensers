@@ -51,12 +51,11 @@ export function DesktopTitleBar() {
 
   return (
     <div
-      className="flex items-center justify-between shrink-0 select-none"
+      className="flex items-center justify-between shrink-0 select-none bg-background"
       style={{
         height: 38,
         padding: '0 14px',
-        background: 'linear-gradient(180deg, rgba(28,28,30,0.98) 0%, rgba(28,28,30,0.95) 100%)',
-        borderBottom: '0.5px solid rgba(255,255,255,0.06)',
+        borderBottom: '1px solid hsl(var(--border))',
       }}
       onDoubleClick={() => callApi('maximize')}
       onMouseDown={handleMouseDown}
@@ -64,7 +63,7 @@ export function DesktopTitleBar() {
       {/* 左侧标题 */}
       <div className="flex items-center gap-2">
         <img src="/logo.png" alt="Zensers" className="h-4 w-4 rounded object-contain" />
-        <span style={{ color: 'rgba(255,255,255,0.85)', fontSize: 13, fontWeight: 500, letterSpacing: '-0.2px' }}>Zensers</span>
+        <span className="text-foreground" style={{ fontSize: 13, fontWeight: 500, letterSpacing: '-0.2px' }}>Zensers</span>
       </div>
 
       {/* 右侧按钮 */}

@@ -17,6 +17,7 @@ import { Eye, EyeOff, Loader2, Plus, Trash2, ChevronDown, ChevronRight, MoreVert
 import { useState, useEffect, useRef, useCallback } from 'react';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+const PRIMARY_PROVIDERS = ['openai', 'deepseek', 'zhipu', 'qwen', 'kimi'];
 
 export function LLMConfigPanel() {
   const {
@@ -47,6 +48,7 @@ export function LLMConfigPanel() {
   const [newProfileCustomProvider, setNewProfileCustomProvider] = useState('');
   const [routingExpanded, setRoutingExpanded] = useState(false);
   const [menuOpen, setMenuOpen] = useState<string | null>(null);
+  const [addProviderOpen, setAddProviderOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [modifiedFields, setModifiedFields] = useState<Set<string>>(new Set());
@@ -202,6 +204,30 @@ export function LLMConfigPanel() {
     setMenuOpen(null);
   };
 
+  const handleQuickAddProvider = async (providerId: string) => {
+    const pInfo = availableProviders.find(p => p.id === providerId);
+    if (!pInfo) return;
+    const profileName = providerId;
+    if (profiles[profileName]) {
+      switchProfile(profileName);
+      return;
+    }
+    const defaultModel = getProviderDefaultModel(providerId);
+    try {
+      await createProfile({
+        name: profileName,
+        provider: providerId,
+        model: defaultModel,
+        base_url: pInfo.defaultEndpoint || '',
+        max_tokens: 4096,
+      });
+      switchProfile(profileName);
+      showSuccess('已添加');
+    } catch (e: any) {
+      showError(e.message || '添加失败');
+    }
+  };
+
   const handleRoutingChange = async (newConfig: RoutingConfig) => {
     const existingNames = Object.keys(profiles);
     for (const [, profileName] of Object.entries(newConfig.fixed_agent_routing)) {
@@ -245,49 +271,162 @@ export function LLMConfigPanel() {
       <CardContent>
         <div className="flex gap-6 min-h-[500px]">
           {/* Left sidebar */}
-          <div className="w-48 flex-shrink-0 border-r pr-4">
-            <div className="space-y-1">
-              {profileNames.map((name) => {
-                const p = profiles[name];
-                const isActive = name === activeProfileName;
-                const providerLabel = getProviderName(p.provider);
+          <div className="w-52 flex-shrink-0 border-r pr-4 flex flex-col">
+            {/* Primary providers - always visible */}
+            <div className="space-y-0.5">
+              {PRIMARY_PROVIDERS.map((pid) => {
+                const pInfo = availableProviders.find(p => p.id === pid);
+                const p = Object.values(profiles).find(pf => pf.provider === pid);
+                const isActive = p ? profiles[activeProfileName]?.provider === pid : false;
+                const providerLabel = pInfo?.name || pid;
+                const isConfigured = !!p;
+
                 return (
                   <div
-                    key={name}
+                    key={pid}
                     className={`flex items-center justify-between group px-2 py-1.5 rounded cursor-pointer text-sm ${
-                      isActive ? 'bg-primary/10 text-primary font-medium' : 'hover:bg-muted'
+                      isActive ? 'bg-primary/10 text-primary font-medium' : isConfigured ? 'hover:bg-muted' : 'hover:bg-muted/50 text-muted-foreground'
                     }`}
-                    onClick={() => switchProfile(name)}
+                    onClick={() => {
+                      if (isConfigured && p) {
+                        switchProfile(Object.keys(profiles).find(n => profiles[n].provider === pid) || '');
+                      } else {
+                        handleQuickAddProvider(pid);
+                      }
+                    }}
                   >
                     <div className="flex flex-col truncate min-w-0">
                       <span className="truncate font-medium">{providerLabel}</span>
-                      <span className="text-[10px] text-muted-foreground truncate pl-0">{p.model || name}</span>
-                    </div>
-                    <div className="relative">
-                      <button
-                        className="opacity-0 group-hover:opacity-100 p-0.5 hover:bg-muted rounded"
-                        onClick={(e) => { e.stopPropagation(); setMenuOpen(menuOpen === name ? null : name); }}
-                      >
-                        <MoreVertical className="h-3.5 w-3.5" />
-                      </button>
-                      {menuOpen === name && (
-                        <div className="absolute right-0 top-6 z-10 bg-background border rounded shadow-md py-1 min-w-[120px]">
-                          <button
-                            className="w-full text-left px-3 py-1.5 text-xs text-destructive hover:bg-muted"
-                            onClick={(e) => { e.stopPropagation(); handleDeleteProfile(name); }}
-                          >
-                            删除
-                          </button>
-                        </div>
+                      {isConfigured && p ? (
+                        <span className="text-[10px] text-muted-foreground truncate">{p.model || pid}</span>
+                      ) : (
+                        <span className="text-[10px] text-muted-foreground/60 truncate">未配置</span>
                       )}
                     </div>
+                    {isConfigured && p ? (
+                      <div className="relative">
+                        <button
+                          className="opacity-0 group-hover:opacity-100 p-0.5 hover:bg-muted rounded"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            const name = Object.keys(profiles).find(n => profiles[n].provider === pid) || '';
+                            setMenuOpen(menuOpen === name ? null : name);
+                          }}
+                        >
+                          <MoreVertical className="h-3.5 w-3.5" />
+                        </button>
+                        {menuOpen === Object.keys(profiles).find(n => profiles[n].provider === pid) && (
+                          <div className="absolute right-0 top-6 z-10 bg-background border rounded shadow-md py-1 min-w-[120px]">
+                            <button
+                              className="w-full text-left px-3 py-1.5 text-xs text-destructive hover:bg-muted"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                const name = Object.keys(profiles).find(n => profiles[n].provider === pid) || '';
+                                handleDeleteProfile(name);
+                              }}
+                            >
+                              删除
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <Plus className="h-3.5 w-3.5 text-muted-foreground/50 group-hover:text-primary" />
+                    )}
                   </div>
                 );
               })}
             </div>
-            <div className="mt-4 pt-4 border-t">
-              {showNewProfileInput ? (
-                <div className="space-y-2">
+
+            {/* Custom providers (profiles not in PRIMARY_PROVIDERS) */}
+            {Object.entries(profiles).filter(([_, p]) => !PRIMARY_PROVIDERS.includes(p.provider)).length > 0 && (
+              <>
+                <div className="mt-3 mb-1 px-2">
+                  <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">自定义</span>
+                </div>
+                <div className="space-y-0.5">
+                  {Object.entries(profiles).filter(([_, p]) => !PRIMARY_PROVIDERS.includes(p.provider)).map(([name, p]) => {
+                    const isActive = name === activeProfileName;
+                    const providerLabel = getProviderName(p.provider);
+                    return (
+                      <div
+                        key={name}
+                        className={`flex items-center justify-between group px-2 py-1.5 rounded cursor-pointer text-sm ${
+                          isActive ? 'bg-primary/10 text-primary font-medium' : 'hover:bg-muted'
+                        }`}
+                        onClick={() => switchProfile(name)}
+                      >
+                        <div className="flex flex-col truncate min-w-0">
+                          <span className="truncate font-medium">{providerLabel}</span>
+                          <span className="text-[10px] text-muted-foreground truncate">{p.model || name}</span>
+                        </div>
+                        <div className="relative">
+                          <button
+                            className="opacity-0 group-hover:opacity-100 p-0.5 hover:bg-muted rounded"
+                            onClick={(e) => { e.stopPropagation(); setMenuOpen(menuOpen === name ? null : name); }}
+                          >
+                            <MoreVertical className="h-3.5 w-3.5" />
+                          </button>
+                          {menuOpen === name && (
+                            <div className="absolute right-0 top-6 z-10 bg-background border rounded shadow-md py-1 min-w-[120px]">
+                              <button
+                                className="w-full text-left px-3 py-1.5 text-xs text-destructive hover:bg-muted"
+                                onClick={(e) => { e.stopPropagation(); handleDeleteProfile(name); }}
+                              >
+                                删除
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+
+            {/* Add more providers dropdown */}
+            <div className="mt-4 pt-3 border-t">
+              {availableProviders.filter(p => !PRIMARY_PROVIDERS.includes(p.id) && !Object.values(profiles).some(pf => pf.provider === p.id)).length > 0 ? (
+                <div className="relative">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="w-full text-xs justify-start"
+                    onClick={() => setAddProviderOpen(!addProviderOpen)}
+                  >
+                    <Plus className="h-3.5 w-3.5 mr-1.5" /> 添加供应商
+                  </Button>
+                  {addProviderOpen && (
+                    <div className="absolute left-0 top-full mt-1 z-10 bg-background border rounded shadow-md py-1 min-w-[180px] max-h-48 overflow-y-auto">
+                      {availableProviders
+                        .filter(p => !PRIMARY_PROVIDERS.includes(p.id) && !Object.values(profiles).some(pf => pf.provider === p.id))
+                        .map(p => (
+                          <button
+                            key={p.id}
+                            className="w-full text-left px-3 py-1.5 text-xs hover:bg-muted flex items-center gap-2"
+                            onClick={() => { handleQuickAddProvider(p.id); setAddProviderOpen(false); }}
+                          >
+                            <span>{p.name}</span>
+                            {p.description && <span className="text-muted-foreground text-[10px] truncate">{p.description}</span>}
+                          </button>
+                        ))}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="w-full text-xs"
+                  onClick={() => setShowNewProfileInput(true)}
+                >
+                  <Plus className="h-3.5 w-3.5 mr-1" /> 自定义供应商
+                </Button>
+              )}
+
+              {showNewProfileInput && (
+                <div className="mt-2 space-y-2">
                   <Input
                     placeholder="profile-name"
                     value={newProfileName}
@@ -318,15 +457,6 @@ export function LLMConfigPanel() {
                     <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => { setShowNewProfileInput(false); setNewProfileName(''); setNewProfileCustomProvider(''); }}>取消</Button>
                   </div>
                 </div>
-              ) : (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="w-full text-xs"
-                  onClick={() => setShowNewProfileInput(true)}
-                >
-                  <Plus className="h-3.5 w-3.5 mr-1" /> 新建 Profile
-                </Button>
               )}
             </div>
           </div>
