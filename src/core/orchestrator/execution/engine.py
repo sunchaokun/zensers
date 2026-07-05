@@ -1968,6 +1968,9 @@ class ExecutionEngine:
             name="engine._wait_for_completion_with_pause_check"
         )
         
+        _total_agents_in_batch = len(task_ids)
+        _completed_in_batch = 0
+        
         interrupted = False
         interrupted_reason = ""
         try:
@@ -1982,6 +1985,29 @@ class ExecutionEngine:
                     interrupted = True
                     interrupted_reason = "paused"
                     break
+                _prev_completed = _completed_in_batch
+                _completed_in_batch = sum(
+                    1 for tid in task_ids
+                    if self._coordinator._active_tasks.get(tid) is not None
+                    and self._coordinator._active_tasks[tid].done()
+                )
+                if _completed_in_batch != _prev_completed and session_id and _total_agents_in_batch > 0:
+                    try:
+                        from src.core.progress_streamer import update_progress as _up
+                        _sched = getattr(self, '_execution_scheduler', None)
+                        if _sched and hasattr(_sched, 'get_execution_stats'):
+                            stats = _sched.get_execution_stats()
+                            total = stats.get("total", _total_agents_in_batch) or _total_agents_in_batch
+                            done = stats.get("completed", _completed_in_batch) or _completed_in_batch
+                        else:
+                            total = _total_agents_in_batch
+                            done = _completed_in_batch
+                        _agent_progress = 0.2 + (done / max(total, 1)) * 0.5
+                        _up(session_id, min(_agent_progress, 0.69),
+                            phase_id="execution",
+                            message=f"Agent {done}/{total} completed")
+                    except Exception:
+                        pass
                 await asyncio.sleep(poll_interval)
             
             if not interrupted and wait_task.done():

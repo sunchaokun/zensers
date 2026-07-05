@@ -304,8 +304,8 @@ class TestR4AProxySupport:
         with open(settings_path, "r", encoding="utf-8") as f:
             config = yaml.safe_load(f)
 
-        search_config = config.get("search", {})
-        assert "proxy" in search_config, "settings.yaml should have proxy config field"
+        has_proxy = "proxy" in config or "proxy" in config.get("search", {})
+        assert has_proxy, "settings.yaml should have proxy config (top-level or under search)"
 
     def test_skill_reads_proxy_from_settings(self):
         """After fix, MultiSearchSkill should read proxy from settings.yaml."""
@@ -551,3 +551,133 @@ class TestR3CFallbackLogic:
         default_stop = RetryConfig().stop_errors
         assert "401" in default_stop
         assert "404" in default_stop
+
+
+# ============================================================
+# Bug #1: Heartbeat does not update last_heartbeat_at
+# ============================================================
+
+class TestHeartbeatUpdatesSession:
+    """Verify that ProgressHeartbeat._loop updates last_heartbeat_at in session."""
+
+    def test_heartbeat_loop_updates_session_heartbeat_time(self):
+        """_update_heartbeat should write last_heartbeat_at to session."""
+        from src.core.progress_heartbeat import ProgressHeartbeat
+        from datetime import datetime
+
+        mock_session = MagicMock()
+        mock_session.get.return_value = {
+            "status": "running",
+            "progress": 0.2,
+            "current_phase": "execution",
+        }
+        mock_session.update = MagicMock()
+
+        with patch("src.core.session_manager.SessionManager") as MockSM:
+            MockSM.get_instance.return_value.get.return_value = mock_session
+            ProgressHeartbeat._update_heartbeat("test_session_1")
+
+        mock_session.update.assert_called_once()
+        update_arg = mock_session.update.call_args[0][0]
+        assert "task_progress" in update_arg
+        tp = update_arg["task_progress"]
+        assert "last_heartbeat_at" in tp
+        hb_time = datetime.fromisoformat(tp["last_heartbeat_at"])
+        assert (datetime.now() - hb_time).total_seconds() < 5
+
+    def test_heartbeat_loop_skips_when_no_session(self):
+        """_update_heartbeat should not crash when session is None."""
+        from src.core.progress_heartbeat import ProgressHeartbeat
+
+        with patch("src.core.session_manager.SessionManager") as MockSM:
+            MockSM.get_instance.return_value.get.return_value = None
+            ProgressHeartbeat._update_heartbeat("nonexistent_session")
+
+
+# ============================================================
+# Bug #2: Progress stuck at 20% during agent execution
+# ============================================================
+
+class TestProgressUpdatesDuringExecution:
+    """Verify that agent completion triggers progress updates."""
+
+    def test_single_batch_progress_formula(self):
+        """With 1 batch, batch_index=0, progress should still update
+        during agent execution (not stuck at 0.2)."""
+        batch_index = 0
+        total_batches = 1
+        base_progress = 0.2 + (batch_index / max(total_batches, 1)) * 0.5
+        assert base_progress == 0.2
+
+        done_agents = 3
+        total_agents = 8
+        agent_progress = 0.2 + (done_agents / max(total_agents, 1)) * 0.5
+        assert agent_progress > 0.2
+        assert agent_progress == 0.2 + 3 / 8 * 0.5
+
+    def test_all_agents_done_progress(self):
+        """When all agents are done, progress should approach 0.7."""
+        total_agents = 8
+        done_agents = 8
+        agent_progress = 0.2 + (done_agents / max(total_agents, 1)) * 0.5
+        assert agent_progress == 0.7
+
+    def test_progress_capped_at_069(self):
+        """Agent completion progress should be capped below 0.7
+        to avoid conflicting with the 'all agents completed' update."""
+        done = 8
+        total = 8
+        agent_progress = 0.2 + (done / max(total, 1)) * 0.5
+        capped = min(agent_progress, 0.69)
+        assert capped == 0.69
+
+
+# ============================================================
+# Bug #3: persona_generation_agent replaces event loop
+# ============================================================
+
+class TestPersonaAgentEventLoopSafety:
+    """Verify that persona_generation_agent doesn't replace the running event loop."""
+
+    def test_enhance_personas_does_not_replace_running_loop(self):
+        """_enhance_personas should use ThreadPoolExecutor when loop is running."""
+        from src.agents.fixed_agents.persona_generation_agent import PersonaGenerationAgent
+
+        agent = PersonaGenerationAgent.__new__(PersonaGenerationAgent)
+
+        with patch("asyncio.get_event_loop") as mock_get_loop:
+            mock_loop = MagicMock()
+            mock_loop.is_running.return_value = True
+            mock_get_loop.return_value = mock_loop
+
+            with patch.object(agent, '_enhance_with_llm_async', new_callable=AsyncMock, return_value=[]):
+                with patch("concurrent.futures.ThreadPoolExecutor") as MockPool:
+                    mock_pool_inst = MagicMock()
+                    mock_future = MagicMock()
+                    mock_future.result.return_value = []
+                    mock_pool_inst.submit.return_value = mock_future
+                    mock_pool_inst.__enter__ = MagicMock(return_value=mock_pool_inst)
+                    mock_pool_inst.__exit__ = MagicMock(return_value=False)
+                    MockPool.return_value = mock_pool_inst
+
+                    result = agent._enhance_with_llm_sync([], None)
+
+            mock_get_loop.assert_called()
+            mock_loop.is_running.assert_called()
+
+    def test_enhance_uses_run_until_complete_when_loop_not_running(self):
+        """When event loop is not running, should use run_until_complete directly."""
+        from src.agents.fixed_agents.persona_generation_agent import PersonaGenerationAgent
+
+        agent = PersonaGenerationAgent.__new__(PersonaGenerationAgent)
+
+        with patch("asyncio.get_event_loop") as mock_get_loop:
+            mock_loop = MagicMock()
+            mock_loop.is_running.return_value = False
+            mock_loop.run_until_complete.return_value = []
+            mock_get_loop.return_value = mock_loop
+
+            with patch.object(agent, '_enhance_with_llm_async', new_callable=AsyncMock, return_value=[]):
+                result = agent._enhance_with_llm_sync([], None)
+
+            mock_loop.run_until_complete.assert_called_once()

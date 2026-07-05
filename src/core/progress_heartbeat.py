@@ -9,14 +9,12 @@ to prevent the frontend from thinking the system is frozen.
 
 import asyncio
 import logging
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
 
 class ProgressHeartbeat:
-    """Periodically pushes heartbeat agent_messages during research execution
-    to prevent the frontend from thinking the system is frozen."""
-
     _tasks: dict = {}
     _INTERVAL_SECONDS = 15
 
@@ -41,6 +39,7 @@ class ProgressHeartbeat:
                 task = ProgressStreamer.get_task_state(session_id)
                 if not task or task.status not in ("running", "paused"):
                     break
+                cls._update_heartbeat(session_id)
                 from src.core.session_streamer import SessionStreamer
                 SessionStreamer.push_agent_message(session_id, {
                     "agent_id": "system",
@@ -52,3 +51,17 @@ class ProgressHeartbeat:
             pass
         finally:
             cls._tasks.pop(session_id, None)
+
+    @classmethod
+    def _update_heartbeat(cls, session_id: str):
+        try:
+            from src.core.session_manager import SessionManager
+            sm = SessionManager.get_instance()
+            session = sm.get(session_id)
+            if session is None:
+                return
+            tp = session.get("task_progress", {})
+            tp["last_heartbeat_at"] = datetime.now().isoformat()
+            session.update({"task_progress": tp})
+        except Exception as e:
+            logger.debug(f"Heartbeat persist failed for {session_id}: {e}")

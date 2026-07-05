@@ -285,16 +285,19 @@ class PersonaGenerationAgent(FixedAgent):
             Enhanced list of personas
         """
         try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                # Async enhancement
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as pool:
+                    enhanced = pool.submit(
+                        lambda: asyncio.run(self._enhance_with_llm_async(personas, context))
+                    ).result()
+                return enhanced
+            else:
                 enhanced = loop.run_until_complete(
                     self._enhance_with_llm_async(personas, context)
                 )
                 return enhanced
-            finally:
-                loop.close()
         except Exception:
             # LLM enhancement failed, return original personas
             return personas
