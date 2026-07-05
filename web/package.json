@@ -1,8 +1,10 @@
 {
   "name": "zensers-web",
-  "version": "2.6.0",
+  "version": "0.0.0",
   "private": true,
   "scripts": {
+    "sync-version": "node -e \"const fs=require('fs'),p=require('path');const c=fs.readFileSync(p.join(__dirname,'..','pyproject.toml'),'utf-8');const m=c.match(/^version\\s*=\\s*\"([^\"]+)\"/m);if(m){const pkg=JSON.parse(fs.readFileSync('package.json','utf-8'));pkg.version=m[1];fs.writeFileSync('package.json',JSON.stringify(pkg,null,2)+'\\n');console.log('Synced version:',m[1])}else{console.error('No version found in pyproject.toml');process.exit(1)}\"",
+    "prebuild": "npm run sync-version",
     "dev": "next dev",
     "dev:full": "concurrently \"npm run dev:backend\" \"npm run dev\"",
     "dev:backend": "cd .. && venv\\Scripts\\activate && uvicorn src.api.main:app --reload --port 8000",

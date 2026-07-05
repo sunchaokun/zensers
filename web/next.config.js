@@ -1,10 +1,13 @@
 const fs = require('fs');
 const path = require('path');
 
-const versionFile = path.join(__dirname, '..', 'VERSION');
-const version = fs.existsSync(versionFile)
-  ? fs.readFileSync(versionFile, 'utf-8').trim()
-  : '0.0.0';
+const pyprojectPath = path.join(__dirname, '..', 'pyproject.toml');
+let version = '0.0.0';
+try {
+  const content = fs.readFileSync(pyprojectPath, 'utf-8');
+  const match = content.match(/^version\s*=\s*"([^"]+)"/m);
+  if (match) version = match[1];
+} catch {}
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
