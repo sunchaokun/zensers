@@ -98,9 +98,20 @@ export function GeneralPanel() {
               </div>
               <div className="flex justify-between">
                 <span className="text-muted-foreground">Remote Version</span>
-                <span className="font-mono">
-                  {loading && !versionInfo ? 'Checking...' : (versionInfo?.remote_version || '—')}
-                </span>
+                <div className="flex items-center gap-2">
+                  <span className="font-mono">
+                    {loading && !versionInfo ? 'Checking...' : (versionInfo?.remote_version || '—')}
+                  </span>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 px-2 text-xs"
+                    onClick={() => checkVersion()}
+                    disabled={loading}
+                  >
+                    {loading ? '...' : 'Refresh'}
+                  </Button>
+                </div>
               </div>
               <div className="flex justify-between">
                 <span className="text-muted-foreground">Build Date</span>
