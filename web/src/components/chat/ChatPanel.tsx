@@ -760,14 +760,7 @@ export function ChatPanel() {
         className="flex-1 overflow-y-auto preview-scrollbar px-4 py-4 space-y-3"
       >
         {messages.length === 0 && (
-          <div className="flex h-full items-center justify-center">
-            <div className="text-center max-w-sm">
-              <h2 className="text-lg font-semibold text-foreground tracking-tight">Zensers</h2>
-              <p className="mt-1 text-sm text-muted-foreground">
-                Describe your research needs to start smart research
-              </p>
-            </div>
-          </div>
+          <div className="flex h-full items-center justify-center" />
         )}
 
         {isLoadingMessages && (

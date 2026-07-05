@@ -42,7 +42,7 @@ export function ChatInput({
   onSend,
   onCancel,
   disabled = false,
-  placeholder = 'Describe your research needs...',
+  placeholder = 'Type your message...',
   isLoading = false,
   isNetworkBusy = false,
   isWaitingForReply = false,
