@@ -19,6 +19,7 @@ export function GeneralPanel() {
   } = useSettingsStore();
 
   const { versionInfo, checkError, loading, checkVersion, currentVersion } = useVersionCheck();
+  const buildDate = versionInfo?.build_date || process.env.NEXT_PUBLIC_BUILD_DATE || '—';
 
   return (
     <Card>
@@ -97,11 +98,13 @@ export function GeneralPanel() {
               </div>
               <div className="flex justify-between">
                 <span className="text-muted-foreground">Remote Version</span>
-                <span className="font-mono">{versionInfo?.remote_version || '—'}</span>
+                <span className="font-mono">
+                  {loading && !versionInfo ? 'Checking...' : (versionInfo?.remote_version || '—')}
+                </span>
               </div>
               <div className="flex justify-between">
                 <span className="text-muted-foreground">Build Date</span>
-                <span>{versionInfo?.build_date || '—'}</span>
+                <span>{buildDate}</span>
               </div>
               {versionInfo?.published_at && (
                 <div className="flex justify-between">
