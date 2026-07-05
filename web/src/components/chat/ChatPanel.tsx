@@ -762,9 +762,6 @@ export function ChatPanel() {
         {messages.length === 0 && (
           <div className="flex h-full items-center justify-center">
             <div className="text-center max-w-sm">
-              <div className="mx-auto mb-5 h-16 w-16 rounded-2xl bg-background border overflow-hidden shadow-sm">
-                <img src="/logo.png" alt="Zensers" className="h-full w-full object-contain p-1.5" />
-              </div>
               <h2 className="text-lg font-semibold text-foreground tracking-tight">Zensers</h2>
               <p className="mt-1 text-sm text-muted-foreground">
                 Describe your research needs to start smart research

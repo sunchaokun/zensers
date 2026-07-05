@@ -63,7 +63,7 @@ export function DesktopTitleBar() {
     >
       {/* 左侧标题 */}
       <div className="flex items-center gap-2">
-        <img src="/logo.png" alt="Zensers" className="h-4 w-4 rounded object-contain" style={{ filter: 'brightness(10)' }} />
+        <img src="/logo.png" alt="Zensers" className="h-4 w-4 rounded object-contain" />
         <span style={{ color: 'rgba(255,255,255,0.85)', fontSize: 13, fontWeight: 500, letterSpacing: '-0.2px' }}>Zensers</span>
       </div>
 

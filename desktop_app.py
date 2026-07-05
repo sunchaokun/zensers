@@ -437,6 +437,54 @@ class Api:
             return {"success": False, "error": str(e)}
 
 
+def _ensure_start_menu_shortcut():
+    if sys.platform != 'win32':
+        return
+    try:
+        from win32com.shell import shell, shellcon
+        from win32com.propsys import propsys
+        import pythoncom
+
+        start_menu_dir = shell.SHGetFolderPath(0, shellcon.CSIDL_PROGRAMS, 0, 0)
+        shortcut_dir = os.path.join(start_menu_dir, "Zensers")
+        shortcut_path = os.path.join(shortcut_dir, "Zensers.lnk")
+        icon_ico = str(PROJECT_ROOT / "icon.ico")
+        target_script = str(PROJECT_ROOT / "desktop_app.py")
+
+        os.makedirs(shortcut_dir, exist_ok=True)
+
+        pythoncom.CoInitialize()
+        link = pythoncom.CoCreateInstance(
+            shell.CLSID_ShellLink,
+            None,
+            pythoncom.CLSCTX_INPROC_SERVER,
+            shell.IID_IShellLink,
+        )
+        link.SetPath(sys.executable)
+        link.SetArguments(f'"{target_script}"')
+        link.SetWorkingDirectory(str(PROJECT_ROOT))
+        link.SetDescription("Zensers Market Research System")
+        if os.path.exists(icon_ico):
+            link.SetIconLocation(icon_ico, 0)
+
+        link.QueryInterface(pythoncom.IID_IPersistFile).Save(shortcut_path, 0)
+
+        try:
+            ps = propsys.SHGetPropertyStoreFromParsingName(
+                shortcut_path, None, 0x00000002, propsys.IID_IPropertyStore
+            )
+            app_id_key = propsys.PSGetPropertyKeyFromName("System.AppUserModel.ID")
+            pv = propsys.PROPVARIANTType('Zensers.MarketResearch.1.0')
+            ps.SetValue(app_id_key, pv)
+            ps.Commit()
+        except Exception:
+            pass
+
+        print(f"  Start menu shortcut created: {shortcut_path}")
+    except Exception:
+        pass
+
+
 def main():
     """Main function"""
     global _window
@@ -450,6 +498,8 @@ def main():
             )
         except Exception as e:
             print(f"Set App ID failed: {e}")
+
+        _ensure_start_menu_shortcut()
 
     print("=" * 50)
     print("  Zensers Market Research System")
@@ -505,13 +555,9 @@ def main():
             js_api=Api(),
         )
 
-        # Set window icon
-        icon_path = str(PROJECT_ROOT / "icon.png")
-        if os.path.exists(icon_path):
-            try:
-                _window.icon = icon_path
-            except Exception as e:
-                print(f"  Failed to set icon: {e}")
+        _icon_ico = str(PROJECT_ROOT / "icon.ico")
+        if os.path.exists(_icon_ico):
+            _window.icon = _icon_ico
 
         webview.start()
 
