@@ -904,6 +904,7 @@ async def llm_health():
 async def list_llm_profiles():
     from src.config.settings import get_settings
     settings = get_settings()
+    settings._load_llm_profiles_from_disk()
     from dataclasses import asdict
     profiles = {}
     for name, p in settings.llm_profiles.profiles.items():
