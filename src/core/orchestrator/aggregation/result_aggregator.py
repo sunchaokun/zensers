@@ -460,7 +460,7 @@ class AggregationResult:
                     
                     # 创建章节（剥离已提取为 subsections 的 heading 行，避免 HTML 双重渲染）
                     # Use framework skeleton when sub_sections are defined in section_details
-                    framework_sub_sections = section.get("sub_sections") if isinstance(section, dict) else None
+                    framework_sub_sections = section.get("sub_sections") if hasattr(section, 'get') else (section.sub_sections if hasattr(section, 'sub_sections') else None)
                     if framework_sub_sections and isinstance(framework_sub_sections, list) and len(framework_sub_sections) > 0:
                         subsections = _build_subsections_from_skeleton(content, framework_sub_sections)
                     else:
@@ -662,7 +662,11 @@ class AggregationResult:
                                     break
                 
                 # 创建章节（不再要求最小内容长度）
-                subsections = _parse_markdown_subsections(content)
+                framework_sub_sections_legacy = section.get("sub_sections") if hasattr(section, 'get') else (section.sub_sections if hasattr(section, 'sub_sections') else None)
+                if framework_sub_sections_legacy and isinstance(framework_sub_sections_legacy, list) and len(framework_sub_sections_legacy) > 0:
+                    subsections = _build_subsections_from_skeleton(content, framework_sub_sections_legacy)
+                else:
+                    subsections = _parse_markdown_subsections(content)
                 content = ResultAggregator._strip_parsed_subsections(content, subsections)
                 sections.append({
                     "id": section_id,
@@ -1534,7 +1538,7 @@ def _normalize_key_for_matching(key: str) -> str:
     return result.strip()
 
 
-def _match_content_to_sub_section(content: str, sub_section: dict) -> str:
+def _match_content_to_sub_section(content: str, sub_section) -> str:
     """Match LLM output content to a framework sub_section by heading.
 
     Searches for ### headings in the LLM output that match the sub_section name.
@@ -1544,7 +1548,12 @@ def _match_content_to_sub_section(content: str, sub_section: dict) -> str:
         return ""
 
     import re
-    sub_name = sub_section.get("name", "") if isinstance(sub_section, dict) else ""
+    if isinstance(sub_section, dict):
+        sub_name = sub_section.get("name", "")
+    else:
+        sub_name = getattr(sub_section, 'display_name', '') or getattr(sub_section, 'name', '')
+    if isinstance(sub_name, dict):
+        sub_name = sub_name.get("zh", sub_name.get("en", ""))
     if not sub_name:
         return ""
 
@@ -1570,10 +1579,6 @@ def _match_content_to_sub_section(content: str, sub_section: dict) -> str:
                         found_start = True
                         break
         else:
-            for pattern in heading_patterns:
-                m = re.match(pattern, stripped)
-                if m:
-                    break
             if re.match(heading_patterns[0], stripped) or re.match(heading_patterns[1], stripped):
                 break
             matched_lines.append(line)
@@ -1596,14 +1601,25 @@ def _build_subsections_from_skeleton(content: str, framework_sub_sections: list)
     import re
     subsections = []
     for sub in framework_sub_sections:
-        if not isinstance(sub, dict):
+        if isinstance(sub, dict):
+            sub_name = sub.get("name", "")
+        elif hasattr(sub, 'display_name'):
+            sub_name = sub.display_name
+        elif hasattr(sub, 'name'):
+            sub_name = getattr(sub, 'name', '')
+        else:
             continue
-        sub_name = sub.get("name", "")
+        if isinstance(sub_name, dict):
+            sub_name = sub_name.get("zh", sub_name.get("en", ""))
         if not sub_name:
             continue
         matched_content = _match_content_to_sub_section(content, sub)
         sub_id = "sub_" + re.sub(r'[^\w\u4e00-\u9fff]+', '_', sub_name).strip('_').lower()[:30]
-        points = sub.get("points", []) or []
+        points = sub.get("points", []) if hasattr(sub, 'get') else (getattr(sub, 'points', []) if hasattr(sub, 'points') else [])
+        if points and hasattr(points[0], 'text'):
+            points = [pt.text for pt in points]
+        elif points and isinstance(points[0], dict):
+            points = [pt.get("zh", pt.get("en", "")) for pt in points]
         subsection_entry = {"id": sub_id, "title": sub_name, "content": matched_content, "points": points}
         subsections.append(subsection_entry)
 

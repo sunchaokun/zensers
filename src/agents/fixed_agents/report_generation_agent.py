@@ -394,10 +394,7 @@ class ReportGenerationAgent(FixedAgent):
         has_conclusion: bool = False,
         lang: Language = Language.ZH
     ) -> str:
-        """Generate table of contents.
-        
-        **Fix**: Support executive summary and conclusion TOC items.
-        """
+        """Generate table of contents with three-level support."""
         toc_lines = [f"## {_t('toc', lang)}\n"]
         
         chapter_num = 1
@@ -413,6 +410,14 @@ class ReportGenerationAgent(FixedAgent):
             title = section.get("title", f"{_t('chapter', lang)}{chapter_num}")
             anchor = self._generate_anchor(title)
             toc_lines.append(f"{chapter_num}. [{title}](#{anchor})")
+            
+            subsections = section.get("subsections", [])
+            for j, subsec in enumerate(subsections, start=1):
+                sub_title = subsec.get("title", "")
+                if sub_title:
+                    sub_anchor = self._generate_anchor(sub_title)
+                    toc_lines.append(f"   {chapter_num}.{j} [{sub_title}](#{sub_anchor})")
+            
             chapter_num += 1
         
         # Conclusion
@@ -504,11 +509,7 @@ class ReportGenerationAgent(FixedAgent):
         return f"## {conclusion_label}\n\n{content.strip()}\n\n---\n"
     
     def _integrate_body(self, sections: List[Dict], style_guide: Dict, lang: Language) -> str:
-        """Integrate body content.
-        
-        **Revision**: Add content quality pipeline to ensure no duplicate report content.
-        """
-        # === Content quality pipeline: clean and deduplicate ===
+        """Integrate body content with three-level structure support."""
         sections = self._apply_content_quality(sections)
         
         body_parts = []
@@ -516,19 +517,45 @@ class ReportGenerationAgent(FixedAgent):
         for i, section in enumerate(sections, start=1):
             title = section.get("title", f"{_t('chapter', lang)} {i}")
             content = section.get("content", "")
+            subsections = section.get("subsections", [])
             
-            # Add chapter title
+            # Level 1: chapter title
             body_parts.append(f"## {i}. {title}\n")
             
-            # Add chapter content
-            body_parts.append(content)
+            if subsections:
+                # Three-level mode: render subsections with ### and points with ####
+                for j, subsec in enumerate(subsections, start=1):
+                    sub_title = subsec.get("title", "")
+                    sub_content = subsec.get("content", "")
+                    sub_points = subsec.get("points", [])
+                    
+                    if sub_title:
+                        body_parts.append(f"### {i}.{j} {sub_title}\n")
+                    
+                    if sub_content:
+                        body_parts.append(sub_content)
+                    
+                    if sub_points:
+                        for pt in sub_points:
+                            if isinstance(pt, str):
+                                pt_text = pt
+                            elif isinstance(pt, dict):
+                                if lang == Language.ZH:
+                                    pt_text = pt.get("zh", pt.get("en", str(pt)))
+                                else:
+                                    pt_text = pt.get("en", pt.get("zh", str(pt)))
+                            else:
+                                pt_text = str(pt)
+                            if pt_text:
+                                body_parts.append(f"#### {pt_text}\n")
+            else:
+                # One-level fallback: just add flat content
+                body_parts.append(content)
             
-            # Add chapter summary (optional)
             if section.get("include_summary", False):
                 summary = self._generate_section_summary(content)
                 body_parts.append(f"\n> **{_t('chapter_summary', lang)}**：{summary}\n")
             
-            # Chapter separator
             body_parts.append("\n---\n")
         
         return "\n".join(body_parts)

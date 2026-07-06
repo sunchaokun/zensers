@@ -32,6 +32,86 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class PointConfig:
+    zh: str = ""
+    en: str = ""
+
+    @property
+    def text(self) -> str:
+        return self.zh or self.en
+
+
+@dataclass
+class SubSectionConfig:
+    id: str = ""
+    name: Any = field(default_factory=dict)
+    description: Any = field(default_factory=dict)
+    points: List[PointConfig] = field(default_factory=list)
+
+    @property
+    def display_name(self) -> str:
+        if isinstance(self.name, dict):
+            return self.name.get("zh", self.name.get("en", self.id))
+        return str(self.name) or self.id
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "description": self.description,
+            "points": [{"zh": pt.zh, "en": pt.en} for pt in self.points],
+        }
+
+
+@dataclass
+class SectionConfig:
+    id: str = ""
+    name: Any = field(default_factory=dict)
+    required: bool = False
+    description: Any = field(default_factory=dict)
+    sub_sections: List[SubSectionConfig] = field(default_factory=list)
+
+    @property
+    def display_name(self) -> str:
+        if isinstance(self.name, dict):
+            return self.name.get("zh", self.name.get("en", self.id))
+        return str(self.name) or self.id
+
+    def to_subsections_list(self) -> List[Dict]:
+        return [
+            {
+                "id": sub.id,
+                "title": sub.display_name,
+                "name": sub.name,
+                "points": [pt.text for pt in sub.points],
+            }
+            for sub in self.sub_sections
+        ]
+
+    def get(self, key: str, default: Any = None) -> Any:
+        mapping = {
+            "id": self.id,
+            "name": self.name,
+            "required": self.required,
+            "description": self.description,
+            "sub_sections": [sub.to_dict() for sub in self.sub_sections],
+        }
+        return mapping.get(key, default)
+
+    def __getitem__(self, key: str) -> Any:
+        return self.get(key)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "required": self.required,
+            "description": self.description,
+            "sub_sections": [sub.to_dict() for sub in self.sub_sections],
+        }
+
+
+@dataclass
 class ReportTemplate:
     """Report template configuration"""
     # Meta information
@@ -50,13 +130,40 @@ class ReportTemplate:
     tables: Dict[str, Any] = field(default_factory=dict)
 
     # Section configuration
-    sections: Dict[str, Any] = field(default_factory=dict)
+    sections: List[SectionConfig] = field(default_factory=list)
 
     # Data validation
     validation: Dict[str, Any] = field(default_factory=dict)
 
     # Output configuration
     output: Dict[str, Any] = field(default_factory=dict)
+
+
+def _parse_sections(raw_sections: list) -> List[SectionConfig]:
+    result = []
+    for s in raw_sections:
+        sub_sections = []
+        for sub in s.get("sub_sections", []):
+            points = []
+            for pt in sub.get("points", []):
+                if isinstance(pt, dict):
+                    points.append(PointConfig(zh=pt.get("zh", ""), en=pt.get("en", "")))
+                elif isinstance(pt, str):
+                    points.append(PointConfig(zh=pt, en=pt))
+            sub_sections.append(SubSectionConfig(
+                id=sub.get("id", ""),
+                name=sub.get("name", {}),
+                description=sub.get("description", {}),
+                points=points,
+            ))
+        result.append(SectionConfig(
+            id=s.get("id", ""),
+            name=s.get("name", {}),
+            required=s.get("required", False),
+            description=s.get("description", {}),
+            sub_sections=sub_sections,
+        ))
+    return result
 
 
 def load_template(template_name: str, template_dir: Optional[str] = None) -> ReportTemplate:
@@ -89,8 +196,17 @@ def load_template(template_name: str, template_dir: Optional[str] = None) -> Rep
     # Handle inheritance
     if 'extends' in config:
         base_template = load_template(config['extends'], template_dir)
-        # Merge configuration
-        config = _merge_config(base_template.__dict__, config)
+        base_dict = {
+            'meta': base_template.meta,
+            'report': base_template.report,
+            'styles': base_template.styles,
+            'charts': base_template.charts,
+            'tables': base_template.tables,
+            'sections': [s.to_dict() for s in base_template.sections],
+            'validation': base_template.validation,
+            'output': base_template.output,
+        }
+        config = _merge_config(base_dict, config)
 
     # Create template object
     template = ReportTemplate(
@@ -99,7 +215,7 @@ def load_template(template_name: str, template_dir: Optional[str] = None) -> Rep
         styles=config.get('styles', {}),
         charts=config.get('charts', {}),
         tables=config.get('tables', {}),
-        sections=config.get('sections', {}),
+        sections=_parse_sections(config.get('sections', [])),
         validation=config.get('validation', {}),
         output=config.get('output', {}),
     )

@@ -4,6 +4,37 @@
 
 ---
 
+## [2.9.0] - 2026-07-06
+
+### Feature: Three-Level Research Framework (Chapter → Sub-section → Point)
+
+Upgrade report template system from flat sections to hierarchical three-level structure, improving research depth and output quality.
+
+**Template Layer:**
+- All 12 YAML templates updated with `sub_sections` (2-3 per section) and `points`
+- `template_schema.yaml` extended with `sub_section_schema`
+- `PointConfig`, `SubSectionConfig`, `SectionConfig` dataclasses in `report_template.py` with dict-style compat (`get()`, `__getitem__`, `to_dict()`)
+- `_parse_sections()` parses YAML into typed dataclass objects
+
+**Pipeline Layer:**
+- `strategies.py`: `template_sub_sections_by_aspect` lookup, `_resolve_sub_aspect_names()`, structured output constraints in analysis prompt with `###` headings + points
+- `result_aggregator.py`: `hasattr(section, 'get')` compat for `SectionConfig`, `_build_subsections_from_skeleton()` handles `PointConfig.text` and dict points
+- `orchestrator.py`: `_build_section_details_from_template()` converts `SectionConfig` → plain dicts; `_load_template_sections()` now returns `List[Dict]` (was returning `List[SectionConfig]`)
+- `research_api.py`: `_build_sections_tree_from_template()` builds `sections_tree` from template for framework display
+
+**Rendering Layer:**
+- `report_generation_agent.py`: `_generate_toc()` renders `1.1 [Sub-section]` entries; `_integrate_body()` renders `## → ### → ####` three-level headings with bilingual point support
+
+**Bug Fixes (from code review):**
+- **CRITICAL**: `_build_section_details_from_template()` was dead code — now called in `_load_template_sections()`
+- **HIGH**: `_load_template_sections()` had unqualified `yaml` import causing `NameError` silently caught — fixed with local import + logging
+- **HIGH**: `_start_execution()` lost template `section_details` when no `sections_tree` — falls back to `_build_section_details_from_template()`
+- **MEDIUM**: `_enter_framework_mode()` now builds `sections_tree` from template when no LLM-generated tree
+- **MEDIUM**: `quick_start()` now includes `section_details` in `final_plan`
+- **LOW**: Removed dead code in `_match_content_to_sub_section()`
+
+---
+
 ## [2.2.1] - 2026-07-03
 
 ### Fix: Chat async search state loss — "Select Template" appears during search

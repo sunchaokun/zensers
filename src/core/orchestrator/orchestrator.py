@@ -3841,6 +3841,38 @@ class ResearchOrchestrator:
             details.append(detail)
         return details
 
+    def _build_section_details_from_template(self, template_sections):
+        """Build section_details from template's predefined sections (with sub_sections + points)"""
+        if not template_sections:
+            return []
+        details = []
+        for section in template_sections:
+            name = section.get("name", "") if hasattr(section, 'get') else getattr(section, 'name', {})
+            if isinstance(name, dict):
+                name = name.get("zh", name.get("en", ""))
+            detail = {
+                "id": section.get("id", "") if hasattr(section, 'get') else getattr(section, 'id', ""),
+                "name": name,
+                "content": name,
+                "sub_sections": [],
+            }
+            subs = section.get("sub_sections", []) if hasattr(section, 'get') else getattr(section, 'sub_sections', [])
+            for sub in subs:
+                sub_name = sub.get("name", "") if hasattr(sub, 'get') else getattr(sub, 'display_name', '') or getattr(sub, 'name', {})
+                if isinstance(sub_name, dict):
+                    sub_name = sub_name.get("zh", sub_name.get("en", ""))
+                points = []
+                for pt in (sub.get("points", []) if hasattr(sub, 'get') else getattr(sub, 'points', [])):
+                    if isinstance(pt, dict):
+                        points.append(pt.get("zh", pt.get("en", "")))
+                    elif hasattr(pt, 'text'):
+                        points.append(pt.text)
+                    else:
+                        points.append(str(pt))
+                detail["sub_sections"].append({"name": sub_name, "points": points})
+            details.append(detail)
+        return details
+
     _SECTION_ZH_NAMES = {
         "investment_summary": "投资摘要",
         "industry_overview": "行业概览",
@@ -3964,34 +3996,42 @@ class ResearchOrchestrator:
         return task_structure_dict
 
     def _load_template_sections(
-            self, template_id: str) -> List[Dict[str, Any]]:
-        """
-        Load section info from template config
-
-        Args:
-            template_id: Template ID
-
-        Returns:
-            Section info list, empty list if loading fails
-        """
+            self, template_id: str) -> List:
         try:
-            # Use SmartClarifier's template loader
+            from src.config.report_template import load_template
+            template_name = template_id
+            try:
+                import yaml as _yaml_local
+                for yaml_file in Path("config/templates").glob("*.yaml"):
+                    if yaml_file.name == "template_schema.yaml":
+                        continue
+                    with open(yaml_file, 'r', encoding='utf-8') as f:
+                        data = _yaml_local.safe_load(f)
+                    if data and data.get("id") == template_id:
+                        template_name = yaml_file.stem
+                        break
+            except Exception:
+                pass
+            template = load_template(template_name)
+            return self._build_section_details_from_template(template.sections)
+        except Exception as e:
+            logger.warning(f"Failed to load template via load_template({template_id}): {e}")
+
+        try:
             if hasattr(self, '_smart_clarifier') and self._smart_clarifier:
                 template = self._smart_clarifier.TEMPLATES.get(template_id)
                 if template and hasattr(template, 'sections'):
                     return template.sections
 
-            # Try loading from YAML directly
-            import yaml
+            import yaml as _yaml
 
             template_path = Path(f"config/templates/{template_id}.yaml")
             if not template_path.exists():
-                # Try other possible filenames
                 for yaml_file in Path("config/templates").glob("*.yaml"):
                     if yaml_file.name == "template_schema.yaml":
                         continue
                     with open(yaml_file, 'r', encoding='utf-8') as f:
-                        data = yaml.safe_load(f)
+                        data = _yaml.safe_load(f)
                     if data and data.get("id") == template_id:
                         return data.get("sections", [])
 

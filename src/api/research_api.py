@@ -1528,6 +1528,10 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
             framework = {'topic': context.get('topic', 'Research Report'), 'sections': all_sections, 'output_type': 'industry_report', 'depth': context.get('details', {}).get('depth', 'standard'), 'region': context.get('details', {}).get('region', 'China'), 'time_range': context.get('details', {}).get('time_range', 'Last 3 years')}
             if fw_tree and isinstance(fw_tree, list) and len(fw_tree) > 0:
                 framework['sections_tree'] = fw_tree
+            elif session.get('section_details'):
+                template_tree = self._build_sections_tree_from_template(session.get('section_details', []))
+                if template_tree:
+                    framework['sections_tree'] = template_tree
             logger.info(f"[{session_id}] Framework derived from conversation: {len(all_sections)} sections")
         elif not directions:
             framework = self._generate_research_framework(context)
@@ -1573,7 +1577,9 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
             state_machine.transition(ConversationState.EXECUTING)
         session['mode'] = 'research'
         session['current_step'] = 6
-        final_plan = {'topic': topic, 'output_type': framework.get('output_type', 'industry_report'), 'aspects': sections, 'sections_tree': sections_tree, 'section_details': self._build_section_details_from_tree(sections_tree) if sections_tree else [], 'region': context.get('details', {}).get('region', 'China'), 'time_range': context.get('details', {}).get('time_range', 'Last 3 years'), 'framework': framework.get('depth', 'standard'), 'language': session.get('language', 'zh')}
+        sd_from_tree = self._build_section_details_from_tree(sections_tree) if sections_tree else []
+        sd_from_session = session.get('section_details', [])
+        final_plan = {'topic': topic, 'output_type': framework.get('output_type', 'industry_report'), 'aspects': sections, 'sections_tree': sections_tree, 'section_details': sd_from_tree or self._build_section_details_from_template(sd_from_session), 'region': context.get('details', {}).get('region', 'China'), 'time_range': context.get('details', {}).get('time_range', 'Last 3 years'), 'framework': framework.get('depth', 'standard'), 'language': session.get('language', 'zh')}
         logger.info(f"Display plan generated: {len(sections)} sections")
         session['final_plan'] = final_plan
         from src.core.orchestrator.execution.coordinator.cancel_manager import get_cancel_manager
@@ -1876,6 +1882,66 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
             details.append(detail)
         return details
 
+    def _build_section_details_from_template(self, template_sections):
+        """Build section_details from template's predefined sections (with sub_sections + points)"""
+        if not template_sections:
+            return []
+        details = []
+        for section in template_sections:
+            name = section.get("name", "") if hasattr(section, 'get') else getattr(section, 'name', {})
+            if isinstance(name, dict):
+                name = name.get("zh", name.get("en", ""))
+            detail = {
+                "id": section.get("id", "") if hasattr(section, 'get') else getattr(section, 'id', ""),
+                "name": name,
+                "content": name,
+                "sub_sections": [],
+            }
+            subs = section.get("sub_sections", []) if hasattr(section, 'get') else getattr(section, 'sub_sections', [])
+            for sub in subs:
+                sub_name = sub.get("name", "") if hasattr(sub, 'get') else getattr(sub, 'display_name', '') or getattr(sub, 'name', {})
+                if isinstance(sub_name, dict):
+                    sub_name = sub_name.get("zh", sub_name.get("en", ""))
+                points = []
+                for pt in (sub.get("points", []) if hasattr(sub, 'get') else getattr(sub, 'points', [])):
+                    if isinstance(pt, dict):
+                        points.append(pt.get("zh", pt.get("en", "")))
+                    elif hasattr(pt, 'text'):
+                        points.append(pt.text)
+                    else:
+                        points.append(str(pt))
+                detail["sub_sections"].append({"name": sub_name, "points": points})
+            details.append(detail)
+        return details
+
+    def _build_sections_tree_from_template(self, template_sections):
+        """Build sections_tree from template sections for framework display"""
+        if not template_sections:
+            return []
+        tree = []
+        for section in template_sections:
+            name = section.get("name", "") if hasattr(section, 'get') else getattr(section, 'name', "")
+            if isinstance(name, dict):
+                name = name.get("zh", name.get("en", ""))
+            sub_sections = section.get("sub_sections", []) if hasattr(section, 'get') else getattr(section, 'sub_sections', [])
+            node = {"name": name, "sub_sections": []}
+            for sub in sub_sections:
+                sub_name = sub.get("name", "") if hasattr(sub, 'get') else getattr(sub, 'display_name', '') or getattr(sub, 'name', "")
+                if isinstance(sub_name, dict):
+                    sub_name = sub_name.get("zh", sub_name.get("en", ""))
+                points = sub.get("points", []) if hasattr(sub, 'get') else getattr(sub, 'points', [])
+                pt_list = []
+                for pt in points:
+                    if isinstance(pt, dict):
+                        pt_list.append(pt.get("zh", pt.get("en", "")))
+                    elif hasattr(pt, 'text'):
+                        pt_list.append(pt.text)
+                    else:
+                        pt_list.append(str(pt))
+                node["sub_sections"].append({"name": sub_name, "points": pt_list})
+            tree.append(node)
+        return tree
+
     def _format_framework(self, framework):
         """Format framework for display with optional section descriptions and multi-level tree"""
         sections_tree = framework.get('sections_tree')
@@ -2067,7 +2133,8 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
             output_type = session.get('output_type', 'industry_report')
             aspects = ['Market Size', 'Competitive Landscape', 'Development Trends']
             selected_sections = session.get('selected_sections', aspects)
-            final_plan = {'topic': session.get('user_input', ''), 'output_type': output_type, 'aspects': selected_sections}
+            sd_step5 = session.get('section_details', [])
+            final_plan = {'topic': session.get('user_input', ''), 'output_type': output_type, 'aspects': selected_sections, 'section_details': self._build_section_details_from_template(sd_step5)}
             session['final_plan'] = final_plan
             from src.api.research_executor import get_executor
             executor = get_executor()
@@ -2103,7 +2170,7 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
             extracted = await self._extract_params_from_context(extraction_context, output_type, params)
             params.update(extracted)
             task_id = f"research_{uuid.uuid4().hex[:8]}"
-            final_plan = {'topic': user_input, 'output_type': output_type, 'aspects': selected_sections}
+            final_plan = {'topic': user_input, 'output_type': output_type, 'aspects': selected_sections, 'section_details': self._build_section_details_from_template(section_details)}
             session_data = {
                 'user_input': user_input, 'template_id': template_id,
                 'output_type': output_type, 'aspects': aspects,

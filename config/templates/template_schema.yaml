@@ -69,3 +69,11 @@ section_schema:
   optional_fields:
     - required    # Whether mandatory (default false)
     - description # Section description
+    - sub_sections # Sub-section list (each follows sub_section_schema)
+  sub_section_schema:
+    required_fields:
+      - id          # Sub-section unique identifier
+      - name        # Sub-section display name
+    optional_fields:
+      - description # Sub-section description
+      - points      # List of point strings or i18n dicts ({zh: ..., en: ...})

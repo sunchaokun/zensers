@@ -1011,3 +1011,313 @@ class TestBilingualDocxToc:
         toc = dg._generate_toc()
         assert "No section content" in toc
         set_language(Language.ZH)
+
+
+# ============================================================
+# 13. SectionConfig / SubSectionConfig / PointConfig dataclasses
+# ============================================================
+
+class TestSectionConfigDataclass:
+    def test_basic_construction(self):
+        from src.config.report_template import SectionConfig, SubSectionConfig, PointConfig
+        pt = PointConfig(en="Revenue Growth", zh="Revenue Growth")
+        sub = SubSectionConfig(id="sub1", name="Market Size", points=[pt])
+        sec = SectionConfig(id="market", name="Market Analysis", required=True, sub_sections=[sub])
+        assert sec.id == "market"
+        assert sec.name == "Market Analysis"
+        assert sec.required is True
+        assert len(sec.sub_sections) == 1
+        assert sec.sub_sections[0].name == "Market Size"
+        assert sec.sub_sections[0].points[0].text == "Revenue Growth"
+
+    def test_dict_style_get(self):
+        from src.config.report_template import SectionConfig
+        sec = SectionConfig(id="market", name="Market", required=True)
+        assert sec.get("id") == "market"
+        assert sec.get("name") == "Market"
+        assert sec.get("required") is True
+        assert sec.get("missing_key", "default") == "default"
+
+    def test_dict_style_getitem(self):
+        from src.config.report_template import SectionConfig
+        sec = SectionConfig(id="market", name="Market", required=True)
+        assert sec["id"] == "market"
+        assert sec["name"] == "Market"
+        assert sec["required"] is True
+
+    def test_to_dict(self):
+        from src.config.report_template import SectionConfig, SubSectionConfig, PointConfig
+        pt = PointConfig(en="Growth", zh="Growth")
+        sub = SubSectionConfig(id="s1", name="Size", points=[pt])
+        sec = SectionConfig(id="market", name="Market", required=True, sub_sections=[sub])
+        d = sec.to_dict()
+        assert d["id"] == "market"
+        assert d["name"] == "Market"
+        assert d["required"] is True
+        assert len(d["sub_sections"]) == 1
+        assert d["sub_sections"][0]["id"] == "s1"
+        assert d["sub_sections"][0]["points"][0]["en"] == "Growth"
+        assert d["sub_sections"][0]["points"][0]["zh"] == "Growth"
+
+    def test_to_subsections_list(self):
+        from src.config.report_template import SectionConfig, SubSectionConfig
+        sub1 = SubSectionConfig(id="s1", name="Size")
+        sub2 = SubSectionConfig(id="s2", name="Growth")
+        sec = SectionConfig(id="market", name="Market", sub_sections=[sub1, sub2])
+        lst = sec.to_subsections_list()
+        assert len(lst) == 2
+        assert lst[0]["id"] == "s1"
+        assert lst[0]["title"] == "Size"
+        assert lst[1]["id"] == "s2"
+        assert lst[1]["title"] == "Growth"
+
+    def test_display_name_property(self):
+        from src.config.report_template import SectionConfig
+        sec = SectionConfig(id="market", name="Market Analysis")
+        assert sec.display_name == "Market Analysis"
+
+    def test_empty_sub_sections(self):
+        from src.config.report_template import SectionConfig
+        sec = SectionConfig(id="market", name="Market")
+        assert sec.sub_sections == []
+        assert sec.to_subsections_list() == []
+
+    def test_sub_section_config_attributes(self):
+        from src.config.report_template import SubSectionConfig
+        sub = SubSectionConfig(id="s1", name="Size", description="Market size")
+        assert sub.id == "s1"
+        assert sub.name == "Size"
+        assert sub.description == "Market size"
+
+    def test_point_config_fields(self):
+        from src.config.report_template import PointConfig
+        pt = PointConfig(zh="营收", en="Revenue")
+        assert pt.text == "营收"
+        assert pt.zh == "营收"
+        assert pt.en == "Revenue"
+
+
+# ============================================================
+# 14. load_template() with sub_sections parsing
+# ============================================================
+
+class TestLoadTemplateSubSections:
+    def test_industry_report_has_sub_sections(self):
+        from src.config.report_template import load_template
+        t = load_template('industry_report', 'config/templates')
+        assert len(t.sections) == 14
+        assert len(t.sections[0].sub_sections) > 0
+
+    def test_market_brief_has_sub_sections(self):
+        from src.config.report_template import load_template
+        t = load_template('market_brief', 'config/templates')
+        assert len(t.sections) == 4
+        assert any(len(s.sub_sections) >= 2 for s in t.sections)
+
+    def test_all_templates_load(self):
+        from src.config.report_template import load_template
+        names = ['industry_report', 'company_research', 'annual_analysis',
+                 'market_brief', 'quarterly_commentary', 'policy_brief',
+                 'pitch_deck', 'investment_memo', 'industry_weekly',
+                 'conference_call', 'competitor_analysis', 'commercial_plan']
+        for name in names:
+            t = load_template(name, 'config/templates')
+            assert len(t.sections) > 0, f"{name} should have sections"
+            assert any(len(s.sub_sections) > 0 for s in t.sections), \
+                f"{name} should have at least one section with sub_sections"
+
+    def test_template_sections_are_sectionconfig(self):
+        from src.config.report_template import load_template, SectionConfig
+        t = load_template('industry_report', 'config/templates')
+        assert isinstance(t.sections[0], SectionConfig)
+
+    def test_template_sub_sections_are_subsectionconfig(self):
+        from src.config.report_template import load_template, SubSectionConfig
+        t = load_template('industry_report', 'config/templates')
+        assert isinstance(t.sections[0].sub_sections[0], SubSectionConfig)
+
+
+# ============================================================
+# 15. Report generation three-level rendering
+# ============================================================
+
+class TestReportGenerationThreeLevel:
+    def test_integrate_body_with_subsections(self):
+        from src.agents.fixed_agents.report_generation_agent import ReportGenerationAgent
+        agent = ReportGenerationAgent.__new__(ReportGenerationAgent)
+        agent._apply_content_quality = lambda sections: sections
+        agent._generate_section_summary = lambda c: "Summary"
+        from src.core.i18n import Language
+        sections = [
+            {
+                "title": "Market Analysis",
+                "content": "",
+                "subsections": [
+                    {"title": "Market Size", "content": "The market is $5B.", "points": ["Revenue", "Growth"]},
+                    {"title": "Competition", "content": "Top 3 players.", "points": []},
+                ]
+            }
+        ]
+        result = agent._integrate_body(sections, {}, Language.EN)
+        assert "## 1. Market Analysis" in result
+        assert "### 1.1 Market Size" in result
+        assert "### 1.2 Competition" in result
+        assert "#### Revenue" in result
+        assert "#### Growth" in result
+
+    def test_integrate_body_without_subsections(self):
+        from src.agents.fixed_agents.report_generation_agent import ReportGenerationAgent
+        agent = ReportGenerationAgent.__new__(ReportGenerationAgent)
+        agent._apply_content_quality = lambda sections: sections
+        agent._generate_section_summary = lambda c: "Summary"
+        from src.core.i18n import Language
+        sections = [
+            {"title": "Market Analysis", "content": "The market is growing."}
+        ]
+        result = agent._integrate_body(sections, {}, Language.EN)
+        assert "## 1. Market Analysis" in result
+        assert "###" not in result
+        assert "The market is growing." in result
+
+    def test_generate_toc_with_subsections(self):
+        from src.agents.fixed_agents.report_generation_agent import ReportGenerationAgent
+        agent = ReportGenerationAgent.__new__(ReportGenerationAgent)
+        from src.core.i18n import Language
+        sections = [
+            {
+                "title": "Market Analysis",
+                "subsections": [
+                    {"title": "Market Size"},
+                    {"title": "Competition"},
+                ]
+            },
+            {
+                "title": "Financials",
+                "subsections": [
+                    {"title": "Revenue"},
+                ]
+            }
+        ]
+        result = agent._generate_toc(sections, has_exec_summary=False, has_conclusion=False, lang=Language.EN)
+        assert "1. [Market Analysis]" in result
+        assert "1.1 [Market Size]" in result
+        assert "1.2 [Competition]" in result
+        assert "2. [Financials]" in result
+        assert "2.1 [Revenue]" in result
+
+    def test_generate_toc_without_subsections(self):
+        from src.agents.fixed_agents.report_generation_agent import ReportGenerationAgent
+        agent = ReportGenerationAgent.__new__(ReportGenerationAgent)
+        from src.core.i18n import Language
+        sections = [
+            {"title": "Market Analysis"},
+            {"title": "Financials"},
+        ]
+        result = agent._generate_toc(sections, has_exec_summary=False, has_conclusion=False, lang=Language.EN)
+        assert "1. [Market Analysis]" in result
+        assert "2. [Financials]" in result
+        assert "1.1" not in result
+
+    def test_integrate_body_points_as_strings(self):
+        from src.agents.fixed_agents.report_generation_agent import ReportGenerationAgent
+        agent = ReportGenerationAgent.__new__(ReportGenerationAgent)
+        agent._apply_content_quality = lambda sections: sections
+        agent._generate_section_summary = lambda c: "Summary"
+        from src.core.i18n import Language
+        sections = [
+            {
+                "title": "Market",
+                "content": "",
+                "subsections": [
+                    {"title": "Size", "content": "Data here.", "points": ["Revenue", "Growth"]},
+                ]
+            }
+        ]
+        result = agent._integrate_body(sections, {}, Language.EN)
+        assert "#### Revenue" in result
+        assert "#### Growth" in result
+
+    def test_integrate_body_points_as_dicts(self):
+        from src.agents.fixed_agents.report_generation_agent import ReportGenerationAgent
+        agent = ReportGenerationAgent.__new__(ReportGenerationAgent)
+        agent._apply_content_quality = lambda sections: sections
+        agent._generate_section_summary = lambda c: "Summary"
+        from src.core.i18n import Language
+        sections = [
+            {
+                "title": "Market",
+                "content": "",
+                "subsections": [
+                    {"title": "Size", "content": "Data here.", "points": [{"zh": "营收", "en": "Revenue"}]},
+                ]
+            }
+        ]
+        result = agent._integrate_body(sections, {}, Language.EN)
+        assert "#### Revenue" in result
+
+
+# ============================================================
+# 16. Integration fixes
+# ============================================================
+
+class TestBuildSectionDetailsFromTemplateIntegration:
+    def test_converts_sectionconfig_to_plain_dicts(self):
+        from src.core.orchestrator.orchestrator import ResearchOrchestrator
+        from src.config.report_template import load_template
+        orch = ResearchOrchestrator.__new__(ResearchOrchestrator)
+        t = load_template('industry_report', 'config/templates')
+        result = orch._build_section_details_from_template(t.sections)
+        assert len(result) == 14
+        assert isinstance(result[0], dict)
+        assert "id" in result[0]
+        assert "name" in result[0]
+        assert "sub_sections" in result[0]
+        for sub in result[0]["sub_sections"]:
+            assert isinstance(sub, dict)
+            assert "name" in sub
+            assert "points" in sub
+
+    def test_handles_plain_dicts(self):
+        from src.core.orchestrator.orchestrator import ResearchOrchestrator
+        from src.config.report_template import load_template
+        orch = ResearchOrchestrator.__new__(ResearchOrchestrator)
+        t = load_template('industry_report', 'config/templates')
+        raw_dicts = [s.to_dict() for s in t.sections]
+        result = orch._build_section_details_from_template(raw_dicts)
+        assert len(result) == 14
+        assert isinstance(result[0], dict)
+
+    def test_empty_input(self):
+        from src.core.orchestrator.orchestrator import ResearchOrchestrator
+        orch = ResearchOrchestrator.__new__(ResearchOrchestrator)
+        assert orch._build_section_details_from_template([]) == []
+
+
+class TestLoadTemplateSectionsReturnsDicts:
+    def test_returns_plain_dicts(self):
+        from src.core.orchestrator.orchestrator import ResearchOrchestrator
+        orch = ResearchOrchestrator.__new__(ResearchOrchestrator)
+        result = orch._load_template_sections('industry_report_broker')
+        assert result is not None
+        assert len(result) > 0
+        assert isinstance(result[0], dict)
+        assert "id" in result[0]
+        assert "sub_sections" in result[0]
+
+
+class TestBuildSectionsTreeFromTemplate:
+    def test_builds_tree_from_sectionconfig(self):
+        from src.api.research_api import ResearchAPI
+        from src.config.report_template import load_template
+        api = ResearchAPI.__new__(ResearchAPI)
+        t = load_template('industry_report', 'config/templates')
+        tree = api._build_sections_tree_from_template(t.sections)
+        assert len(tree) == 14
+        for node in tree:
+            assert "name" in node
+            assert "sub_sections" in node
+
+    def test_empty_input(self):
+        from src.api.research_api import ResearchAPI
+        api = ResearchAPI.__new__(ResearchAPI)
+        assert api._build_sections_tree_from_template([]) == []

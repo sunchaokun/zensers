@@ -509,15 +509,31 @@ class IndustryResearchStrategy(TaskDecompositionStrategy):
 
         # P0 alignment: override section_data_specs with framework_tree when available
         sections_tree = None
+        section_details = getattr(requirement, 'section_details', []) or []
         if hasattr(requirement, 'dynamic_fields') and requirement.dynamic_fields and requirement.dynamic_fields.get('sections_tree'):
             sections_tree = requirement.dynamic_fields['sections_tree']
-        elif hasattr(requirement, 'section_details') and requirement.section_details:
-            for sd in requirement.section_details:
-                if isinstance(sd, dict) and sd.get('sub_sections'):
-                    sections_tree = requirement.section_details
+        elif section_details:
+            for sd in section_details:
+                sd_subs = sd.get("sub_sections", []) if hasattr(sd, 'get') else (sd.sub_sections if hasattr(sd, 'sub_sections') else [])
+                if sd_subs:
+                    sections_tree = section_details
                     break
         if sections_tree and section_data_specs:
             section_data_specs = self._align_section_data_specs_with_tree(section_data_specs, sections_tree)
+
+        # Build template sub_sections lookup by aspect name
+        template_sub_sections_by_aspect = {}
+        if section_details:
+            for sd in section_details:
+                sd_name = sd.get("name", "") if hasattr(sd, 'get') else getattr(sd, 'name', "")
+                if isinstance(sd_name, dict):
+                    sd_name = sd_name.get("zh", sd_name.get("en", ""))
+                sd_subs = sd.get("sub_sections", []) if hasattr(sd, 'get') else getattr(sd, 'sub_sections', [])
+                if sd_name and sd_subs:
+                    template_sub_sections_by_aspect[sd_name] = sd_subs
+                    sd_id = sd.get("id", "") if hasattr(sd, 'get') else getattr(sd, 'id', "")
+                    if sd_id:
+                        template_sub_sections_by_aspect[sd_id] = sd_subs
 
         section_spec_by_id = {spec.section_id: spec for spec in section_data_specs} if section_data_specs else {}
         section_spec_by_name = {spec.name: spec for spec in section_data_specs} if section_data_specs else {}
@@ -536,6 +552,8 @@ class IndustryResearchStrategy(TaskDecompositionStrategy):
             agent_id = self._create_agent_id(ResearchPhase.DATA_COLLECTION, i, aspect.lower().replace(" ", "_"))
             section_id = f"section_{seq_idx}"
             matched_spec = section_spec_by_id.get(section_id) or section_spec_by_name.get(aspect)
+            
+            template_subs = template_sub_sections_by_aspect.get(aspect, [])
             
             # [P0-4] Annual report mode: lightweight preloaded data delivery
             if preloaded_data:
@@ -571,12 +589,13 @@ class IndustryResearchStrategy(TaskDecompositionStrategy):
                     quality_threshold=0.7,
                     max_retries=complexity_params["max_retries"],
                     skills=_get_data_collection_skills(aspect, topic, intent_result),
-                    system_prompt=self._build_data_collection_prompt(topic, aspect, framework_config, sub_aspects=[sub.name for sub in matched_spec.sub_sections] if matched_spec and matched_spec.sub_sections else None),
+                    system_prompt=self._build_data_collection_prompt(topic, aspect, framework_config, sub_aspects=self._resolve_sub_aspect_names(template_subs) or ([sub.name for sub in matched_spec.sub_sections] if matched_spec and matched_spec.sub_sections else None)),
                     context={"aspect": aspect, "topic": topic,
                              "section_id": section_id,
                              "data_needs": matched_spec.all_data_needs if matched_spec else [aspect],
                              "search_data_needs": matched_spec.search_data_needs if matched_spec else [aspect],
-                             "sub_aspects": [sub.name for sub in matched_spec.sub_sections] if matched_spec and matched_spec.sub_sections else []},
+                             "sub_aspects": self._resolve_sub_aspect_names(template_subs) or ([sub.name for sub in matched_spec.sub_sections] if matched_spec and matched_spec.sub_sections else []),
+                             "template_sub_sections": template_subs},
                 )
             phases[ResearchPhase.DATA_COLLECTION].append(spec)
         
@@ -609,6 +628,7 @@ class IndustryResearchStrategy(TaskDecompositionStrategy):
             validation_agent_id = self._create_agent_id(ResearchPhase.DATA_VALIDATION, i, aspect.lower().replace(" ", "_"))
             agent_id = self._create_agent_id(ResearchPhase.DEEP_ANALYSIS, i, aspect.lower().replace(" ", "_"))
             da_matched_spec = section_spec_by_name.get(aspect)
+            da_template_subs = template_sub_sections_by_aspect.get(aspect, [])
             
             # [P0-4] Annual report mode: inject document_context from analysis_framework
             document_context = ""
@@ -636,7 +656,8 @@ class IndustryResearchStrategy(TaskDecompositionStrategy):
                         document_tables = financial_tables
             
             agent_context = {"aspect": aspect, "topic": topic,
-                     "sub_aspects": [sub.name for sub in da_matched_spec.sub_sections] if da_matched_spec and da_matched_spec.sub_sections else []}
+                     "sub_aspects": self._resolve_sub_aspect_names(da_template_subs) or ([sub.name for sub in da_matched_spec.sub_sections] if da_matched_spec and da_matched_spec.sub_sections else []),
+                     "template_sub_sections": da_template_subs}
             if document_context:
                 agent_context["document_context"] = document_context
             if document_tables:
@@ -657,7 +678,7 @@ class IndustryResearchStrategy(TaskDecompositionStrategy):
                 quality_threshold=0.75,
                 max_retries=complexity_params["max_retries"],
                 skills=get_skills_for_aspect(aspect),
-                system_prompt=self._build_analysis_prompt(topic, aspect, framework_config, sub_aspects=[sub.name for sub in da_matched_spec.sub_sections] if da_matched_spec and da_matched_spec.sub_sections else None),
+                system_prompt=self._build_analysis_prompt(topic, aspect, framework_config, sub_aspects=self._resolve_sub_aspect_names(da_template_subs) or ([sub.name for sub in da_matched_spec.sub_sections] if da_matched_spec and da_matched_spec.sub_sections else None), template_sub_sections=da_template_subs),
                 context=agent_context,
             )
             phases[ResearchPhase.DEEP_ANALYSIS].append(spec)
@@ -809,7 +830,7 @@ class IndustryResearchStrategy(TaskDecompositionStrategy):
 4. Label data quality level
 """
 
-    def _build_analysis_prompt(self, topic: str, aspect: str, framework_config: Any, sub_aspects: Optional[List[str]] = None) -> str:
+    def _build_analysis_prompt(self, topic: str, aspect: str, framework_config: Any, sub_aspects: Optional[List[str]] = None, template_sub_sections: Optional[List] = None) -> str:
         """Build analysis prompt from external file"""
         depth = framework_config.get_analysis_depth() if framework_config else "deep"
         metrics = framework_config.get_key_metrics() if framework_config else []
@@ -828,7 +849,28 @@ class IndustryResearchStrategy(TaskDecompositionStrategy):
 - Do not add any form of source explanation after data"""
         
         sub_aspects_section = ""
-        if sub_aspects:
+        if template_sub_sections:
+            from src.core.i18n import get_language, Language
+            lang = get_language()
+            if lang == Language.ZH:
+                sub_aspects_section = "\n\n## 输出结构要求（必须严格遵守）\n请按以下结构输出分析内容，每个子章节使用 ### 标题：\n"
+            else:
+                sub_aspects_section = "\n\n## Output Structure Requirements (MUST follow strictly)\nPlease structure your analysis with ### headings for each sub-section:\n"
+            for sub in template_sub_sections:
+                sub_name = sub.get("name", "") if hasattr(sub, 'get') else getattr(sub, 'name', "")
+                if isinstance(sub_name, dict):
+                    sub_name = sub_name.get("zh", sub_name.get("en", "")) if lang == Language.ZH else sub_name.get("en", sub_name.get("zh", ""))
+                sub_aspects_section += f"### {sub_name}\n"
+                for pt in (sub.get("points", []) if hasattr(sub, 'get') else getattr(sub, 'points', [])):
+                    if isinstance(pt, dict):
+                        pt_text = pt.get("zh", pt.get("en", "")) if lang == Language.ZH else pt.get("en", pt.get("zh", ""))
+                    elif hasattr(pt, 'text'):
+                        pt_text = pt.text
+                    else:
+                        pt_text = str(pt)
+                    if pt_text:
+                        sub_aspects_section += f"- {pt_text}\n"
+        elif sub_aspects:
             from src.core.i18n import get_language, Language
             lang = get_language()
             if lang == Language.ZH:
@@ -908,6 +950,19 @@ Provide deep analysis meeting international consulting standards.
                         ))
                 break
         return section_data_specs
+
+    @staticmethod
+    def _resolve_sub_aspect_names(template_sub_sections: List) -> List[str]:
+        if not template_sub_sections:
+            return []
+        names = []
+        for sub in template_sub_sections:
+            name = sub.get("name", "") if hasattr(sub, 'get') else getattr(sub, 'name', "")
+            if isinstance(name, dict):
+                name = name.get("zh", name.get("en", ""))
+            if name:
+                names.append(name)
+        return names
 
     _SYNTHESIS_HARD_CONSTRAINT = """
 
