@@ -2316,14 +2316,45 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
                 if symbol:
                     symbols = [symbol]
             if not symbols:
+                _skill_manifest = self._skill_registry.get_manifest(skill_name) if hasattr(self, '_skill_registry') and self._skill_registry else None
+                if _skill_manifest and _skill_manifest.supports_topic_fallback and topic:
+                    _fb_skill = self._skill_registry.get(skill_name) if hasattr(self, '_skill_registry') else None
+                    if _fb_skill:
+                        _fb_skill._manifest = _skill_manifest
+                        _identifier = _fb_skill.resolve_identifier(topic, aspect)
+                        if _identifier:
+                            symbols = [_identifier]
+                            logger.info(
+                                f"GenericAgent {self.agent_id}: {skill_name} topic fallback "
+                                f"→ symbol='{_identifier}'"
+                            )
+            if not symbols:
                 return result
+
             for symbol in symbols:
-                actions = self._infer_stock_actions(aspect)
+                _infer_manifest = self._skill_registry.get_manifest(skill_name) if hasattr(self, '_skill_registry') and self._skill_registry else None
+                if _infer_manifest and _infer_manifest.action_rules:
+                    _infer_skill = self._skill_registry.get(skill_name) if hasattr(self, '_skill_registry') else None
+                    if _infer_skill:
+                        _infer_skill._manifest = _infer_manifest
+                        actions = _infer_skill.infer_actions(aspect, symbol)
+                    else:
+                        actions = self._infer_stock_actions(aspect)
+                else:
+                    actions = self._infer_stock_actions(aspect)
                 for action in actions:
                     try:
-                        skill_result = await stock_skill.execute(
-                            action=action, symbol=symbol,
-                        )
+                        _exec_manifest = self._skill_registry.get_manifest(skill_name) if hasattr(self, '_skill_registry') and self._skill_registry else None
+                        if _exec_manifest and _exec_manifest.action_param_map and action in _exec_manifest.action_param_map:
+                            _param_map = _exec_manifest.action_param_map[action]
+                            _exec_kwargs = {"action": action}
+                            for _pname, _psource in _param_map.items():
+                                _exec_kwargs[_pname] = symbol
+                            skill_result = await stock_skill.execute(**_exec_kwargs)
+                        else:
+                            skill_result = await stock_skill.execute(
+                                action=action, symbol=symbol,
+                            )
                         if skill_result and skill_result.get("success"):
                             data = skill_result.get("data", {})
                             if isinstance(data, list):

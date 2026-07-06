@@ -10,7 +10,7 @@
 
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-green.svg)]()
-[![Version](https://img.shields.io/badge/version-2.6.0-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-2.8.0-blue.svg)]()
 [![Next.js 14](https://img.shields.io/badge/Next.js-14-black.svg)]()
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-teal.svg)]()
 
@@ -52,13 +52,17 @@ Zensers 编排一支专业 Agent 团队，每个 Agent 负责研究流程中的�
 | Agent | 职责 |
 |-------|------|
 | RequirementAnalysisAgent | 行业识别、维度分析、深度评估、技能推荐 |
+| RequirementParserAgent | 需求解析、意图识别、参数提取 |
 | DataCollectionAgent | 多源搜索、数据清洗、API 调用、文件解析 |
 | CrossSynthesisAgent | 跨领域综合、矛盾检测、逻辑整合 |
 | ReportGenerationAgent | 内容整合、结构组织、风格统一、摘要生成 |
 | QualityCheckAgent | 数据准确性、内容完整性、逻辑连贯性、格式规范 |
 | ResultCalibrationAgent | 结果校准、数据修补、质量收敛 |
 | DocumentGenerationAgent | Word/PPT/PDF/HTML 多格式专业排版输出 |
+| LayoutDesignAgent | 报告版面布局设计、样式编排 |
 | ChartPlannerAgent | 报告内容分析、主动数据获取、12种专业图表规划与生成 |
+| DataRepairAgent | 数据缺陷检测与修复 |
+| GlobalReviewAgent | 全局报告审阅与一致性检查 |
 | SurveyAnalysisAgent | 问卷数据分析与可视化 |
 
 ### 七层架构
@@ -81,6 +85,27 @@ Zensers 编排一支专业 Agent 团队，每个 Agent 负责研究流程中的�
 ├──────────────────────────────────────────────────┤
 │ Layer 0: 约束层 — SourceWhitelist / FactTracer / CrossValidator │
 └──────────────────────────────────────────────────┘
+```
+
+### 自描述技能系统
+
+Zensers 采用**自描述技能架构**，每个技能通过 `SKILL.md` 清单文件声明自身能力，无需硬编码注册：
+
+- **SKILL.md 清单** — YAML frontmatter 定义 capabilities、action_rules、priority、aliases、data_types，Markdown 部分提供执行指令
+- **技能发现引擎** — `SkillDiscovery.discover_all()` 自动扫描 `src/skills/` 目录，解析 SKILL.md，构建注册表
+- **三维度注册表** — `SkillRegistries` 自动构建 priority_map、alias_map、structured_data_capabilities、data_source_skill_map、category_to_skills
+- **语义路由** — `infer_actions()` 根据用户意图（A股/港股/美股 + 行情/K线/热门）自动推断应执行的动作
+- **零硬编码扩展** — 新增技能只需创建目录 + SKILL.md + skill.py，系统自动发现注册
+
+```
+src/skills/xueqiu/
+├── SKILL.md          # 自描述清单（YAML + Markdown）
+│   ├── name: xueqiu
+│   ├── capabilities: [quote, kline, hot_stocks, search_and_quote, ...]
+│   ├── action_rules: [{intent: "A股+行情", actions: [quote, kline]}]
+│   ├── priority: structured_db
+│   └── aliases: [xueqiu_stock, stock_quote]
+└── skill.py          # 技能入口 → 复用 analysis/xueqiu_skill.py
 ```
 
 ### 数据可信保障
@@ -208,7 +233,7 @@ result = await orchestrator.research("分析中国新能源汽车市场", intera
 | 层级 | 技术 |
 |------|------|
 | 后端 | Python · FastAPI · asyncio |
-| LLM | OpenAI · DeepSeek · Anthropic · 本地模型 |
+| LLM | OpenAI · DeepSeek · 本地模型 |
 | 搜索 | DuckDuckGo · Baidu · Google · Bing · Tavily |
 | 数据源 | AKShare · Tushare · 世界银行 · 国家统计局 |
 | 前端 | Next.js 14 · Tailwind CSS · TypeScript |
@@ -216,7 +241,7 @@ result = await orchestrator.research("分析中国新能源汽车市场", intera
 | 图表 | matplotlib · seaborn · plotly |
 | 存储 | SQLite · PostgreSQL · Redis · WAL |
 | 协议 | MCP (Model Context Protocol) |
-| 测试 | pytest · 2,200+ 测试用例 |
+| 测试 | pytest · 6,300+ 测试用例 |
 
 ---
 
@@ -224,11 +249,11 @@ result = await orchestrator.research("分析中国新能源汽车市场", intera
 
 | 指标 | 数值 |
 |------|------|
-| 源文件 | 120+ |
-| 代码行数 | ~42,000 |
-| 测试文件 | 80+ |
-| 测试用例 | 2,200+ |
-| Agent 数量 | 9+ |
+| 源文件 | 430+ |
+| 代码行数 | ~160,000 |
+| 测试文件 | 380+ |
+| 测试用例 | 6,300+ |
+| Agent 数量 | 13+ |
 | 研究框架 | 6 种 |
 | 图表类型 | 12 种 |
 | 输出格式 | 5 种 |
@@ -266,7 +291,16 @@ zensers/
 │   │   └── workflow/           # 工作流引擎
 │   ├── methodologies/          # 研究方法论框架
 │   ├── services/               # 图表规划、图表生成与数据提取
-│   ├── skills/                 # 技能插件系统
+│   ├── skills/                 # 自描述技能插件系统（SKILL.md 清单驱动）
+│   │   ├── discovery.py        # 技能发现引擎（ActionRule/Manifest/Registries）
+│   │   ├── registry.py         # 技能注册中心（capability/priority/category 查询）
+│   │   ├── base.py             # 技能基类（format_data/infer_actions/resolve_identifier）
+│   │   ├── xueqiu/             # 雪球数据技能（A股/港股/美股实时行情）
+│   │   │   ├── SKILL.md        # 自描述清单（YAML frontmatter + 指令）
+│   │   │   └── skill.py        # 技能入口
+│   │   ├── analysis/           # 数据分析技能
+│   │   ├── search_skill.py     # 搜索技能
+│   │   └── ...                 # 更多技能
 │   └── survey/                 # 问卷系统
 ├── web/                        # Next.js 前端
 ├── config/                     # YAML 配置文件

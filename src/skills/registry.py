@@ -61,6 +61,7 @@ class SkillRegistry:
         self._skills: Dict[str, Skill] = {}
         self._adapter = LangChainAdapter()
         self._factories: Dict[str, Callable[[], Skill]] = {}
+        self._manifests: Dict[str, Any] = {}
     
     def register(self, skill: Skill, name: Optional[str] = None) -> None:
         """
@@ -537,6 +538,7 @@ class SkillRegistry:
         """Clear all registered Skills"""
         self._skills.clear()
         self._factories.clear()
+        self._manifests.clear()
         self._adapter.clear()
     
     def get_stats(self) -> Dict[str, int]:
@@ -563,6 +565,86 @@ class SkillRegistry:
             return "builtin"
         else:
             return "custom"
+
+    def register_manifest(self, manifest: Any) -> None:
+        self._manifests[manifest.name] = manifest
+
+    def get_manifest(self, name: str) -> Optional[Any]:
+        return self._manifests.get(name)
+
+    def all_manifests(self) -> Dict[str, Any]:
+        return dict(self._manifests)
+
+    def get_by_capability(self, capability: str) -> Optional[Skill]:
+        for name, manifest in self._manifests.items():
+            if capability in manifest.capabilities:
+                skill = self.get(name)
+                if skill:
+                    return skill
+        return None
+
+    def get_by_priority(self, priority: str) -> List[Skill]:
+        results = []
+        for name, manifest in self._manifests.items():
+            if manifest.priority == priority:
+                skill = self.get(name)
+                if skill:
+                    results.append(skill)
+        return results
+
+    def get_skills_by_category(self, category: str) -> List[str]:
+        return [
+            name for name, m in self._manifests.items()
+            if category in m.categories
+        ]
+
+    def init_from_discovery(self, skills_dir) -> None:
+        from .discovery import SkillDiscovery
+        from .base import InstructionSkill
+        from pathlib import Path
+
+        skills_path = Path(skills_dir) if not isinstance(skills_dir, Path) else skills_dir
+        discovery = SkillDiscovery()
+        manifests = discovery.discover_all(skills_path)
+
+        for manifest in manifests:
+            self.register_manifest(manifest)
+
+            if manifest.skill_type == "langchain":
+                continue
+
+            if manifest.has_code:
+                skill_cls = discovery.load_skill_class(manifest)
+                if skill_cls:
+                    self.register_factory(manifest.name, skill_cls)
+                else:
+                    self.register_factory(
+                        manifest.name,
+                        lambda m=manifest: InstructionSkill(m),
+                    )
+            else:
+                self.register_factory(
+                    manifest.name,
+                    lambda m=manifest: InstructionSkill(m),
+                )
+
+        self._validate_manifests()
+
+    def _validate_manifests(self) -> None:
+        for name, manifest in self._manifests.items():
+            if manifest.has_code and name not in self._factories and name not in self._skills:
+                logger.warning(f"Skill '{name}' has skill.py but no Skill subclass found")
+
+            if manifest.action_param_map:
+                for cap in manifest.capabilities:
+                    if cap not in manifest.action_param_map:
+                        logger.warning(f"Skill '{name}' capability '{cap}' not in action_param_map")
+
+            if manifest.action_rules:
+                for rule in manifest.action_rules:
+                    for action in rule.actions:
+                        if action not in manifest.capabilities:
+                            logger.warning(f"Skill '{name}' action_rule references '{action}' not in capabilities")
 
 
 # Global registry singleton

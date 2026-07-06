@@ -101,7 +101,7 @@ NEXT_PUBLIC_API_URL=http://localhost:8000
 ### 3. LLM 配置
 
 在设置页面配置：
-- 提供商（OpenAI、Anthropic、Azure、本地模型）
+- 提供商（OpenAI、DeepSeek、Azure、本地模型）
 - API Key
 - 模型选择
 - 参数调整（Temperature、Max Tokens 等）

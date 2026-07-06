@@ -291,6 +291,12 @@ class ResearchOrchestrator:
             except Exception as e:
                 logger.warning(f"Orchestrator: failed to register analysis Skills: {e}")
 
+            try:
+                skill_registry.init_from_discovery(Path("src/skills"))
+                logger.info("Orchestrator: skill discovery initialized from src/skills/")
+            except Exception as e:
+                logger.warning(f"Orchestrator: skill discovery failed: {e}")
+
             logger.info(
                 f"Orchestrator: auto-registered {registered} core Skills, {lc_count} LangChain Tools")
         self._skill_registry = skill_registry

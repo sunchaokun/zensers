@@ -5,7 +5,8 @@ Provides the base framework for all Skills: configuration, registration, output 
 """
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Dict, Any, Optional, Type
+from typing import Dict, Any, List, Optional, Type
+import re
 
 
 @dataclass
@@ -86,6 +87,57 @@ class Skill(ABC):
     def _failure(self, error: str, message: str = "Execution failed") -> Dict[str, Any]:
         """Build failure response"""
         return {"success": False, "message": message, "error": error}
+
+    def format_data(self, data: dict, action: str, symbol: str) -> str:
+        return ""
+
+    def infer_actions(self, aspect: str, symbol: str) -> List[str]:
+        manifest = getattr(self, '_manifest', None)
+        if manifest and manifest.action_rules:
+            for rule in manifest.action_rules:
+                if not re.match(rule.pattern, symbol):
+                    continue
+                if rule.aspect_keywords:
+                    aspect_lower = (aspect or "").lower()
+                    if any(kw.lower() in aspect_lower for kw in rule.aspect_keywords):
+                        return rule.actions
+                    continue
+                return rule.actions
+        return ["default"]
+
+    def resolve_identifier(self, topic: str, aspect: str) -> Optional[str]:
+        manifest = getattr(self, '_manifest', None)
+        if manifest and manifest.supports_topic_fallback and manifest.topic_fallback_pattern:
+            m = re.search(manifest.topic_fallback_pattern, topic)
+            if m:
+                return m.group(0)
+        return None
+
+
+class InstructionSkill(Skill):
+    """Pure instruction Skill — no Python execution, provides SKILL.md instructions for AI."""
+
+    def __init__(self, manifest):
+        self._manifest = manifest
+        self._name = manifest.name
+        self._description = manifest.description
+        self.config = SkillConfig(name=manifest.name, version=manifest.version)
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def description(self) -> str:
+        return self._description
+
+    async def execute(self, **kwargs) -> Dict[str, Any]:
+        return {
+            "success": True,
+            "data": {"instructions": self._manifest.instructions},
+            "content": self._manifest.instructions[:500],
+            "source": self.name,
+        }
 
 
 class SkillRegistry:

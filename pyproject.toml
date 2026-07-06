@@ -1,6 +1,6 @@
 [project]
 name = "zensers"
-version = "2.7.2"
+version = "2.8.0"
 description = "Automated Industry Research System"
 requires-python = ">=3.10"
 dependencies = [
@@ -10,7 +10,6 @@ dependencies = [
     "aiohttp>=3.9.0,<4.0.0",
     # LLM clients
     "openai>=1.0.0",
-    "anthropic>=0.18.0",
     # Document processing
     "python-docx>=1.0.0",
     "markdown>=3.5.0",

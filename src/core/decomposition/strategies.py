@@ -107,6 +107,7 @@ SKILL_PRIORITY_MAP = {
     "stock_data": "structured_db",
     "wind_data": "structured_db",
     "bloomberg_data": "structured_db",
+    "xueqiu": "structured_db",
     "search_skill": "web_search",
     "news_search": "web_search",
     "lc_tavily_search": "web_search",
@@ -115,28 +116,34 @@ SKILL_PRIORITY_MAP = {
 }
 
 DATA_SOURCE_SKILL_MAP = {
-    "financial": ["stock_data"],
-    "valuation": ["stock_data"],
-    "company": ["stock_data"],
-    "market_size": ["stock_data"],
-    "competitive": [],
+    "financial": ["stock_data", "xueqiu"],
+    "valuation": ["stock_data", "xueqiu"],
+    "company": ["stock_data", "xueqiu"],
+    "market_size": ["stock_data", "xueqiu"],
+    "competitive": ["xueqiu"],
     "policy": [],
     "technology": [],
     "risk": [],
-    "财务": ["stock_data"],
-    "估值": ["stock_data"],
-    "公司": ["stock_data"],
-    "盈利": ["stock_data"],
-    "营收": ["stock_data"],
-    "市值": ["stock_data"],
-    "市场规模": ["stock_data"],
-    "利润": ["stock_data"],
+    "财务": ["stock_data", "xueqiu"],
+    "估值": ["stock_data", "xueqiu"],
+    "公司": ["stock_data", "xueqiu"],
+    "盈利": ["stock_data", "xueqiu"],
+    "营收": ["stock_data", "xueqiu"],
+    "市值": ["stock_data", "xueqiu"],
+    "市场规模": ["stock_data", "xueqiu"],
+    "利润": ["stock_data", "xueqiu"],
     "资产负债": ["stock_data"],
-    "roe": ["stock_data"],
-    "pe": ["stock_data"],
-    "pb": ["stock_data"],
-    "增长": ["stock_data"],
-    "投资": ["stock_data"],
+    "roe": ["stock_data", "xueqiu"],
+    "pe": ["stock_data", "xueqiu"],
+    "pb": ["stock_data", "xueqiu"],
+    "增长": ["stock_data", "xueqiu"],
+    "投资": ["stock_data", "xueqiu"],
+    "行情": ["xueqiu"],
+    "热门": ["xueqiu"],
+    "港股": ["xueqiu"],
+    "美股": ["xueqiu"],
+    "趋势": ["xueqiu"],
+    "竞争": ["xueqiu"],
 }
 
 
@@ -154,10 +161,13 @@ def _get_data_collection_skills(aspect: str, topic: str = "", intent_result: Any
     if intent_result:
         primary_type = getattr(intent_result, 'primary_research_type', None)
         if primary_type and getattr(primary_type, 'value', '') in (
-            "company_research", "investment", "competitive_analysis"
+            "company_research", "investment", "competitive_analysis",
+            "industry_research", "brand_research",
         ):
             if "stock_data" not in aspect_skills:
                 aspect_skills.append("stock_data")
+            if "xueqiu" not in aspect_skills:
+                aspect_skills.append("xueqiu")
 
     all_unique = list(dict.fromkeys(aspect_skills + base_skills))
     for skill in all_unique:
@@ -214,6 +224,11 @@ STRUCTURED_DATA_CAPABILITIES = {
         "zh": ["营收", "净利润", "毛利率", "净利率", "ROE", "ROA", "ROIC",
                "资产负债率", "流动比率", "速动比率", "现金流", "研发费用",
                "销量", "产量", "市场份额", "PE", "PB", "利润表", "资产负债表", "现金流量表"],
+    },
+    "xueqiu": {
+        "zh": ["换手率", "市盈率", "实时行情", "当前价", "涨跌幅", "成交量",
+               "成交额", "市值", "PE_TTM", "K线", "行情", "热门股票",
+               "人气排行", "关注排行", "热帖"],
     },
 }
 

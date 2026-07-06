@@ -10,7 +10,7 @@
 
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-green.svg)]()
-[![Version](https://img.shields.io/badge/version-2.6.0-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-2.8.0-blue.svg)]()
 [![Next.js 14](https://img.shields.io/badge/Next.js-14-black.svg)]()
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-teal.svg)]()
 
@@ -52,13 +52,17 @@ Requirement Parsing → Smart Clarification → Intent Analysis → Task Decompo
 | Agent | Responsibility |
 |-------|---------------|
 | RequirementAnalysisAgent | Industry identification, dimensional analysis, depth assessment, skill recommendation |
+| RequirementParserAgent | Requirement parsing, intent recognition, parameter extraction |
 | DataCollectionAgent | Multi-source search, data cleaning, API calls, file parsing |
 | CrossSynthesisAgent | Cross-domain synthesis, contradiction detection, logical integration |
 | ReportGenerationAgent | Content integration, structural organization, style unification, summary generation |
 | QualityCheckAgent | Data accuracy, content completeness, logical coherence, format standards |
 | ResultCalibrationAgent | Result calibration, data repair, quality convergence |
 | DocumentGenerationAgent | Professional multi-format output (Word/PPT/PDF/HTML) |
+| LayoutDesignAgent | Report layout design and style composition |
 | ChartPlannerAgent | Report content analysis, proactive data fetching, 12 chart type planning & generation |
+| DataRepairAgent | Data defect detection and repair |
+| GlobalReviewAgent | Global report review and consistency check |
 | SurveyAnalysisAgent | Survey data analysis and visualization |
 
 ### Seven-Layer Architecture
@@ -81,6 +85,27 @@ Requirement Parsing → Smart Clarification → Intent Analysis → Task Decompo
 ├──────────────────────────────────────────────────────────────┤
 │ Layer 0: Constraint Layer — SourceWhitelist / CrossValidator │
 └──────────────────────────────────────────────────────────────┘
+```
+
+### Self-Describing Skill System
+
+Zensers uses a **self-describing skill architecture** where each skill declares its capabilities via a `SKILL.md` manifest file — no hard-coded registration required:
+
+- **SKILL.md Manifest** — YAML frontmatter defines capabilities, action_rules, priority, aliases, data_types; Markdown section provides execution instructions
+- **Skill Discovery Engine** — `SkillDiscovery.discover_all()` auto-scans `src/skills/` directory, parses SKILL.md, builds registries
+- **Three-Dimension Registries** — `SkillRegistries` auto-builds priority_map, alias_map, structured_data_capabilities, data_source_skill_map, category_to_skills
+- **Semantic Routing** — `infer_actions()` infers which actions to execute based on user intent (A-share/HK/US + quote/kline/hot)
+- **Zero Hard-Code Extension** — Adding a new skill requires only: create directory + SKILL.md + skill.py; the system auto-discovers and registers it
+
+```
+src/skills/xueqiu/
+├── SKILL.md          # Self-describing manifest (YAML + Markdown)
+│   ├── name: xueqiu
+│   ├── capabilities: [quote, kline, hot_stocks, search_and_quote, ...]
+│   ├── action_rules: [{intent: "A-share+quote", actions: [quote, kline]}]
+│   ├── priority: structured_db
+│   └── aliases: [xueqiu_stock, stock_quote]
+└── skill.py          # Skill entry point → reuses analysis/xueqiu_skill.py
 ```
 
 ### Data Trust Assurance
@@ -208,7 +233,7 @@ Or via the web interface: visit `http://localhost:3000`
 | Layer | Technology |
 |-------|-----------|
 | Backend | Python · FastAPI · asyncio |
-| LLM | OpenAI · DeepSeek · Anthropic · Local models |
+| LLM | OpenAI · DeepSeek · Local models |
 | Search | DuckDuckGo · Baidu · Google · Bing · Tavily |
 | Data Sources | AKShare · Tushare · World Bank · National Bureau of Statistics |
 | Frontend | Next.js 14 · Tailwind CSS · TypeScript |
@@ -216,7 +241,7 @@ Or via the web interface: visit `http://localhost:3000`
 | Charts | matplotlib · seaborn · plotly |
 | Storage | SQLite · PostgreSQL · Redis · WAL |
 | Protocol | MCP (Model Context Protocol) |
-| Testing | pytest · 2,200+ test cases |
+| Testing | pytest · 6,300+ test cases |
 
 ---
 
@@ -224,11 +249,11 @@ Or via the web interface: visit `http://localhost:3000`
 
 | Metric | Value |
 |--------|-------|
-| Source files | 120+ |
-| Lines of code | ~42,000 |
-| Test files | 80+ |
-| Test cases | 2,200+ |
-| Agents | 9+ |
+| Source files | 430+ |
+| Lines of code | ~160,000 |
+| Test files | 380+ |
+| Test cases | 6,300+ |
+| Agents | 13+ |
 | Research frameworks | 6 |
 | Chart types | 12 |
 | Output formats | 5 |
@@ -266,7 +291,16 @@ zensers/
 │   │   └── workflow/           # Workflow engine
 │   ├── methodologies/          # Research methodology frameworks
 │   ├── services/               # Chart planning, chart generation & data extraction
-│   ├── skills/                 # Skill plugin system
+│   ├── skills/                 # Self-describing skill plugin system (SKILL.md manifest-driven)
+│   │   ├── discovery.py        # Skill discovery engine (ActionRule/Manifest/Registries)
+│   │   ├── registry.py         # Skill registry (capability/priority/category queries)
+│   │   ├── base.py             # Skill base class (format_data/infer_actions/resolve_identifier)
+│   │   ├── xueqiu/             # Xueqiu data skill (A/HK/US stock real-time quotes)
+│   │   │   ├── SKILL.md        # Self-describing manifest (YAML frontmatter + instructions)
+│   │   │   └── skill.py        # Skill entry point
+│   │   ├── analysis/           # Data analysis skills
+│   │   ├── search_skill.py     # Search skill
+│   │   └── ...                 # More skills
 │   └── survey/                 # Survey system
 ├── web/                        # Next.js frontend
 ├── config/                     # YAML configuration files

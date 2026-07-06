@@ -1989,7 +1989,7 @@ class ExecutionEngine:
                 _completed_in_batch = sum(
                     1 for tid in task_ids
                     if self._coordinator._active_tasks.get(tid) is not None
-                    and self._coordinator._active_tasks[tid].done()
+                    and self._coordinator._active_tasks[tid].status == "completed"
                 )
                 if _completed_in_batch != _prev_completed and session_id and _total_agents_in_batch > 0:
                     try:
