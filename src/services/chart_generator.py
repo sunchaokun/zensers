@@ -225,7 +225,8 @@ class ChartGenerator:
             self._add_annotations(fig, config)
         self._chart_counter += 1
         image_path = str(self.output_dir / f"{name}_{self._chart_counter}.png")
-        fig.savefig(image_path, dpi=150, bbox_inches='tight',
+        dpi = config.dpi if config else 150
+        fig.savefig(image_path, dpi=dpi, bbox_inches='tight',
                    facecolor='white', edgecolor='none')
         plt.close(fig)
         return image_path

@@ -50,7 +50,7 @@ Zensers 是一个 AI 驱动的市场研究平台，通过自然语言对话引�
 |------|------|
 | 后端框架 | Python 3.10+ / FastAPI / Pydantic v2 |
 | 前端框架 | Next.js (App Router) / TypeScript / Zustand / shadcn/ui |
-| LLM | OpenAI / DeepSeek / LangChain 0.3+ |
+| LLM | OpenAI / DeepSeek |
 | 数据库 | SQLite (默认) / PostgreSQL (可选) / Redis (可选) |
 | 文档生成 | python-docx / python-pptx / reportlab |
 | 数据可视化 | matplotlib / seaborn / plotly |

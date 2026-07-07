@@ -3,6 +3,7 @@
 import logging
 from typing import Any, Dict, List
 from src.skills.base import Skill, SkillConfig
+from src.core.llm_client import call_llm
 
 logger = logging.getLogger(__name__)
 
@@ -25,14 +26,8 @@ class RiskAnalysisSkill(Skill):
         if not topic:
             return self._failure("topic is required")
 
-        from src.skills.registry import get_skill_registry
-        reg = get_skill_registry()
-        llm = reg.get("llm_skill")
-        if not llm:
-            return self._failure("llm_skill not available")
-
         prompt = self._build_prompt(topic, aspect, data_points, sources)
-        result = await llm.execute(prompt=prompt, system_prompt=(
+        result = await call_llm(prompt=prompt, system_prompt=(
             "You are a senior risk management analyst.\n\n"
             "## Expertise\n"
             "- Risk matrix construction (Probability x Impact)\n"

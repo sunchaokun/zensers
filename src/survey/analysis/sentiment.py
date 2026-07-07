@@ -12,11 +12,12 @@ Flow:
   6. Low-confidence texts (< 0.4) optionally enhanced via LLM
 """
 
-import asyncio
 import logging
 import re
 from collections import Counter
 from typing import Dict, Any, List, Optional
+
+from src.core.llm_client import call_llm_sync
 
 from .sentiment_dict import SentimentDict, get_default_dict, detect_language
 
@@ -44,10 +45,8 @@ class SentimentAnalyzer:
 
     def __init__(
         self,
-        llm_skill=None,
         sentiment_dict: Optional[SentimentDict] = None,
     ):
-        self.llm_skill = llm_skill
         self._dict = sentiment_dict or get_default_dict()
         self._jieba_initialized = False
 
@@ -248,7 +247,7 @@ class SentimentAnalyzer:
         results = [self.analyze_text(t, lang=lang) for t in texts]
 
         # Optional: LLM enhancement for low-confidence texts
-        if use_llm and self.llm_skill:
+        if use_llm:
             results = self._llm_enhance(texts, results)
 
         # Aggregate results
@@ -274,21 +273,16 @@ class SentimentAnalyzer:
     # ------------------------------------------------------------------ #
     def _llm_enhance(self, texts: List[str], results: List[Dict]) -> List[Dict]:
         """Use LLM to enhance low-confidence results."""
-        if not self.llm_skill:
-            return results
-
         for i, (text, r) in enumerate(zip(texts, results)):
             if r["confidence"] < 0.4 and len(text) > 20:
                 try:
-                    llm_result = asyncio.run(
-                        self.llm_skill.execute(
-                            prompt=(
-                                f"Please analyze the sentiment of the following text, "
-                                f"output only 'positive', 'neutral', or 'negative':\n\n{text[:500]}"
-                            ),
-                            temperature=0.3,
-                            max_tokens=10,
-                        )
+                    llm_result = call_llm_sync(
+                        prompt=(
+                            f"Please analyze the sentiment of the following text, "
+                            f"output only 'positive', 'neutral', or 'negative':\n\n{text[:500]}"
+                        ),
+                        temperature=0.3,
+                        max_tokens=10,
                     )
                     if llm_result.get("success"):
                         content = llm_result.get("content", "").strip().lower()

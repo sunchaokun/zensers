@@ -46,13 +46,6 @@ def make_global_review(score=75.0, issues=None):
 
 
 @pytest.fixture
-def mock_llm():
-    llm = AsyncMock()
-    llm.execute.return_value = {"success": True, "content": "执行摘要内容"}
-    return llm
-
-
-@pytest.fixture
 def mock_writer():
     return AsyncMock()
 
@@ -84,10 +77,9 @@ def mock_prompts(tmp_path):
 
 
 @pytest.fixture
-def orchestrator(mock_llm, mock_writer, mock_reviewer, mock_global_reviewer,
+def orchestrator(mock_writer, mock_reviewer, mock_global_reviewer,
                  mock_data_repair, mock_conflict_resolver, mock_prompts):
     return ReportOrchestrator(
-        llm_skill=mock_llm,
         chapter_writer=mock_writer,
         chapter_reviewer=mock_reviewer,
         global_reviewer=mock_global_reviewer,
@@ -125,7 +117,7 @@ class TestRetryPolicy:
 
 class TestReportOrchestratorGenerateReport:
     @pytest.mark.asyncio
-    async def test_single_chapter_pass_review(self, orchestrator, mock_writer, mock_reviewer, mock_global_reviewer, mock_llm):
+    async def test_single_chapter_pass_review(self, orchestrator, mock_writer, mock_reviewer, mock_global_reviewer):
         mock_writer.write.return_value = make_chapter()
         mock_reviewer.review.return_value = make_review_pass()
         mock_global_reviewer.review.return_value = make_global_review()

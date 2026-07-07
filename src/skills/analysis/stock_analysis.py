@@ -18,6 +18,7 @@ import logging
 import re
 from typing import Any, Dict, List, Optional
 from src.skills.base import Skill
+from src.core.llm_client import call_llm
 
 logger = logging.getLogger(__name__)
 
@@ -44,27 +45,18 @@ class StockAnalysisSkill(Skill):
         # Step 1: Pre-compute financial ratios
         computed_ratios = await self._precompute_ratios(financial_data)
 
-        llm = await self._get_llm()
-        if not llm:
-            return self._failure("llm_skill not available")
-
         if action == "financial_health":
-            return await self._financial_health_analysis(llm, symbol, financial_data, computed_ratios)
+            return await self._financial_health_analysis(symbol, financial_data, computed_ratios)
         elif action == "growth_analysis":
-            return await self._growth_analysis(llm, symbol, financial_data, computed_ratios)
+            return await self._growth_analysis(symbol, financial_data, computed_ratios)
         elif action == "valuation":
-            return await self._valuation_analysis(llm, symbol, financial_data, industry_data, computed_ratios)
+            return await self._valuation_analysis(symbol, financial_data, industry_data, computed_ratios)
         elif action == "strategic_analysis":
-            return await self._strategic_analysis(llm, symbol, financial_data, industry_data, computed_ratios)
+            return await self._strategic_analysis(symbol, financial_data, industry_data, computed_ratios)
         elif action == "full_report":
-            return await self._full_report(llm, symbol, financial_data, industry_data, computed_ratios)
+            return await self._full_report(symbol, financial_data, industry_data, computed_ratios)
         else:
             return self._failure(f"Unsupported analysis type: {action}")
-
-    async def _get_llm(self):
-        from src.skills.registry import get_skill_registry
-        reg = get_skill_registry()
-        return reg.get("llm_skill")
 
     # ============ Computation Layer ============
 
@@ -181,7 +173,7 @@ print(json.dumps(r))
 
     # ============ Analysis Layer ============
 
-    async def _financial_health_analysis(self, llm, symbol: str, data: Dict, ratios: Dict) -> Dict[str, Any]:
+    async def _financial_health_analysis(self, symbol: str, data: Dict, ratios: Dict) -> Dict[str, Any]:
         ratio_str = self._format_computed_ratios(ratios)
         ratio_section = f"\n\n## Precisely Computed Financial Ratios\n{ratio_str}\n" if ratio_str else ""
         
@@ -198,7 +190,7 @@ Composite financial health score (out of 100).{ratio_section}
 
 Available financial data:
 {self._format_data(data)}"""
-        result = await llm.execute(prompt=prompt, system_prompt=(
+        result = await call_llm(prompt=prompt, system_prompt=(
             "You are a senior CFA charterholder, expert in financial statement analysis and health assessment.\n\n"
             "## Expertise\n"
             "- Three-statement quality assessment and red flag identification\n"
@@ -217,7 +209,7 @@ Available financial data:
         ))
         return self._result(result, symbol, "financial_health")
 
-    async def _growth_analysis(self, llm, symbol: str, data: Dict, ratios: Dict) -> Dict[str, Any]:
+    async def _growth_analysis(self, symbol: str, data: Dict, ratios: Dict) -> Dict[str, Any]:
         ratio_str = self._format_computed_ratios(ratios)
         ratio_section = f"\n\n## Precisely Computed Financial Ratios\n{ratio_str}\n" if ratio_str else ""
         
@@ -234,7 +226,7 @@ Provide a growth quality score (out of 100).{ratio_section}
 
 Available financial data:
 {self._format_data(data)}"""
-        result = await llm.execute(prompt=prompt, system_prompt=(
+        result = await call_llm(prompt=prompt, system_prompt=(
             "You are a senior industry researcher, expert in corporate growth analysis and growth quality assessment.\n\n"
             "## Expertise\n"
             "- Revenue growth decomposition (volume/price, product mix, geographic expansion)\n"
@@ -253,7 +245,7 @@ Available financial data:
         ))
         return self._result(result, symbol, "growth_analysis")
 
-    async def _valuation_analysis(self, llm, symbol: str, data: Dict, industry: str, ratios: Dict) -> Dict[str, Any]:
+    async def _valuation_analysis(self, symbol: str, data: Dict, industry: str, ratios: Dict) -> Dict[str, Any]:
         ratio_str = self._format_computed_ratios(ratios)
         ratio_section = f"\n\n## Precisely Computed Financial Ratios\n{ratio_str}\n" if ratio_str else ""
         
@@ -270,7 +262,7 @@ Available financial data:
 {self._format_data(data)}
 
 Industry background: {industry if industry else 'Not provided'}"""
-        result = await llm.execute(prompt=prompt, system_prompt=(
+        result = await call_llm(prompt=prompt, system_prompt=(
             "You are a senior valuation analyst, expert in DCF/comparable company/comparable transaction valuation methodologies.\n\n"
             "## Expertise\n"
             "- DCF model construction (FCF forecasting, WACC calculation, terminal value assumptions)\n"
@@ -289,7 +281,7 @@ Industry background: {industry if industry else 'Not provided'}"""
         ))
         return self._result(result, symbol, "valuation")
 
-    async def _strategic_analysis(self, llm, symbol: str, data: Dict, industry: str, ratios: Dict) -> Dict[str, Any]:
+    async def _strategic_analysis(self, symbol: str, data: Dict, industry: str, ratios: Dict) -> Dict[str, Any]:
         ratio_str = self._format_computed_ratios(ratios)
         ratio_section = f"\n\n## Precisely Computed Financial Ratios\n{ratio_str}\n" if ratio_str else ""
         
@@ -308,7 +300,7 @@ Available financial data:
 {self._format_data(data)}
 
 Industry background: {industry if industry else 'Not provided'}"""
-        result = await llm.execute(prompt=prompt, system_prompt=(
+        result = await call_llm(prompt=prompt, system_prompt=(
             "You are a senior strategic investment analyst, expert in corporate hidden value and option value assessment.\n\n"
             "## Expertise\n"
             "- Real option pricing (expansion option/deferral option/abandonment option)\n"
@@ -327,7 +319,7 @@ Industry background: {industry if industry else 'Not provided'}"""
         ))
         return self._result(result, symbol, "strategic_analysis")
 
-    async def _full_report(self, llm, symbol: str, data: Dict, industry: str, ratios: Dict) -> Dict[str, Any]:
+    async def _full_report(self, symbol: str, data: Dict, industry: str, ratios: Dict) -> Dict[str, Any]:
         ratio_str = self._format_computed_ratios(ratios)
         ratio_section = f"\n## Financial Ratios\n{ratio_str}\n" if ratio_str else ""
         
@@ -353,7 +345,7 @@ Available financial data:
 {self._format_data(data)}
 
 Industry background: {industry if industry else 'Not provided'}"""
-        result = await llm.execute(prompt=prompt, system_prompt=(
+        result = await call_llm(prompt=prompt, system_prompt=(
             "You are a senior chief researcher at a securities firm, specializing in writing in-depth research reports.\n\n"
             "## Expertise\n"
             "- Company deep-dive reports (business model/competitive advantage/financial projections)\n"

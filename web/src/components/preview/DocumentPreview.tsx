@@ -10,6 +10,7 @@ import { api, buildDownloadUrl } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select';
 import { SectionNavBar, type SectionNavItem } from '@/components/quality/SectionNavBar';
 import { RevisionHintBar } from '@/components/quality/RevisionHintBar';
 import type { PreviewRefreshEventData, QualityResultEventData, QualityStateData } from '@/types/api';
@@ -415,6 +416,13 @@ function FinalizeToolbar({ taskId }: { taskId: string | null }) {
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
+  const [exportFormat, setExportFormat] = useState<string>('docx');
+
+  const FORMAT_LABELS: Record<string, string> = {
+    docx: 'DOCX',
+    pptx: 'PPTX',
+    pdf: 'PDF',
+  };
 
   const handleFinalize = async () => {
     if (!taskId) return;
@@ -422,7 +430,7 @@ function FinalizeToolbar({ taskId }: { taskId: string | null }) {
     setError(null);
     setInfo(null);
     try {
-      const res = await api.exportDocument(taskId, 'latest', 'docx');
+      const res = await api.exportDocument(taskId, 'latest', exportFormat);
       if (res.status === 'success') {
         setFinalized(true);
         setDownloadUrl(res.download_url ?? null);
@@ -445,13 +453,13 @@ function FinalizeToolbar({ taskId }: { taskId: string | null }) {
       return;
     }
     
-    const fileName = `${taskId}_report.docx`;
+    const fileName = `${taskId}_report.${exportFormat}`;
     
     if (isDesktop) {
       try {
         const pywebviewApi = (window as any).pywebview?.api;
         if (pywebviewApi?.download_and_save) {
-          const result = await pywebviewApi.download_and_save(downloadUrl, fileName, 'docx');
+          const result = await pywebviewApi.download_and_save(downloadUrl, fileName, exportFormat);
           if (result.success) return;
           if (result.error === 'Cancelled by user') return;
           console.warn('[DOWNLOAD] pywebview returned error, falling back:', result.error);
@@ -481,7 +489,7 @@ function FinalizeToolbar({ taskId }: { taskId: string | null }) {
     } catch (e: any) {
       setError(e?.message || '下载失败');
     }
-  }, [taskId, downloadUrl, isDesktop]);
+  }, [taskId, downloadUrl, isDesktop, exportFormat]);
 
   return (
     <div className="flex items-center gap-2 border-t border-border/50 px-4 py-2 bg-muted/30">
@@ -492,20 +500,32 @@ function FinalizeToolbar({ taskId }: { taskId: string | null }) {
       {error && <span className="text-xs text-red-500 mr-2">{error}</span>}
       {info && <span className="text-xs text-blue-500 mr-2">{info}</span>}
       {!finalized ? (
-        <Button
-          variant="default"
-          size="sm"
-          className="rounded-lg text-xs h-7"
-          onClick={handleFinalize}
-          disabled={finalizing || !taskId}
-        >
-          {finalizing ? (
-            <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
-          ) : (
-            <FileDown className="h-3.5 w-3.5 mr-1" />
-          )}
-          {finalizing ? 'Converting...' : 'Convert to DOCX'}
-        </Button>
+        <>
+          <Select value={exportFormat} onValueChange={(v) => setExportFormat(v)}>
+            <SelectTrigger className="h-7 w-[90px] text-xs rounded-lg">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="docx">DOCX</SelectItem>
+              <SelectItem value="pptx">PPTX</SelectItem>
+              <SelectItem value="pdf">PDF</SelectItem>
+            </SelectContent>
+          </Select>
+          <Button
+            variant="default"
+            size="sm"
+            className="rounded-lg text-xs h-7"
+            onClick={handleFinalize}
+            disabled={finalizing || !taskId}
+          >
+            {finalizing ? (
+              <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
+            ) : (
+              <FileDown className="h-3.5 w-3.5 mr-1" />
+            )}
+            {finalizing ? 'Converting...' : `Convert to ${FORMAT_LABELS[exportFormat]}`}
+          </Button>
+        </>
       ) : (
         <Button
           variant="default"
@@ -515,7 +535,7 @@ function FinalizeToolbar({ taskId }: { taskId: string | null }) {
         >
           <Download className="h-3.5 w-3.5 mr-1" />
           <CheckCircle2 className="h-3.5 w-3.5 mr-0.5 text-green-400" />
-          {isDesktop ? 'Save As...' : 'Download DOCX'}
+          {isDesktop ? 'Save As...' : `Download ${FORMAT_LABELS[exportFormat]}`}
         </Button>
       )}
     </div>

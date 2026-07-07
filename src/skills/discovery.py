@@ -209,8 +209,4 @@ class SkillDiscovery:
                 result.setdefault(aspect, [])
                 if m.name not in result[aspect]:
                     result[aspect].append(m.name)
-        llm = "llm_skill"
-        for aspect in result:
-            if llm not in result[aspect]:
-                result[aspect].insert(0, llm)
         return result

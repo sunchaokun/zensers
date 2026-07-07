@@ -321,14 +321,6 @@ class SkillRegistry:
                 self.register(DocxSkill())
                 count += 1
             
-            # Register LLM Skill (deprecated — LLM is an intrinsic agent capability,
-            # not a skill. New agents use call_llm() from src.core.llm_client directly.
-            # Kept for backward compatibility with existing code.
-            if "llm_skill" not in self._skills:
-                from .llm_skill import LLMSkill
-                self.register(LLMSkill())
-                count += 1
-            
             # Register Web Scraper Skill (key component of two-phase search strategy)
             if "web_scraper" not in self._skills:
                 from .web_scraper_skill import WebScraperSkill
@@ -397,18 +389,18 @@ class SkillRegistry:
         """
         # Phase 4: category_router removed, using built-in mapping
         CATEGORY_TO_SKILLS = {
-            "market-analysis": ["market_analysis", "lc_tavily_search", "lc_wikipedia", "llm_skill"],
+            "market-analysis": ["market_analysis", "lc_tavily_search", "lc_wikipedia"],
             "data-collection": ["lc_tavily_search", "lc_wikipedia"],
-            "academic-research": ["lc_arxiv", "lc_wikipedia", "llm_skill"],
-            "financial-analysis": ["stock_data", "stock_analysis", "lc_tavily_search", "lc_wikipedia", "llm_skill"],
-            "data-analysis": ["data_analysis", "lc_python_repl", "llm_skill"],
-            "report-generation": ["llm_skill"],
-            "quality-check": ["llm_skill"],
+            "academic-research": ["lc_arxiv", "lc_wikipedia"],
+            "financial-analysis": ["stock_data", "stock_analysis", "lc_tavily_search", "lc_wikipedia"],
+            "data-analysis": ["data_analysis", "lc_python_repl"],
+            "report-generation": [],
+            "quality-check": [],
             "visual-engineering": [],
-            "research": ["stock_data", "lc_tavily_search", "lc_wikipedia", "llm_skill"],
-            "synthesis": ["llm_skill"],
-            "calibration": ["llm_skill"],
-            "annual-report": ["annual_report_parser", "stock_data", "stock_analysis", "llm_skill"],
+            "research": ["stock_data", "lc_tavily_search", "lc_wikipedia"],
+            "synthesis": [],
+            "calibration": [],
+            "annual-report": ["annual_report_parser", "stock_data", "stock_analysis"],
         }
         
         needed_skills = CATEGORY_TO_SKILLS.get(category, [])
@@ -427,11 +419,6 @@ class SkillRegistry:
                 if self.load_langchain_skill(skill_name):
                     loaded.append(skill_name)
                 continue
-            if skill_name == "llm_skill":
-                if skill_name not in self._skills:
-                    self.register_core_skills()
-                if skill_name in self._skills:
-                    loaded.append(skill_name)
         
         if loaded:
             logger.info(f"Loaded {len(loaded)} skills for category: {category}")
@@ -444,10 +431,9 @@ class SkillRegistry:
         auto_load: bool = True,
     ) -> List[str]:
         """
-        Intelligently discover Skills (fuzzy matching + LLM fallback)
+        Intelligently discover Skills (fuzzy matching)
         
         Intelligently matches the most suitable Skills based on user query keywords.
-        If no match is found, automatically falls back to llm_skill.
         
         Args:
             query: User query keywords (e.g. "patent analysis", "data analysis")
@@ -458,10 +444,10 @@ class SkillRegistry:
             
         Example:
             >>> registry.discover_skills("patent analysis")
-            ["lc_arxiv", "llm_skill"]
+            ["lc_arxiv"]
             
             >>> registry.discover_skills("quantum computing")
-            ["llm_skill"]  # No match, falls back to LLM
+            []
         """
         from .skill_keywords import match_skills
         
@@ -479,11 +465,6 @@ class SkillRegistry:
                         loaded.append(skill_name)
                 elif skill_name.startswith("lc_"):
                     if self.load_langchain_skill(skill_name):
-                        loaded.append(skill_name)
-                elif skill_name == "llm_skill":
-                    if skill_name not in self._skills:
-                        self.register_core_skills()
-                    if skill_name in self._skills:
                         loaded.append(skill_name)
         else:
             loaded = matched

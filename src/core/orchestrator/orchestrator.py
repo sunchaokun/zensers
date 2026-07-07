@@ -1061,84 +1061,77 @@ class ResearchOrchestrator:
                 from src.agents.fixed_agents.report_upgrade.prompt_manager import PromptManager
                 from src.core.research_framework_manager import get_framework_config
 
-                _llm_skill = self._skill_registry.get("llm_skill")
                 _search_skill = self._skill_registry.get("search_skill")
                 _web_scraper_skill = self._skill_registry.get("web_scraper")
 
-                if _llm_skill:
-                    _pm = PromptManager()
-                    _ro = ReportOrchestrator(
-                        llm_skill=_llm_skill,
-                        chapter_writer=ChapterWriter(llm_skill=_llm_skill, prompt_manager=_pm),
-                        chapter_reviewer=ChapterReviewAgent(llm_skill=_llm_skill, prompt_manager=_pm),
-                        global_reviewer=GlobalReviewAgent(llm_skill=_llm_skill, prompt_manager=_pm),
-                        data_repair_agent=DataRepairAgent(
-                            search_skill=_search_skill,
-                            web_scraper_skill=_web_scraper_skill,
-                            llm_skill=_llm_skill,
-                            prompt_manager=_pm,
-                        ),
-                        conflict_resolver=ConflictResolver(
-                            llm_skill=_llm_skill,
-                            search_skill=_search_skill,
-                            web_scraper_skill=_web_scraper_skill,
-                            prompt_manager=_pm,
-                        ),
+                _pm = PromptManager()
+                _ro = ReportOrchestrator(
+                    chapter_writer=ChapterWriter(prompt_manager=_pm),
+                    chapter_reviewer=ChapterReviewAgent(prompt_manager=_pm),
+                    global_reviewer=GlobalReviewAgent(prompt_manager=_pm),
+                    data_repair_agent=DataRepairAgent(
+                        search_skill=_search_skill,
+                        web_scraper_skill=_web_scraper_skill,
                         prompt_manager=_pm,
-                        skill_registry=self._skill_registry,
-                    )
+                    ),
+                    conflict_resolver=ConflictResolver(
+                        search_skill=_search_skill,
+                        web_scraper_skill=_web_scraper_skill,
+                        prompt_manager=_pm,
+                    ),
+                    prompt_manager=_pm,
+                    skill_registry=self._skill_registry,
+                )
 
-                    _output_type_value = requirement.output_type.value if hasattr(
-                        requirement.output_type, 'value') else str(requirement.output_type)
-                    _fc_obj = get_framework_config(_output_type_value)
-                    _fc_dict = {
-                        "name": _fc_obj.name,
-                        "description": _fc_obj.description,
-                        "agent_config": {
-                            "search": {
-                                "max_queries_per_section": _fc_obj.agent_config.search.max_queries_per_section,
-                                "max_results_per_query": _fc_obj.agent_config.search.max_results_per_query,
-                                "priority_sources": _fc_obj.agent_config.search.priority_sources,
-                            },
-                            "analysis": {
-                                "depth": _fc_obj.agent_config.analysis.depth,
-                                "focus_areas": _fc_obj.agent_config.analysis.focus_areas,
-                                "metrics": _fc_obj.agent_config.analysis.metrics,
-                            },
-                            "content": {
-                                "min_section_length": _fc_obj.agent_config.content.min_section_length,
-                                "require_data_points": _fc_obj.agent_config.content.require_data_points,
-                                "require_sources": _fc_obj.agent_config.content.require_sources,
-                            },
+                _output_type_value = requirement.output_type.value if hasattr(
+                    requirement.output_type, 'value') else str(requirement.output_type)
+                _fc_obj = get_framework_config(_output_type_value)
+                _fc_dict = {
+                    "name": _fc_obj.name,
+                    "description": _fc_obj.description,
+                    "agent_config": {
+                        "search": {
+                            "max_queries_per_section": _fc_obj.agent_config.search.max_queries_per_section,
+                            "max_results_per_query": _fc_obj.agent_config.search.max_results_per_query,
+                            "priority_sources": _fc_obj.agent_config.search.priority_sources,
                         },
-                        "section_weights": _fc_obj.section_weights,
-                    }
+                        "analysis": {
+                            "depth": _fc_obj.agent_config.analysis.depth,
+                            "focus_areas": _fc_obj.agent_config.analysis.focus_areas,
+                            "metrics": _fc_obj.agent_config.analysis.metrics,
+                        },
+                        "content": {
+                            "min_section_length": _fc_obj.agent_config.content.min_section_length,
+                            "require_data_points": _fc_obj.agent_config.content.require_data_points,
+                            "require_sources": _fc_obj.agent_config.content.require_sources,
+                        },
+                    },
+                    "section_weights": _fc_obj.section_weights,
+                }
 
-                    _task_structure_dict = self._build_task_structure_from_section_details(
-                        requirement.section_details, requirement.topic, task_id
-                    )
+                _task_structure_dict = self._build_task_structure_from_section_details(
+                    requirement.section_details, requirement.topic, task_id
+                )
 
-                    research_result_data = await _ro.generate_report(
-                        task_structure=_task_structure_dict,
-                        framework_config=_fc_dict,
-                        aggregated_result=aggregated,
-                        topic=requirement.topic,
-                        task_id=task_id,
-                    )
-                    if "title" not in research_result_data:
-                        research_result_data["title"] = requirement.topic
-                    try:
-                        if hasattr(_ro, '_data_registry') and _ro._data_registry is not None:
-                            research_result_data["_data_registry_snapshot"] = _ro._data_registry.to_snapshot()
-                        if hasattr(_ro, '_framework_config') and _ro._framework_config:
-                            research_result_data["_framework_config"] = _ro._framework_config
-                        if hasattr(_ro, '_task_structure') and _ro._task_structure:
-                            research_result_data["_task_structure"] = _ro._task_structure
-                    except Exception as _snapshot_err:
-                        logger.warning(f"[{task_id}] Failed to save registry/config snapshot: {_snapshot_err}")
-                    logger.info(f"[{task_id}] Report upgrade (non-routing): framework-driven generation complete")
-                else:
-                    raise RuntimeError("No LLM skill available")
+                research_result_data = await _ro.generate_report(
+                    task_structure=_task_structure_dict,
+                    framework_config=_fc_dict,
+                    aggregated_result=aggregated,
+                    topic=requirement.topic,
+                    task_id=task_id,
+                )
+                if "title" not in research_result_data:
+                    research_result_data["title"] = requirement.topic
+                try:
+                    if hasattr(_ro, '_data_registry') and _ro._data_registry is not None:
+                        research_result_data["_data_registry_snapshot"] = _ro._data_registry.to_snapshot()
+                    if hasattr(_ro, '_framework_config') and _ro._framework_config:
+                        research_result_data["_framework_config"] = _ro._framework_config
+                    if hasattr(_ro, '_task_structure') and _ro._task_structure:
+                        research_result_data["_task_structure"] = _ro._task_structure
+                except Exception as _snapshot_err:
+                    logger.warning(f"[{task_id}] Failed to save registry/config snapshot: {_snapshot_err}")
+                logger.info(f"[{task_id}] Report upgrade (non-routing): framework-driven generation complete")
             except Exception as _report_upgrade_err:
                 logger.warning(f"[{task_id}] Report upgrade failed, falling back to to_dict(): {_report_upgrade_err}")
                 research_result_data = aggregated.to_dict()
@@ -2286,84 +2279,77 @@ class ResearchOrchestrator:
                 from src.agents.fixed_agents.report_upgrade.prompt_manager import PromptManager
                 from src.core.research_framework_manager import get_framework_config
 
-                llm_skill = self._skill_registry.get("llm_skill")
                 search_skill = self._skill_registry.get("search_skill")
                 web_scraper_skill = self._skill_registry.get("web_scraper")
 
-                if llm_skill:
-                    prompt_manager = PromptManager()
-                    report_orchestrator = ReportOrchestrator(
-                        llm_skill=llm_skill,
-                        chapter_writer=ChapterWriter(llm_skill=llm_skill, prompt_manager=prompt_manager),
-                        chapter_reviewer=ChapterReviewAgent(llm_skill=llm_skill, prompt_manager=prompt_manager),
-                        global_reviewer=GlobalReviewAgent(llm_skill=llm_skill, prompt_manager=prompt_manager),
-                        data_repair_agent=DataRepairAgent(
-                            search_skill=search_skill,
-                            web_scraper_skill=web_scraper_skill,
-                            llm_skill=llm_skill,
-                            prompt_manager=prompt_manager,
-                        ),
-                        conflict_resolver=ConflictResolver(
-                            llm_skill=llm_skill,
-                            search_skill=search_skill,
-                            web_scraper_skill=web_scraper_skill,
-                            prompt_manager=prompt_manager,
-                        ),
+                prompt_manager = PromptManager()
+                report_orchestrator = ReportOrchestrator(
+                    chapter_writer=ChapterWriter(prompt_manager=prompt_manager),
+                    chapter_reviewer=ChapterReviewAgent(prompt_manager=prompt_manager),
+                    global_reviewer=GlobalReviewAgent(prompt_manager=prompt_manager),
+                    data_repair_agent=DataRepairAgent(
+                        search_skill=search_skill,
+                        web_scraper_skill=web_scraper_skill,
                         prompt_manager=prompt_manager,
-                        skill_registry=self._skill_registry,
-                    )
+                    ),
+                    conflict_resolver=ConflictResolver(
+                        search_skill=search_skill,
+                        web_scraper_skill=web_scraper_skill,
+                        prompt_manager=prompt_manager,
+                    ),
+                    prompt_manager=prompt_manager,
+                    skill_registry=self._skill_registry,
+                )
 
-                    task_structure_dict = {}
-                    if hasattr(routing_result, 'task_structure') and routing_result.task_structure:
-                        task_structure_dict = routing_result.task_structure.to_dict()
+                task_structure_dict = {}
+                if hasattr(routing_result, 'task_structure') and routing_result.task_structure:
+                    task_structure_dict = routing_result.task_structure.to_dict()
 
-                    output_type_value = requirement.output_type.value if hasattr(
-                        requirement.output_type, 'value') else str(requirement.output_type)
-                    framework_config_obj = get_framework_config(output_type_value)
-                    framework_config_dict = {
-                        "name": framework_config_obj.name,
-                        "description": framework_config_obj.description,
-                        "agent_config": {
-                            "search": {
-                                "max_queries_per_section": framework_config_obj.agent_config.search.max_queries_per_section,
-                                "max_results_per_query": framework_config_obj.agent_config.search.max_results_per_query,
-                                "priority_sources": framework_config_obj.agent_config.search.priority_sources,
-                            },
-                            "analysis": {
-                                "depth": framework_config_obj.agent_config.analysis.depth,
-                                "focus_areas": framework_config_obj.agent_config.analysis.focus_areas,
-                                "metrics": framework_config_obj.agent_config.analysis.metrics,
-                            },
-                            "content": {
-                                "min_section_length": framework_config_obj.agent_config.content.min_section_length,
-                                "require_data_points": framework_config_obj.agent_config.content.require_data_points,
-                                "require_sources": framework_config_obj.agent_config.content.require_sources,
-                            },
+                output_type_value = requirement.output_type.value if hasattr(
+                    requirement.output_type, 'value') else str(requirement.output_type)
+                framework_config_obj = get_framework_config(output_type_value)
+                framework_config_dict = {
+                    "name": framework_config_obj.name,
+                    "description": framework_config_obj.description,
+                    "agent_config": {
+                        "search": {
+                            "max_queries_per_section": framework_config_obj.agent_config.search.max_queries_per_section,
+                            "max_results_per_query": framework_config_obj.agent_config.search.max_results_per_query,
+                            "priority_sources": framework_config_obj.agent_config.search.priority_sources,
                         },
-                        "section_weights": framework_config_obj.section_weights,
-                    }
+                        "analysis": {
+                            "depth": framework_config_obj.agent_config.analysis.depth,
+                            "focus_areas": framework_config_obj.agent_config.analysis.focus_areas,
+                            "metrics": framework_config_obj.agent_config.analysis.metrics,
+                        },
+                        "content": {
+                            "min_section_length": framework_config_obj.agent_config.content.min_section_length,
+                            "require_data_points": framework_config_obj.agent_config.content.require_data_points,
+                            "require_sources": framework_config_obj.agent_config.content.require_sources,
+                        },
+                    },
+                    "section_weights": framework_config_obj.section_weights,
+                }
 
-                    research_result_data = await report_orchestrator.generate_report(
-                        task_structure=task_structure_dict,
-                        framework_config=framework_config_dict,
-                        aggregated_result=aggregated,
-                        topic=requirement.topic,
-                        task_id=task_id,
-                    )
-                    if "title" not in research_result_data:
-                        research_result_data["title"] = requirement.topic
-                    try:
-                        if hasattr(report_orchestrator, '_data_registry') and report_orchestrator._data_registry is not None:
-                            research_result_data["_data_registry_snapshot"] = report_orchestrator._data_registry.to_snapshot()
-                        if hasattr(report_orchestrator, '_framework_config') and report_orchestrator._framework_config:
-                            research_result_data["_framework_config"] = report_orchestrator._framework_config
-                        if hasattr(report_orchestrator, '_task_structure') and report_orchestrator._task_structure:
-                            research_result_data["_task_structure"] = report_orchestrator._task_structure
-                    except Exception as _snapshot_err:
-                        logger.warning(f"[{task_id}] Failed to save registry/config snapshot: {_snapshot_err}")
-                    logger.info(f"[{task_id}] Report upgrade: framework-driven generation complete, {len(research_result_data.get('sections', []))} sections")
-                else:
-                    raise RuntimeError("No LLM skill available")
+                research_result_data = await report_orchestrator.generate_report(
+                    task_structure=task_structure_dict,
+                    framework_config=framework_config_dict,
+                    aggregated_result=aggregated,
+                    topic=requirement.topic,
+                    task_id=task_id,
+                )
+                if "title" not in research_result_data:
+                    research_result_data["title"] = requirement.topic
+                try:
+                    if hasattr(report_orchestrator, '_data_registry') and report_orchestrator._data_registry is not None:
+                        research_result_data["_data_registry_snapshot"] = report_orchestrator._data_registry.to_snapshot()
+                    if hasattr(report_orchestrator, '_framework_config') and report_orchestrator._framework_config:
+                        research_result_data["_framework_config"] = report_orchestrator._framework_config
+                    if hasattr(report_orchestrator, '_task_structure') and report_orchestrator._task_structure:
+                        research_result_data["_task_structure"] = report_orchestrator._task_structure
+                except Exception as _snapshot_err:
+                    logger.warning(f"[{task_id}] Failed to save registry/config snapshot: {_snapshot_err}")
+                logger.info(f"[{task_id}] Report upgrade: framework-driven generation complete, {len(research_result_data.get('sections', []))} sections")
             except Exception as _report_upgrade_err:
                 logger.warning(f"[{task_id}] Report upgrade failed, falling back to mechanical assembly: {_report_upgrade_err}")
                 research_result_data = {
@@ -3345,13 +3331,8 @@ class ResearchOrchestrator:
         task_id: str,
     ) -> Optional[Dict[str, Any]]:
         from src.agents.fixed_agents.survey_integration_agent import SurveyIntegrationAgent
-        llm_skill = self._skill_registry.get("llm_skill")
-        if not llm_skill:
-            logger.warning(f"[{task_id}] No LLM skill available, skipping survey")
-            return None
         agent = SurveyIntegrationAgent(
             agent_id=f"{task_id}_survey",
-            llm_skill=llm_skill,
         )
         result = await agent.execute({
             "workflow": getattr(requirement, "survey_mode", "ai_simulation"),
@@ -4525,8 +4506,8 @@ class ResearchOrchestrator:
             # Merge template Skills and Wisdom recommended Skills
             base_skills = template_data.get(
                 "recommended_skills", [
-                    "search_skill", "llm_skill"]) if template_data else [
-                "search_skill", "llm_skill"]
+                    "search_skill"]) if template_data else [
+                "search_skill"]
             optional_skills = []
 
             # Add Wisdom recommended Skills
@@ -4800,7 +4781,7 @@ class ResearchOrchestrator:
             capability = AgentCapability(
                 name=f"{aspect}综合分析",
                 description=f"综合分析{requirement.topic}的{aspect}（依赖其他章节）",
-                required_skills=["llm_skill"],
+                required_skills=[],
                 optional_skills=["file_skill"],
                 skill_params={},
                 role=role,

@@ -156,9 +156,7 @@ class ReportOrchestrator:
         conflict_resolver: ConflictResolver,
         prompt_manager: PromptManager = None,
         skill_registry=None,
-        llm_skill=None,  # kept for backward compatibility; agents use call_llm() directly
     ) -> None:
-        # self._llm removed - agents use call_llm() from src.core.llm_client directly
         self._chapter_writer = chapter_writer
         self._chapter_reviewer = chapter_reviewer
         self._global_reviewer = global_reviewer

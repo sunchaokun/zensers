@@ -158,17 +158,17 @@ class DynamicAgentFactory(AgentFactory):
     # Updated whenever new aliases are discovered via validation warnings.
     _SKILL_ALIAS_MAP: Dict[str, str] = {
         "search": "search_skill",
-        "analysis": "llm_skill",
+        "analysis": "data_analysis",
         "docx": "docx_skill",
         "pptx": "pptx_skill",
         "http": "http_skill",
         "file": "file_skill",
         "news": "news_search",
-        "code_generation": "llm_skill",
-        "code_fix": "llm_skill",
-        "debugging": "llm_skill",
-        "dialogue": "llm_skill",
-        "comparison": "llm_skill",
+        "code_generation": "data_analysis",
+        "code_fix": "data_analysis",
+        "debugging": "data_analysis",
+        "dialogue": "data_analysis",
+        "comparison": "data_analysis",
     }
 
     def _validate_and_normalize_skills(
@@ -220,13 +220,11 @@ class DynamicAgentFactory(AgentFactory):
                 f"Registered: {sorted(registered_names)}"
             )
 
-        # Safety: if no valid skills remain, inject llm_skill as minimum
         if not norm_required and not norm_optional:
             logger.warning(
                 f"Agent {agent_id}: no valid skills after validation, "
-                f"injecting fallback 'llm_skill'"
+                f"proceeding with no skills (LLM calls handled by call_llm)"
             )
-            norm_required = ["llm_skill"]
 
         return norm_required, norm_optional
 

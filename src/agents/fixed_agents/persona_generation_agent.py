@@ -37,6 +37,7 @@ import random
 
 from .base_fixed_agent import FixedAgent
 from src.survey.services.persona_factory import Persona, PersonaFactory
+from src.core.llm_client import call_llm
 
 
 class PersonaGenerationAgent(FixedAgent):
@@ -66,7 +67,6 @@ class PersonaGenerationAgent(FixedAgent):
         name: str = "Persona Generation Agent",
         description: str = "Generates virtual respondent personas",
         storage_path: Optional[str] = None,
-        llm_skill: Optional[Any] = None,
     ):
         """Initialize the Persona Generation Agent.
         
@@ -75,16 +75,14 @@ class PersonaGenerationAgent(FixedAgent):
             name: Agent name
             description: Agent description
             storage_path: Storage path
-            llm_skill: LLM Skill instance (optional, for enhanced generation)
         """
         super().__init__(agent_id, name=name, description=description, storage_path=storage_path)
-        self.llm_skill = llm_skill
         self._persona_factory: Optional[PersonaFactory] = None
     
     def _get_persona_factory(self) -> PersonaFactory:
         """Get or create a PersonaFactory instance."""
         if self._persona_factory is None:
-            self._persona_factory = PersonaFactory(llm_skill=self.llm_skill)
+            self._persona_factory = PersonaFactory()
         return self._persona_factory
     
     def validate_input(self, task_input: Dict[str, Any]) -> tuple[bool, str]:
@@ -164,7 +162,7 @@ class PersonaGenerationAgent(FixedAgent):
                 personas = factory.generate_population(template, count, context)
             
             # LLM enhancement
-            if enhance_with_llm and self.llm_skill:
+            if enhance_with_llm:
                 personas = await self._enhance_with_llm_async(personas, context)
             
             # Write to shared state
@@ -316,12 +314,8 @@ class PersonaGenerationAgent(FixedAgent):
         Returns:
             Enhanced list of personas
         """
-        if not self.llm_skill:
-            return personas
-        
         for persona in personas:
             try:
-                # Build enhancement prompt
                 prompt = f"""
 Generate a short background story for the following persona (50 words or less):
 
@@ -337,8 +331,7 @@ Personality: {', '.join(persona.personality_traits[:2])}
                 
                 prompt += "\n\nBackground Story:"
                 
-                # Call LLM
-                response = await self.llm_skill.execute(
+                response = await call_llm(
                     prompt=prompt,
                     max_tokens=100,
                     temperature=0.8,
@@ -396,7 +389,7 @@ Personality: {', '.join(persona.personality_traits[:2])}
                 personas = factory.generate_population(template, count, context)
             
             # LLM enhancement (async version)
-            if enhance_with_llm and self.llm_skill:
+            if enhance_with_llm:
                 personas = await self._enhance_with_llm_async(personas, context)
             
             return {

@@ -227,6 +227,13 @@
         {% endfor %}
     </div>
     {% endif %}
+    {% if section.charts %}
+    <div class="chart-container">
+        {% for chart in section.charts %}
+        <img src="{{ chart.path }}" alt="{{ chart.caption or chart.title or 'Chart' }}">
+        {% endfor %}
+    </div>
+    {% endif %}
     <div class="footer-bar"></div>
 </section>
 {% endfor %}

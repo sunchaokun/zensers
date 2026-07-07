@@ -88,9 +88,9 @@ class PersonaFactory:
     FIRST_NAMES_MALE = ["Wei Zhang", "Qiang Li", "Gang Wang", "Yang Liu", "Ming Chen", "Fan Yang", "Lei Zhao", "Jie Zhou"]
     FIRST_NAMES_FEMALE = ["Na Li", "Fang Wang", "Min Zhang", "Ting Liu", "Jing Chen", "Xue Yang", "Lin Zhao", "Li Zhou"]
     
-    def __init__(self, llm_skill=None):
-        self.llm_skill = llm_skill
-    
+    def __init__(self):
+        pass
+
     def generate_population(
         self,
         template_name: str,

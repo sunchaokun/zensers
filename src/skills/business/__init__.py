@@ -109,7 +109,7 @@ class ReportGenerationSkill:
     
     Dependencies:
     - docx_skill: Word document generation
-    - llm_skill: Content writing
+    - llm: Content writing (via call_llm)
     - file_skill: File operations
     
     Priority: High (Day 5-6)
@@ -157,7 +157,7 @@ class SurveyAnalysisSkill:
     
     Dependencies:
     - python_repl: Data analysis
-    - llm_skill: Text analysis
+    - llm: Text analysis (via call_llm)
     - data_visualization: Result presentation
     
     Priority: Low (Phase 3)

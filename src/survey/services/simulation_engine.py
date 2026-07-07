@@ -10,14 +10,15 @@ from datetime import datetime
 
 from .persona_factory import Persona
 from ..models import Survey, SurveyResponse, Answer, QuestionType
+from src.core.llm_client import call_llm
 
 
 class SimulationEngine:
     """Simulation Engine"""
     
-    def __init__(self, llm_skill=None):
-        self.llm_skill = llm_skill
-    
+    def __init__(self):
+        pass
+
     async def simulate_survey(
         self,
         personas: List[Persona],
@@ -85,7 +86,7 @@ class SimulationEngine:
         """Answer a single question"""
         
         # If LLM is available, use it to generate the answer
-        if self.llm_skill:
+        if True:
             return await self._answer_with_llm(persona, question, history)
         
         # Otherwise use rule-based generation
@@ -127,9 +128,8 @@ class SimulationEngine:
         
         # Call LLM
         try:
-            if self.llm_skill and hasattr(self.llm_skill, 'execute'):
-                # Properly pass kwargs
-                response = await self.llm_skill.execute(
+            if True:
+                response = await call_llm(
                     prompt=prompt,
                     system_prompt=system_prompt,
                     temperature=0.7,

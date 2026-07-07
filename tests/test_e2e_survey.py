@@ -126,7 +126,7 @@ async def main():
     # 5. Rule-based Persona Generation (no LLM)
     # ================================================================ #
     print("\n--- 5. Persona Generation (Rule-based) ---")
-    gen = PersonaGeneratorV2(llm_skill=None)
+    gen = PersonaGeneratorV2()
     # Use the first template from the registry (Chinese name)
     tpls = PersonaTemplateRegistry.list_templates()
     first_tpl = tpls[0]["id"] if tpls else "consumer"
@@ -165,7 +165,7 @@ async def main():
         title="Customer Satisfaction Survey",
         questions=[q],
     )
-    executor = SimulationExecutor(llm_skill=None, budget_limit=10.0)
+    executor = SimulationExecutor(budget_limit=10.0)
     result = await executor.execute(
         survey=survey,
         template_name=_TPL,
@@ -426,7 +426,7 @@ async def main():
     # 24. Focus Group (structure test)
     # ================================================================ #
     print("\n--- 24. Focus Group Simulator ---")
-    fs = FocusGroupSimulator(llm_skill=None)
+    fs = FocusGroupSimulator()
     personas_fg = [
         PersonaV2(persona_id=f"fg_{i}", persona_type=PersonaType.CONSUMER,
                    name=f"User{i}", age=30, gender="Male", city="Beijing", occupation="Test")

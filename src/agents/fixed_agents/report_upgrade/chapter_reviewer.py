@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 class ChapterReviewAgent:
 
-    def __init__(self, llm_skill=None, prompt_manager: PromptManager = None) -> None:
+    def __init__(self, prompt_manager: PromptManager = None) -> None:
         self._prompts = prompt_manager
 
     async def review(self, input_data: ChapterReviewInput) -> ChapterReviewOutput:

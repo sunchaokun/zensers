@@ -85,13 +85,10 @@ class FakeRepair:
     pass
 class FakeConflict:
     pass
-class FakeLLM:
-    pass
 class FakePM:
     pass
 
 orch = ReportOrchestrator(
-    llm_skill=FakeLLM(),
     chapter_writer=FakeWriter(),
     chapter_reviewer=FakeReviewer(),
     global_reviewer=FakeGlobal(),

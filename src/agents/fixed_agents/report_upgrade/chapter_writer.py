@@ -14,8 +14,7 @@ logger = logging.getLogger(__name__)
 
 class ChapterWriter:
 
-    def __init__(self, llm_skill=None, prompt_manager: PromptManager = None) -> None:
-        # llm_skill kept for backward compatibility; agents use call_llm() directly now
+    def __init__(self, prompt_manager: PromptManager = None) -> None:
         self._prompts = prompt_manager
 
     async def write(self, input_data: ChapterWriteInput) -> ChapterWriteOutput:

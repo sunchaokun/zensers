@@ -135,7 +135,6 @@ async def simulate_survey(survey_id: str, target_count: int = 50,
     from ..engine.persona_models import PromptLevel
     from ..models import Survey as SurveyModel
     from ..stores import SurveyTaskStore
-    from src.skills.registry import get_skill_registry
     store = SurveyTaskStore()
     task = await asyncio.to_thread(store.get, f"task_{survey_id[:8]}")
     if task and task.get("questions"):
@@ -143,9 +142,7 @@ async def simulate_survey(survey_id: str, target_count: int = 50,
     else:
         questions = []
     survey = SurveyModel(survey_id=survey_id, title=template, questions=questions)
-    reg = get_skill_registry()
-    llm_skill = reg.get("llm_skill")
-    executor = SimulationExecutor(llm_skill=llm_skill, prompt_level=PromptLevel.ENHANCED, budget_limit=5.0)
+    executor = SimulationExecutor(prompt_level=PromptLevel.ENHANCED, budget_limit=5.0)
     result = await executor.execute(survey=survey, template_name=template,
                                      persona_type=persona_type,
                                      target_count=target_count,

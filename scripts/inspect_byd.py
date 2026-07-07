@@ -45,7 +45,7 @@ for i, sec in enumerate(sections):
 
     class FakeX: pass
     orch = ReportOrchestrator(
-        llm_skill=FakeX(), chapter_writer=FakeX(), chapter_reviewer=FakeX(),
+        chapter_writer=FakeX(), chapter_reviewer=FakeX(),
         global_reviewer=FakeX(), data_repair_agent=FakeX(), conflict_resolver=FakeX(),
         prompt_manager=FakeX(),
     )

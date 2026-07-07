@@ -29,15 +29,13 @@ class PersonaSkill(Skill):
     - Optional LLM-enhanced backstory
     """
     
-    def __init__(self, config: Optional[SkillConfig] = None, llm_skill: Optional[Any] = None):
+    def __init__(self, config: Optional[SkillConfig] = None):
         """Initialize PersonaSkill.
         
         Args:
             config: Skill configuration
-            llm_skill: LLM Skill instance (optional, for enhanced generation)
         """
         super().__init__(config)
-        self.llm_skill = llm_skill
         self._agent: Optional[PersonaGenerationAgent] = None
     
     @property
@@ -54,7 +52,6 @@ class PersonaSkill(Skill):
             self._agent = PersonaGenerationAgent(
                 agent_id="persona_skill_agent",
                 name="Persona Generation Agent",
-                llm_skill=self.llm_skill,
             )
         return self._agent
     
@@ -83,7 +80,7 @@ class PersonaSkill(Skill):
             agent = self._get_agent()
             
             # Execute generation
-            result = agent.execute(kwargs)
+            result = await agent.execute(kwargs)
             
             if result["success"]:
                 return self._success(

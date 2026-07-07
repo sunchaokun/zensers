@@ -21,6 +21,7 @@ from typing import List, Optional, Dict, Any, Tuple
 
 from ..models import Question
 from .persona_models import PersonaV2, PersonaType
+from src.core.llm_client import call_llm
 
 logger = logging.getLogger(__name__)
 
@@ -88,8 +89,8 @@ Your responses must align with your background, personality, and viewpoints.
 You may agree or disagree with others' opinions, but stay authentic.
 Do not recite your persona information — express your views directly."""
 
-    def __init__(self, llm_skill=None):
-        self.llm_skill = llm_skill
+    def __init__(self):
+        pass
 
     async def simulate(
         self,
@@ -355,11 +356,9 @@ Do not recite your persona information — express your views directly."""
         self, system: str, prompt: str, temperature: float = 0.7
     ) -> Optional[str]:
         """LLM call (no retry — a single failure in focus group does not affect the whole)."""
-        if not self.llm_skill:
-            return None
         try:
             result = await asyncio.wait_for(
-                self.llm_skill.execute(
+                call_llm(
                     prompt=prompt,
                     system_prompt=system,
                     temperature=temperature,

@@ -42,7 +42,6 @@ class DataRepairAgent:
         self,
         search_skill,
         web_scraper_skill=None,
-        llm_skill=None,
         prompt_manager: PromptManager = None,
     ):
         self._search = search_skill
@@ -121,7 +120,6 @@ class DataRepairAgent:
 class ConflictResolver:
     def __init__(
         self,
-        llm_skill=None,
         search_skill=None,
         web_scraper_skill=None,
         prompt_manager: PromptManager = None,

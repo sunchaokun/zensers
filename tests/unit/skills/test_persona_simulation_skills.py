@@ -120,21 +120,9 @@ class TestSimulationSkill:
     
     @pytest.fixture
     def skill_with_llm(self):
-        """创建带LLM的Skill实例"""
         from src.skills.builtin.simulation_skill import SimulationSkill
         from src.skills.base import SkillConfig
-        
-        mock_llm = MagicMock()
-        mock_llm.execute = AsyncMock(return_value={
-            "success": True,
-            "content": "是",
-            "usage": {"total_tokens": 100}
-        })
-        
-        return SimulationSkill(
-            SkillConfig(name="simulation_skill", version="1.0.0"),
-            llm_skill=mock_llm,
-        )
+        return SimulationSkill(SkillConfig(name="simulation_skill", version="1.0.0"))
     
     @pytest.fixture
     def sample_survey(self):
@@ -184,8 +172,7 @@ class TestSimulationSkill:
         assert skill.config.enabled is True
     
     def test_skill_with_llm_initialization(self, skill_with_llm):
-        """测试带LLM的Skill初始化"""
-        assert skill_with_llm.llm_skill is not None
+        assert skill_with_llm is not None
     
     @pytest.mark.asyncio
     async def test_execute_simulation(self, skill, sample_survey, sample_personas):

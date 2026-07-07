@@ -495,8 +495,13 @@ class DocumentAPI:
         return await self._export_document(request)
     
     async def _export_document(self, request: ExportDocumentRequest) -> Dict[str, Any]:
-        """Export document: convert latest HTML preview to DOCX"""
+        """Export document: convert latest HTML preview to specified format"""
         task_id = request.task_id
+        output_format = getattr(request, 'format', 'docx') or 'docx'
+        
+        if output_format not in ('docx', 'pptx', 'pdf'):
+            logger.warning(f"Unknown export format '{output_format}', defaulting to docx")
+            output_format = 'docx'
         
         # ========== EXPORT START ==========
         logger.info(f"[EXPORT] ========== Starting export for task_id={task_id} ==========")
@@ -541,7 +546,7 @@ class DocumentAPI:
         # 2. Ensure output directory exists under data/reports/
         logger.info(f"[EXPORT] Step 3: Preparing output directory")
         output_dir = Path("data/reports") / task_id
-        output_path = str(output_dir / f"{task_id}_report.docx")
+        output_path = str(output_dir / f"{task_id}_report.{output_format}")
         logger.info(f"[EXPORT] Output directory: {output_dir}")
         logger.info(f"[EXPORT] Output path: {output_path}")
         
@@ -552,14 +557,21 @@ class DocumentAPI:
             logger.error(f"[EXPORT] FAILED: Could not create output directory: {e}")
             return {"status": "failed", "error": f"Failed to create output directory: {e}"}
 
-        # 3. Convert HTML to DOCX
-        logger.info(f"[EXPORT] Step 4: Converting HTML to DOCX")
+        # 3. Convert HTML to target format
+        logger.info(f"[EXPORT] Step 4: Converting HTML to {output_format.upper()}")
         try:
-            from src.converters.html_to_word import HTMLToWordConverter
-            logger.info(f"[EXPORT] HTMLToWordConverter imported successfully")
-            
-            converter = HTMLToWordConverter()
-            logger.info(f"[EXPORT] Converter created, docx_available={converter._docx_available}")
+            if output_format == "pptx":
+                from src.converters.html_to_ppt import HTMLToPPTConverter
+                converter = HTMLToPPTConverter()
+                logger.info(f"[EXPORT] HTMLToPPTConverter created, pptx_available={converter._pptx_available}")
+            elif output_format == "pdf":
+                from src.converters.html_to_pdf import HTMLToPDFConverter
+                converter = HTMLToPDFConverter()
+                logger.info(f"[EXPORT] HTMLToPDFConverter created, reportlab_available={converter._reportlab_available}")
+            else:
+                from src.converters.html_to_word import HTMLToWordConverter
+                converter = HTMLToWordConverter()
+                logger.info(f"[EXPORT] HTMLToWordConverter created, docx_available={converter._docx_available}")
             
             result = converter.convert(html=html_content, output_path=output_path)
             logger.info(f"[EXPORT] Conversion result: success={result.success}, error={result.error}, error_code={result.error_code}")
@@ -569,11 +581,11 @@ class DocumentAPI:
             return {"status": "failed", "error": f"Converter not available: {e}"}
         except Exception as e:
             logger.error(f"[EXPORT] FAILED: Unexpected error during conversion: {e}", exc_info=True)
-            return {"status": "failed", "error": f"DOCX conversion failed: {e}"}
+            return {"status": "failed", "error": f"{output_format.upper()} conversion failed: {e}"}
 
         if not result.success:
             logger.error(f"[EXPORT] FAILED: Conversion returned failure: {result.error} (code: {result.error_code})")
-            return {"status": "failed", "error": result.error or "DOCX conversion failed"}
+            return {"status": "failed", "error": result.error or f"{output_format.upper()} conversion failed"}
 
         # 4. Verify output file
         logger.info(f"[EXPORT] Step 5: Verifying output file")
@@ -586,7 +598,7 @@ class DocumentAPI:
 
         logger.info(f"[EXPORT] ========== Export SUCCESS for task_id={task_id} ==========")
         logger.info(f"[EXPORT] Download URL: /api/v1/download/{task_id}")
-        logger.info(f"[EXPORT] File name: {task_id}_report.docx")
+        logger.info(f"[EXPORT] File name: {task_id}_report.{output_format}")
         logger.info(f"[EXPORT] File size: {result.file_size}")
         
         # Post-export: trigger knowledge deposit (non-blocking)
@@ -614,8 +626,8 @@ class DocumentAPI:
         
         return {
             "status": "success",
-            "download_url": f"/api/v1/download/{task_id}",
-            "file_name": f"{task_id}_report.docx",
+            "download_url": f"/api/v1/download/{task_id}?format={output_format}",
+            "file_name": f"{task_id}_report.{output_format}",
             "file_size": result.file_size,
         }
     

@@ -31,6 +31,7 @@ from .errors import (
     BudgetExceededError,
     SimulationQualityError,
 )
+from src.core.llm_client import call_llm
 
 logger = logging.getLogger(__name__)
 
@@ -49,19 +50,17 @@ class SimulationExecutor:
 
     def __init__(
         self,
-        llm_skill=None,
         prompt_level: PromptLevel = PromptLevel.ENHANCED,
         min_fidelity: float = 0.0,
         budget_limit: float = 5.0,
         random_seed: Optional[int] = None,
     ):
-        self._llm_skill = llm_skill
         self._prompt_level = prompt_level
         self._min_fidelity = min_fidelity
         self._budget_limit = budget_limit
         self._random_seed = random_seed
 
-        self._generator = PersonaGeneratorV2(llm_skill=llm_skill, random_seed=random_seed)
+        self._generator = PersonaGeneratorV2(random_seed=random_seed)
         self._prompt_builder = SimulationPromptBuilder()
         self._cost_tracker: Optional[LLMCostTracker] = None
 
@@ -168,16 +167,8 @@ class SimulationExecutor:
     # Pre-flight check
     # ---------------------------------------------------------------- #
     def _preflight_check(self):
-        """Pre-flight validation check. Only required when LLM simulation is used."""
-        if not self._llm_skill:
-            logger.info("No LLM skill configured - simulation will use rule-based mode")
-            return
-
-        if hasattr(self._llm_skill, "is_available"):
-            if not self._llm_skill.is_available():
-                raise LLMConfigurationError(
-                    detail={"reason": "LLM service unavailable"}
-                )
+        """Pre-flight validation check."""
+        pass
 
     # ---------------------------------------------------------------- #
     # Survey simulation
@@ -307,11 +298,8 @@ class SimulationExecutor:
         context: str,
     ) -> Answer:
         """
-        Answer single question. Uses rule-based fallback when no LLM is available.
+        Answer single question. Uses rule-based fallback when LLM fails.
         """
-        if not self._llm_skill:
-            return self._answer_with_rules(persona, question)
-
         prompt = self._prompt_builder.build_prompt(
             persona=persona, question=question, history=history,
             survey_context=context, level=self._prompt_level,
@@ -350,11 +338,8 @@ class SimulationExecutor:
 
         for attempt in range(1, RetryHandler.MAX_RETRIES + 1):
             try:
-                if not self._llm_skill:
-                    raise LLMConfigurationError({"reason": "LLM not configured"})
-
                 result = await asyncio.wait_for(
-                    self._llm_skill.execute(
+                    call_llm(
                         prompt=prompt.user_prompt,
                         system_prompt=prompt.system_prompt,
                         temperature=prompt.temperature,

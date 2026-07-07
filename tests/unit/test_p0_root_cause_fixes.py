@@ -90,7 +90,7 @@ class TestR1ATaskStructureNonRouting:
         """_parse_output should fall back to section_name from chapter_spec when title is generic."""
         from src.agents.fixed_agents.report_upgrade.chapter_writer import ChapterWriter
 
-        writer = ChapterWriter(llm_skill=MagicMock(), prompt_manager=MagicMock())
+        writer = ChapterWriter(prompt_manager=MagicMock())
 
         chapter_spec = {
             "section_id": "industry_overview",
@@ -116,7 +116,7 @@ class TestR1ATaskStructureNonRouting:
         """_SKIP_TITLES should cover combined titles like '核心结论与论证分析'."""
         from src.agents.fixed_agents.report_upgrade.chapter_writer import ChapterWriter
 
-        writer = ChapterWriter(llm_skill=MagicMock(), prompt_manager=MagicMock())
+        writer = ChapterWriter(prompt_manager=MagicMock())
 
         chapter_spec = {
             "section_id": "industry_overview",

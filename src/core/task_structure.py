@@ -470,7 +470,7 @@ class TaskStructureAnalyzer:
                     section_name=aspect,
                     section_role=role,
                     role_reasoning=analysis.get("role_reasoning", ""),
-                    skill_requirements=analysis.get("skills", ["llm_skill"]),
+                    skill_requirements=analysis.get("skills", []),
                     can_parallel=analysis.get("can_parallel", True),
                     estimated_complexity=analysis.get("complexity", "medium"),
                 )
@@ -681,7 +681,7 @@ class TaskStructureAnalyzer:
 
         P0-3 fix: Enhanced inference logic, supports more research dimensions
         """
-        skills = {"llm_skill"}
+        skills = set()
 
         if role == SectionRole.DATA_COLLECTION:
             skills.add("search_skill")

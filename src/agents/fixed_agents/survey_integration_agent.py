@@ -85,12 +85,10 @@ class SurveyIntegrationAgent(FixedAgent):
         name: str = "Survey Integration Agent",
         description: str = "Coordinate complete survey workflow",
         storage_path: Optional[str] = None,
-        llm_skill: Optional[Any] = None,
         connection_manager: Optional[Any] = None,
     ):
         """Initialize Survey Integration Agent."""
         super().__init__(agent_id, name=name, description=description, storage_path=storage_path)
-        self.llm_skill = llm_skill
         self.connection_manager = connection_manager
         self._optimization_agent = None
         self._analysis_agent = None
@@ -479,8 +477,7 @@ class SurveyIntegrationAgent(FixedAgent):
         if self._optimization_agent is None:
             from src.agents.fixed_agents.survey_optimization_agent import SurveyOptimizationAgent
             self._optimization_agent = SurveyOptimizationAgent(
-                agent_id="int_opt_agent",
-                llm_skill=self.llm_skill
+                agent_id="int_opt_agent"
             )
         
         # Convert question format
@@ -529,8 +526,7 @@ class SurveyIntegrationAgent(FixedAgent):
         # Generate personas
         if self._persona_agent is None:
             self._persona_agent = PersonaGenerationAgent(
-                agent_id="int_persona_agent",
-                llm_skill=self.llm_skill
+                agent_id="int_persona_agent"
             )
         
         persona_result = await self._persona_agent.execute_async({
@@ -546,8 +542,7 @@ class SurveyIntegrationAgent(FixedAgent):
         # Simulate responses
         if self._simulation_agent is None:
             self._simulation_agent = SimulatedResponseAgent(
-                agent_id="int_sim_agent",
-                llm_skill=self.llm_skill
+                agent_id="int_sim_agent"
             )
         
         simulation_result = await self._simulation_agent.execute({
@@ -567,8 +562,7 @@ class SurveyIntegrationAgent(FixedAgent):
         if self._analysis_agent is None:
             from src.agents.fixed_agents.survey_analysis_agent import SurveyAnalysisAgent
             self._analysis_agent = SurveyAnalysisAgent(
-                agent_id="int_analysis_agent",
-                llm_skill=self.llm_skill
+                agent_id="int_analysis_agent"
             )
             # Fix breakpoint #3-4: Inject communication capabilities
             if hasattr(self, '_message_bus') and self._message_bus:
@@ -977,7 +971,6 @@ class SurveyIntegrationAgent(FixedAgent):
             if self._persona_agent is None:
                 self._persona_agent = PersonaGenerationAgent(
                     agent_id=f"{self.agent_id}_persona",
-                    llm_skill=self.llm_skill,
                 )
             
             result = await self._persona_agent.execute_async({
@@ -1001,7 +994,6 @@ class SurveyIntegrationAgent(FixedAgent):
             if self._simulation_agent is None:
                 self._simulation_agent = SimulatedResponseAgent(
                     agent_id=f"{self.agent_id}_sim",
-                    llm_skill=self.llm_skill,
                 )
             
             result = await self._simulation_agent.execute({

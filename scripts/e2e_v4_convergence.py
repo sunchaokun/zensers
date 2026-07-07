@@ -138,11 +138,11 @@ async def run():
     scraper = WebScraperSkill()
     pm = PromptManager()
 
-    writer = ChapterWriter(llm_skill=None, prompt_manager=pm)
-    reviewer = ChapterReviewAgent(llm_skill=None, prompt_manager=pm)
-    global_reviewer = GlobalReviewAgent(llm_skill=None, prompt_manager=pm)
-    data_repair = DataRepairAgent(search_skill=search, web_scraper_skill=scraper, llm_skill=None, prompt_manager=pm)
-    conflict_resolver = ConflictResolver(llm_skill=None, search_skill=search, web_scraper_skill=scraper, prompt_manager=pm)
+    writer = ChapterWriter(prompt_manager=pm)
+    reviewer = ChapterReviewAgent(prompt_manager=pm)
+    global_reviewer = GlobalReviewAgent(prompt_manager=pm)
+    data_repair = DataRepairAgent(search_skill=search, web_scraper_skill=scraper, prompt_manager=pm)
+    conflict_resolver = ConflictResolver(search_skill=search, web_scraper_skill=scraper, prompt_manager=pm)
 
     skill_registry = SkillRegistry()
     skill_registry.register_core_skills()
@@ -159,7 +159,6 @@ async def run():
     log.append(f"skill_registry: stock_data={'YES' if skill_registry.get('stock_data') else 'NO'}, knowledge_query={'YES' if skill_registry.get('knowledge_query') else 'NO'}")
 
     orch = ReportOrchestrator(
-        llm_skill=None,
         chapter_writer=writer,
         chapter_reviewer=reviewer,
         global_reviewer=global_reviewer,

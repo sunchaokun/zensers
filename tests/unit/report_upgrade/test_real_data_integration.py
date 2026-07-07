@@ -44,11 +44,6 @@ def real_cache_data():
 
 
 @pytest.fixture
-def mock_llm():
-    return AsyncMock()
-
-
-@pytest.fixture
 def mock_writer():
     return AsyncMock()
 
@@ -80,10 +75,9 @@ def mock_prompts(tmp_path):
 
 
 @pytest.fixture
-def orchestrator(mock_llm, mock_writer, mock_reviewer, mock_global_reviewer,
+def orchestrator(mock_writer, mock_reviewer, mock_global_reviewer,
                  mock_data_repair, mock_conflict_resolver, mock_prompts):
     return ReportOrchestrator(
-        llm_skill=mock_llm,
         chapter_writer=mock_writer,
         chapter_reviewer=mock_reviewer,
         global_reviewer=mock_global_reviewer,
@@ -142,7 +136,7 @@ class TestRealDataIntegration:
     @pytest.mark.asyncio
     async def test_full_pipeline_with_real_data(
         self, orchestrator, mock_writer, mock_reviewer, mock_global_reviewer,
-        mock_llm, real_cache_data,
+        real_cache_data,
     ):
         agg = MockAggregationResult(real_cache_data)
         sections = real_cache_data["sections"]
@@ -161,7 +155,6 @@ class TestRealDataIntegration:
         mock_writer.write.side_effect = written_chapters
         mock_reviewer.review.return_value = ChapterReviewOutput(passed=True, score=85.0)
         mock_global_reviewer.review.return_value = ReviewOutput(overall_score=85.0)
-        mock_llm.execute.return_value = {"success": True, "content": "执行摘要"}
 
         task_structure = {
             "topic": real_cache_data["topic"],

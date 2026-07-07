@@ -136,9 +136,6 @@ class IntelligentRoutingAdapter:
 
         # ContentLockManager created at execution time
         self._lock_manager: Optional[ContentLockManager] = None
-        
-        # Lazy initialize LLM Skill
-        self._llm_skill = None
 
         # Keyword matching fallback (uses existing IntentGate)
         self._keyword_analyzer = None
@@ -518,7 +515,7 @@ class IntelligentRoutingAdapter:
     def _generate_hypotheses_with_llm(self, core_question: str, requirement: Dict[str, Any]) -> List[str]:
         """Fallback: generate hypotheses via LLM when intent analysis didn't provide them."""
         try:
-            from src.core.llm import call_llm
+            from src.core.llm_client import call_llm
             import asyncio
             prompt = f"""基于以下问题，生成3-5个因果假设。每个假设必须可被数据验证或反驳。
 问题：{core_question}
@@ -773,48 +770,49 @@ class IntelligentRoutingAdapter:
         # Skill name aliases (e.g. "search") will NOT resolve at runtime.
         #
         # Core research skills: search_skill (multi-engine search), web_scraper (page fetch),
-        #                       llm_skill (reasoning/analysis), news_search (news-specific)
+        #                       news_search (news-specific)
+        # LLM capability is intrinsic (call_llm), not a registered skill.
         intent_to_capability = {
             IntentType.RESEARCH: {
                 "primary_capability": "research",
                 "secondary_capabilities": ["data_collection", "analysis"],
-                "recommended_skills": ["search_skill", "web_scraper", "llm_skill"],
+                "recommended_skills": ["search_skill", "web_scraper"],
                 "model_preference": "reasoning",
             },
             IntentType.IMPLEMENTATION: {
                 "primary_capability": "implementation",
                 "secondary_capabilities": ["coding", "generation"],
-                "recommended_skills": ["llm_skill", "docx_skill"],
+                "recommended_skills": ["docx_skill"],
                 "model_preference": "coding",
             },
             IntentType.INVESTIGATION: {
                 "primary_capability": "investigation",
                 "secondary_capabilities": ["debugging", "verification"],
-                "recommended_skills": ["search_skill", "llm_skill"],
+                "recommended_skills": ["search_skill"],
                 "model_preference": "reasoning",
             },
             IntentType.EVALUATION: {
                 "primary_capability": "evaluation",
                 "secondary_capabilities": ["comparison", "assessment"],
-                "recommended_skills": ["llm_skill", "search_skill"],
+                "recommended_skills": ["search_skill"],
                 "model_preference": "reasoning",
             },
             IntentType.FIX: {
                 "primary_capability": "fix",
                 "secondary_capabilities": ["debugging", "correction"],
-                "recommended_skills": ["llm_skill"],
+                "recommended_skills": [],
                 "model_preference": "coding",
             },
             IntentType.OPEN_ENDED: {
                 "primary_capability": "exploration",
                 "secondary_capabilities": ["research", "analysis"],
-                "recommended_skills": ["search_skill", "llm_skill"],
+                "recommended_skills": ["search_skill"],
                 "model_preference": "reasoning",
             },
             IntentType.CLARIFICATION: {
                 "primary_capability": "clarification",
                 "secondary_capabilities": ["questioning"],
-                "recommended_skills": ["llm_skill"],
+                "recommended_skills": [],
                 "model_preference": "chat",
             },
         }

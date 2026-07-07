@@ -20,25 +20,22 @@ async def evaluate():
     from src.agents.fixed_agents.report_upgrade.data_repair import DataRepairAgent, ConflictResolver
     from src.agents.fixed_agents.report_upgrade.prompt_manager import PromptManager
 
-    from src.skills.llm_skill import LLMSkill
     from src.skills.search_skill import MultiSearchSkill
     from src.skills.web_scraper_skill import WebScraperSkill
 
     print("=== 报告质量评估 ===\n")
 
-    llm = LLMSkill()
     search = MultiSearchSkill()
     scraper = WebScraperSkill()
 
     pm = PromptManager()
-    writer = ChapterWriter(llm_skill=llm, prompt_manager=pm)
-    reviewer = ChapterReviewAgent(llm_skill=llm, prompt_manager=pm)
-    global_reviewer = GlobalReviewAgent(llm_skill=llm, prompt_manager=pm)
-    data_repair = DataRepairAgent(search_skill=search, web_scraper_skill=scraper, llm_skill=llm, prompt_manager=pm)
-    conflict_resolver = ConflictResolver(llm_skill=llm, search_skill=search, web_scraper_skill=scraper, prompt_manager=pm)
+    writer = ChapterWriter(prompt_manager=pm)
+    reviewer = ChapterReviewAgent(prompt_manager=pm)
+    global_reviewer = GlobalReviewAgent(prompt_manager=pm)
+    data_repair = DataRepairAgent(search_skill=search, web_scraper_skill=scraper, prompt_manager=pm)
+    conflict_resolver = ConflictResolver(search_skill=search, web_scraper_skill=scraper, prompt_manager=pm)
 
     orchestrator = ReportOrchestrator(
-        llm_skill=llm,
         chapter_writer=writer,
         chapter_reviewer=reviewer,
         global_reviewer=global_reviewer,

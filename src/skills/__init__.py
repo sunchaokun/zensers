@@ -25,7 +25,6 @@ from src.skills.base import SkillRegistry as _BaseSkillRegistry, get_registry
 # Custom base Skills
 from src.skills.file_skill import FileSkill
 from src.skills.http_skill import HTTPSkill
-from src.skills.llm_skill import LLMSkill
 from src.skills.search_skill import SearchSkill, NewsSearchSkill
 from src.skills.web_scraper_skill import WebScraperSkill
 from src.skills.docx_skill import DocxSkill
@@ -65,7 +64,6 @@ __all__ = [
     # Custom base Skills
     "FileSkill",
     "HTTPSkill",
-    "LLMSkill",
     "SearchSkill",
     "NewsSearchSkill",
     "WebScraperSkill",

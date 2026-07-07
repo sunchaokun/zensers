@@ -20,6 +20,7 @@ import re
 from typing import Any, Dict, List, Optional
 from src.skills.base import Skill, SkillConfig
 from src.skills.registry import get_skill_registry
+from src.core.llm_client import call_llm
 
 logger = logging.getLogger(__name__)
 
@@ -304,16 +305,10 @@ print(json.dumps(result, ensure_ascii=False))
         data_points: List[Dict],
     ) -> str:
         """LLM interprets computed results and generates analysis content"""
-        reg = get_skill_registry()
-        llm = reg.get("llm_skill")
-        if not llm:
-            return ""
-
-        # Build computation results summary
         calc_summary = self._build_calc_summary(calc_results)
 
         prompt = self._build_prompt(topic, aspect, extracted, calc_summary)
-        result = await llm.execute(prompt=prompt, system_prompt=(
+        result = await call_llm(prompt=prompt, system_prompt=(
             "You are a senior data analyst.\n\n"
             "## Work Style\n"
             "1. The data in the 'Computed Results' section below is precisely calculated; cite it directly\n"

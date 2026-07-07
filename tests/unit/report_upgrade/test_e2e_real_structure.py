@@ -79,11 +79,6 @@ class RealAggregationResult:
 
 
 @pytest.fixture
-def mock_llm():
-    return AsyncMock()
-
-
-@pytest.fixture
 def mock_writer():
     return AsyncMock()
 
@@ -115,10 +110,9 @@ def mock_prompts(tmp_path):
 
 
 @pytest.fixture
-def orchestrator(mock_llm, mock_writer, mock_reviewer, mock_global_reviewer,
+def orchestrator(mock_writer, mock_reviewer, mock_global_reviewer,
                  mock_data_repair, mock_conflict_resolver, mock_prompts):
     return ReportOrchestrator(
-        llm_skill=mock_llm,
         chapter_writer=mock_writer,
         chapter_reviewer=mock_reviewer,
         global_reviewer=mock_global_reviewer,
@@ -197,7 +191,7 @@ class TestSourcesPreservedWithRealData:
 class TestFullPipelineWithRealStructure:
     @pytest.mark.asyncio
     async def test_e2e_with_agent_id_keys(
-        self, orchestrator, mock_writer, mock_reviewer, mock_global_reviewer, mock_llm,
+        self, orchestrator, mock_writer, mock_reviewer, mock_global_reviewer,
     ):
         agg = RealAggregationResult()
         task_structure = {
@@ -226,7 +220,6 @@ class TestFullPipelineWithRealStructure:
         mock_writer.write.side_effect = written_chapters
         mock_reviewer.review.return_value = ChapterReviewOutput(passed=True, score=85.0)
         mock_global_reviewer.review.return_value = ReviewOutput(overall_score=85.0)
-        mock_llm.execute.return_value = {"success": True, "content": "执行摘要"}
 
         result = await orchestrator.generate_report(
             task_structure=task_structure,

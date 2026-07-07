@@ -63,13 +63,10 @@ class SurveyAnalysisAgent(FixedAgent):
         name: str = "Survey Analysis Agent",
         description: str = "Analyze survey results and generate statistical reports",
         storage_path: Optional[str] = None,
-        llm_skill: Optional[Any] = None,
         chart_generator: Optional[Any] = None,
     ):
         """Initialize Survey Analysis Agent."""
         super().__init__(agent_id, name=name, description=description, storage_path=storage_path)
-        self.llm_skill = llm_skill
-        # P0-2 fix: Integrate chart generator
         self._chart_generator = chart_generator
         self._charts_output_dir: Optional[Path] = None
     

@@ -204,20 +204,7 @@ class SemanticIntentAnalyzer:
         self._temperature = temperature
         self._enable_self_consistency = enable_self_consistency
         self._self_consistency_samples = self_consistency_samples
-        self._llm_skill = None
         logger.info(f"SemanticIntentAnalyzer initialized: use_llm={use_llm}, fallback={fallback_to_keyword}")
-
-    def _get_llm_skill(self):
-        import warnings
-        warnings.warn(
-            "_get_llm_skill() is deprecated; use call_llm(routing_hint=...) instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        if self._llm_skill is None:
-            from src.skills.llm_skill import LLMSkill
-            self._llm_skill = LLMSkill()
-        return self._llm_skill
 
     def _get_keyword_analyzer(self):
         logger.warning("Keyword fallback no longer available")
@@ -462,13 +449,9 @@ class SemanticIntentAnalyzer:
     def _infer_skills_from_intent(self, intent: IntentType, hidden_requirements: List[str]) -> List[str]:
         skills = []
         if intent == IntentType.RESEARCH:
-            skills.extend(["search_skill", "llm_skill"])
+            skills.extend(["search_skill"])
         elif intent == IntentType.EVALUATION:
-            skills.extend(["llm_skill", "search_skill"])
-        elif intent == IntentType.FIX:
-            skills.extend(["llm_skill"])
-        else:
-            skills.extend(["llm_skill"])
+            skills.extend(["search_skill"])
         for req in hidden_requirements:
             req_lower = req.lower()
             if any(kw in req_lower for kw in ["收集", "数据", "搜索", "search", "data", "collect"]):
@@ -477,9 +460,6 @@ class SemanticIntentAnalyzer:
             if any(kw in req_lower for kw in ["报告", "文档", "report", "document", "docx", "生成报告"]):
                 if "docx_skill" not in skills:
                     skills.append("docx_skill")
-            if any(kw in req_lower for kw in ["分析", "评估", "analysis", "evaluate"]):
-                if "llm_skill" not in skills:
-                    skills.append("llm_skill")
         return list(dict.fromkeys(skills))
 
     def _analyze_with_keyword(self, user_request, requirement):

@@ -61,7 +61,6 @@ class SimulatedResponseAgent(FixedAgent):
         name: str = "Simulated Response Agent",
         description: str = "Make personas answer surveys, generating simulated responses",
         storage_path: Optional[str] = None,
-        llm_skill: Optional[Any] = None,
     ):
         """Initialize Simulated Response Agent.
         
@@ -70,16 +69,14 @@ class SimulatedResponseAgent(FixedAgent):
             name: Agent name
             description: Agent description
             storage_path: Storage path
-            llm_skill: LLM Skill instance (optional)
         """
         super().__init__(agent_id, name=name, description=description, storage_path=storage_path)
-        self.llm_skill = llm_skill
         self._simulation_engine: Optional[SimulationEngine] = None
     
     def _get_simulation_engine(self) -> SimulationEngine:
         """Get or create SimulationEngine instance."""
         if self._simulation_engine is None:
-            self._simulation_engine = SimulationEngine(llm_skill=self.llm_skill)
+            self._simulation_engine = SimulationEngine()
         return self._simulation_engine
     
     def validate_input(self, task_input: Dict[str, Any]) -> tuple[bool, str]:

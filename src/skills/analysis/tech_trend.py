@@ -13,6 +13,7 @@ Characteristics: purely qualitative analysis, focused on technology path judgmen
 import logging
 from typing import Any, Dict, List
 from src.skills.base import Skill
+from src.core.llm_client import call_llm
 
 logger = logging.getLogger(__name__)
 
@@ -37,14 +38,8 @@ class TechTrendSkill(Skill):
         if not topic:
             return self._failure("topic is required")
 
-        from src.skills.registry import get_skill_registry
-        reg = get_skill_registry()
-        llm = reg.get("llm_skill")
-        if not llm:
-            return self._failure("llm_skill not available")
-
         prompt = self._build_prompt(topic, aspect, data_points, sources)
-        result = await llm.execute(prompt=prompt, system_prompt=(
+        result = await call_llm(prompt=prompt, system_prompt=(
             "You are a senior technology industry analyst, specializing in technology development trends and industrialization path analysis.\n\n"
             "## Expertise\n"
             "- Technology roadmap comparative analysis\n"

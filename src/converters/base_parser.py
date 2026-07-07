@@ -370,7 +370,7 @@ class SlideElementParser(HTMLElementParser):
     
     def __init__(self):
         super().__init__()
-        self._slides: List[List[Dict]] = [[]]
+        self._raw_slides: List[List[Dict]] = [[]]
         self._current_slide_index = 0
     
     def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]):
@@ -379,9 +379,8 @@ class SlideElementParser(HTMLElementParser):
         
         # h1 acts as a slide separator
         if tag == 'h1':
-            # Start new slide
-            if self._slides[self._current_slide_index]:
-                self._slides.append([])
+            if self._raw_slides[self._current_slide_index]:
+                self._raw_slides.append([])
                 self._current_slide_index += 1
         
         super().handle_starttag(tag, attrs)
@@ -390,12 +389,251 @@ class SlideElementParser(HTMLElementParser):
         """Handle end tag."""
         super().handle_endtag(tag)
     
-    def get_slides(self) -> List[List[Dict]]:
-        """Get all parsed slides."""
-        return self._slides
+    def get_slides(self) -> List[Dict[str, Any]]:
+        """Get all parsed slides as structured slide dicts.
+        
+        Groups self.elements by section_start/section_end markers into
+        slide dicts with keys: slide_type, title, content, items, table_data, images.
+        Falls back to h1-based splitting if no section markers found.
+        """
+        return self._group_elements_into_slides()
+    
+    def _group_elements_into_slides(self) -> List[Dict[str, Any]]:
+        """Group parsed elements into slide dicts for _create_pptx_document."""
+        elements = self.elements
+        if not elements:
+            return []
+        
+        has_sections = any(e.get("type") in ("section_start", "section_end", "div_start", "div_end") for e in elements)
+        
+        if has_sections:
+            raw_slides = self._group_by_sections(elements)
+        else:
+            raw_slides = self._group_by_h1(elements)
+        
+        return self._split_dense_slides(raw_slides)
+    
+    def _group_by_sections(self, elements: List[Dict]) -> List[Dict[str, Any]]:
+        """Group elements by section_start/section_end markers."""
+        slides = []
+        current_elements: List[Dict] = []
+        current_attrs: Dict[str, str] = {}
+        
+        for elem in elements:
+            etype = elem.get("type", "")
+            
+            if etype in ("section_start", "div_start"):
+                current_elements = []
+                current_attrs = elem.get("attrs", {})
+            elif etype in ("section_end", "div_end"):
+                slide = self._build_slide_dict(current_elements, current_attrs)
+                if slide:
+                    slides.append(slide)
+                current_elements = []
+                current_attrs = {}
+            else:
+                current_elements.append(elem)
+        
+        if current_elements:
+            slide = self._build_slide_dict(current_elements, current_attrs)
+            if slide:
+                slides.append(slide)
+        
+        return slides
+    
+    def _group_by_h1(self, elements: List[Dict]) -> List[Dict[str, Any]]:
+        """Group elements by h1 headings as slide separators."""
+        slides = []
+        current_elements: List[Dict] = []
+        
+        for elem in elements:
+            if elem.get("type") == "heading" and elem.get("level") == 1:
+                if current_elements:
+                    slide = self._build_slide_dict(current_elements)
+                    if slide:
+                        slides.append(slide)
+                current_elements = [elem]
+            else:
+                current_elements.append(elem)
+        
+        if current_elements:
+            slide = self._build_slide_dict(current_elements)
+            if slide:
+                slides.append(slide)
+        
+        return slides
+    
+    def _build_slide_dict(self, elements: List[Dict], attrs: Dict[str, str] = None) -> Dict[str, Any]:
+        """Build a slide dict from a list of elements.
+        
+        Output format matches _create_pptx_document expectations:
+        slide_type, title, content, items, table_data, images.
+        """
+        attrs = attrs or {}
+        slide_type = attrs.get("data-type", "content")
+        
+        title = ""
+        content_parts: List[str] = []
+        items: List[str] = []
+        table_data: List[List[str]] = []
+        images: List[Dict[str, str]] = []
+        extra_tables: List[List[List[str]]] = []
+        
+        for elem in elements:
+            etype = elem.get("type", "")
+            
+            if etype == "heading":
+                level = elem.get("level", 2)
+                text = elem.get("text", "")
+                if level == 1 and not title:
+                    title = text
+                elif level == 2 and not title:
+                    title = text
+                else:
+                    content_parts.append(text)
+            
+            elif etype == "paragraph":
+                text = elem.get("text", "")
+                if text:
+                    content_parts.append(text)
+            
+            elif etype == "list_item":
+                text = elem.get("text", "")
+                if text:
+                    items.append(text)
+            
+            elif etype == "image":
+                src = elem.get("src", "")
+                alt = elem.get("alt", "")
+                if src:
+                    images.append({"src": src, "alt": alt})
+            
+            elif etype == "table":
+                headers = elem.get("headers", [])
+                rows = elem.get("rows", [])
+                table_rows = []
+                if headers:
+                    header_texts = []
+                    for h in headers:
+                        if isinstance(h, dict):
+                            header_texts.append(h.get("text", ""))
+                        else:
+                            header_texts.append(str(h))
+                    table_rows.append(header_texts)
+                for row in rows:
+                    row_texts = []
+                    for cell in row:
+                        if isinstance(cell, dict):
+                            row_texts.append(cell.get("text", ""))
+                        else:
+                            row_texts.append(str(cell))
+                    table_rows.append(row_texts)
+                if table_rows:
+                    if table_data:
+                        extra_tables.append(table_rows)
+                    else:
+                        table_data = table_rows
+            
+            elif etype == "text":
+                text = elem.get("content", "").strip()
+                if text:
+                    content_parts.append(text)
+        
+        slide = {
+            "slide_type": slide_type,
+            "title": title,
+        }
+        
+        if content_parts:
+            slide["content"] = "\n".join(content_parts)
+        if items:
+            slide["items"] = items
+        if table_data:
+            slide["table_data"] = table_data
+        if images:
+            slide["images"] = images
+        if extra_tables:
+            slide["extra_tables"] = extra_tables
+        
+        source = attrs.get("data-source", "")
+        if source:
+            slide["source_text"] = source
+        
+        return slide
+    
+    def _split_dense_slides(self, slides: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Split slides that are too dense into multiple per-key-point slides.
+        
+        Strategy:
+        - content/findings slides with 6+ items: split into evenly-sized chunks
+        - Each chunk gets at most 1 image (images distributed across sub-slides)
+        - data slides: keep as-is (tables should stay whole)
+        - cover/toc/end slides: keep as-is
+        """
+        MAX_ITEMS_PER_SLIDE = 5
+        
+        result = []
+        for slide in slides:
+            stype = slide.get("slide_type", "content")
+            if stype in ("cover", "toc", "end"):
+                result.append(slide)
+                continue
+            
+            items = slide.get("items", [])
+            images = slide.get("images", [])
+            content = slide.get("content", "")
+            table_data = slide.get("table_data", [])
+            
+            if stype == "data" and table_data:
+                result.append(slide)
+                continue
+            
+            if len(items) <= MAX_ITEMS_PER_SLIDE:
+                result.append(slide)
+                continue
+            
+            num_chunks = (len(items) + MAX_ITEMS_PER_SLIDE - 1) // MAX_ITEMS_PER_SLIDE
+            base_size = len(items) // num_chunks
+            remainder = len(items) % num_chunks
+            
+            img_per_chunk = max(1, len(images) // num_chunks) if images else 0
+            
+            item_offset = 0
+            for ci in range(num_chunks):
+                chunk_size = base_size + (1 if ci < remainder else 0)
+                chunk_items = items[item_offset:item_offset + chunk_size]
+                item_offset += chunk_size
+                
+                chunk_slide = {
+                    "slide_type": stype,
+                    "title": slide.get("title", ""),
+                }
+                
+                if chunk_items:
+                    chunk_slide["items"] = chunk_items
+                
+                if ci == 0 and content:
+                    chunk_slide["content"] = content
+                
+                if table_data:
+                    chunk_slide["table_data"] = table_data
+                
+                if images:
+                    img_start = ci * img_per_chunk
+                    img_end = min(img_start + img_per_chunk, len(images)) if ci < num_chunks - 1 else len(images)
+                    chunk_images = images[img_start:img_end]
+                    if chunk_images:
+                        chunk_slide["images"] = chunk_images
+                
+                if "extra_tables" in slide and ci == 0:
+                    chunk_slide["extra_tables"] = slide["extra_tables"]
+                
+                result.append(chunk_slide)
+        
+        return result
     
     def reset_parser(self):
         """Reset parser state including slides."""
         super().reset_parser()
-        self._slides = [[]]
+        self._raw_slides = [[]]
         self._current_slide_index = 0

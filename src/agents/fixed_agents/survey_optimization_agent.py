@@ -29,6 +29,7 @@ from typing import Any, Dict, List, Optional
 import asyncio
 
 from src.agents.fixed_agents.base_fixed_agent import FixedAgent
+from src.core.llm_client import call_llm
 
 
 class SurveyOptimizationAgent(FixedAgent):
@@ -86,11 +87,9 @@ class SurveyOptimizationAgent(FixedAgent):
         name: str = "Survey Optimization Agent",
         description: str = "Analyze survey question quality and provide optimization suggestions",
         storage_path: Optional[str] = None,
-        llm_skill: Optional[Any] = None,
     ):
         """Initialize Survey Optimization Agent."""
         super().__init__(agent_id, name=name, description=description, storage_path=storage_path)
-        self.llm_skill = llm_skill
     
     def validate_input(self, task_input: Dict[str, Any]) -> tuple[bool, str]:
         """Validate input parameters."""
@@ -272,7 +271,7 @@ class SurveyOptimizationAgent(FixedAgent):
             })
         
         # If LLM is available, get smarter suggestions
-        if self.llm_skill and target_audience:
+        if target_audience:
             llm_suggestions = await self._get_llm_suggestions(questions, target_audience)
             suggestions.extend(llm_suggestions)
         
@@ -311,9 +310,6 @@ class SurveyOptimizationAgent(FixedAgent):
         target_audience: str
     ) -> List[Dict]:
         """Use LLM to get suggestions."""
-        if not self.llm_skill:
-            return []
-        
         try:
             prompt = f"""
 Analyze the following survey questions and provide optimization suggestions for target audience "{target_audience}":
@@ -326,7 +322,7 @@ Please provide:
 2. Specific optimization suggestions
 """
             
-            response = await self.llm_skill.execute(
+            response = await call_llm(
                 prompt=prompt,
                 max_tokens=500,
             )

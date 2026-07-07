@@ -287,8 +287,7 @@ class ContentOrchestrator:
                     top_charts = research_result.get("charts", [])
                     if top_charts:
                         charts_data = [c for c in top_charts if c.get("section_title", "") == section_dict["title"]]
-            if charts_data and output_format == "html":
-                # HTML/Preview: convert to base64 or copy as external files
+            if charts_data and output_format in ("html", "pptx", "pdf", "docx"):
                 resolved = []
                 for c in charts_data:
                     path = c.get("path", "")
@@ -298,13 +297,29 @@ class ContentOrchestrator:
                             if not os.path.exists(path) and not os.path.isabs(path):
                                 resolved_path = str(Path(__file__).resolve().parent.parent.parent / path)
                             
-                            if output_dir:
-                                # External file mode: copy PNG to charts/ subdir, use relative path
+                            if output_format == "pptx":
+                                resolved.append({
+                                    "path": resolved_path,
+                                    "caption": c.get("caption", ""),
+                                    "insertion_anchor": c.get("insertion_anchor", ""),
+                                    "anchor_type": c.get("anchor_type", "section_end"),
+                                    "title": c.get("title", ""),
+                                    "chart_type": c.get("chart_type", "bar"),
+                                })
+                            elif output_format in ("pdf", "docx"):
+                                resolved.append({
+                                    "path": resolved_path,
+                                    "caption": c.get("caption", ""),
+                                    "insertion_anchor": c.get("insertion_anchor", ""),
+                                    "anchor_type": c.get("anchor_type", "section_end"),
+                                    "title": c.get("title", ""),
+                                    "chart_type": c.get("chart_type", "bar"),
+                                })
+                            elif output_dir:
                                 charts_dir = Path(output_dir) / "charts"
                                 charts_dir.mkdir(parents=True, exist_ok=True)
                                 dst = charts_dir / os.path.basename(resolved_path)
                                 dst_str = str(dst)
-                                # Only copy if source and destination are different files
                                 if os.path.abspath(resolved_path) != os.path.abspath(dst_str):
                                     import shutil
                                     shutil.copy2(resolved_path, dst_str)
@@ -317,7 +332,6 @@ class ContentOrchestrator:
                                     "chart_type": c.get("chart_type", "bar"),
                                 })
                             else:
-                                # Legacy base64 mode: embed image data in HTML
                                 with open(resolved_path, "rb") as f:
                                     b64 = base64.b64encode(f.read()).decode()
                                 ext = os.path.splitext(resolved_path)[1].lower()
@@ -336,15 +350,15 @@ class ContentOrchestrator:
                     else:
                         resolved.append(c)
                 
-                # HTML: anchor-based insertion into content
-                section_dict["content"] = self._insert_charts_into_html(
-                    section_dict["content"],
-                    resolved,
-                    section.content or "",
-                )
-                section_dict["charts"] = []
-            else:
-                section_dict["charts"] = charts_data  # DOCX/PPTX: pass through (template skips)
+                if output_format == "html":
+                    section_dict["content"] = self._insert_charts_into_html(
+                        section_dict["content"],
+                        resolved,
+                        section.content or "",
+                    )
+                    section_dict["charts"] = []
+                else:
+                    section_dict["charts"] = resolved
             
             # Process subsections
             if section.subsections:
@@ -1266,7 +1280,6 @@ class ContentOrchestrator:
         """Render section slides (possibly multiple pages)"""
         slides = []
         
-        # Title page
         slides.append(f'''<section class="slide" data-type="section-title" data-page="{start_slide_num}">
     <div class="slide-content">
         <div class="slide-title">
@@ -1276,19 +1289,58 @@ class ContentOrchestrator:
 </section>'''
         )
         
-        # Content pages (may split into multiple pages based on content length)
+        charts = getattr(section, 'charts', []) or []
+        chart_idx = 0
+        
         if section.content:
             content_chunks = self._split_content_for_slides(section.content)
             for i, chunk in enumerate(content_chunks):
                 slide_num = start_slide_num + 1 + i
+                chart_imgs = ""
+                while chart_idx < len(charts):
+                    chart = charts[chart_idx]
+                    anchor = chart.get("insertion_anchor", "")
+                    anchor_type = chart.get("anchor_type", "section_end")
+                    if anchor_type == "section_end" and i < len(content_chunks) - 1:
+                        break
+                    if anchor and chunk.find(anchor) < 0 and anchor_type != "section_end":
+                        break
+                    chart_path = chart.get("path", "")
+                    chart_alt = html.escape(chart.get("caption", "") or chart.get("title", "") or "Chart")
+                    if chart_path:
+                        chart_imgs += f'<img src="{html.escape(chart_path, quote=True)}" alt="{chart_alt}">'
+                    chart_idx += 1
+                    if anchor_type != "section_end":
+                        break
+                
                 slides.append(f'''<section class="slide" data-type="content" data-page="{slide_num}" data-section="{section.id}">
     <div class="slide-content">
         <div class="slide-body">
-            <p>{html.escape(chunk)}</p>
+            <p>{ContentOrchestrator._inline_markdown(chunk)}</p>
+            {chart_imgs}
         </div>
     </div>
 </section>'''
                 )
+        
+        while chart_idx < len(charts):
+            chart = charts[chart_idx]
+            chart_path = chart.get("path", "")
+            chart_alt = html.escape(chart.get("caption", "") or chart.get("title", "") or "Chart")
+            slide_num = start_slide_num + len(slides) + 1
+            if chart_path:
+                slides.append(f'''<section class="slide" data-type="data" data-page="{slide_num}" data-section="{section.id}">
+    <div class="slide-content">
+        <div class="slide-title">
+            <h2>{chart_alt}</h2>
+        </div>
+        <div class="slide-body">
+            <img src="{html.escape(chart_path, quote=True)}" alt="{chart_alt}">
+        </div>
+    </div>
+</section>'''
+                )
+            chart_idx += 1
         
         return slides
     

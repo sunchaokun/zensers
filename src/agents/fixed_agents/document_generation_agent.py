@@ -35,8 +35,8 @@ from .document_models import (
     ValidationError,
 )
 
-# Phase 8 revision components
 from src.core.adjustment import SectionLocator, ContentApplier
+from src.core.llm_client import call_llm
 
 logger = logging.getLogger(__name__)
 
@@ -112,9 +112,6 @@ class DocumentGenerationAgent(FixedAgent):
         # RG-FIX-2: cross-section deduplication fingerprint set
         self._global_seen_paragraphs: set = set()
         
-        # LLM Skill (for content revision)
-        self._llm_skill: Optional[Any] = None
-        
         # Revision manager
         self._revision_manager: Optional[Any] = None
     
@@ -135,15 +132,6 @@ class DocumentGenerationAgent(FixedAgent):
             message_bus: MessageBus instance
         """
         self._message_bus = message_bus
-    
-    def set_llm_skill(self, llm_skill: Any) -> None:
-        """
-        Set LLM Skill instance
-        
-        Args:
-            llm_skill: LLMSkill instance
-        """
-        self._llm_skill = llm_skill
     
     def set_revision_manager(self, revision_manager: Any) -> None:
         """
@@ -323,7 +311,11 @@ class DocumentGenerationAgent(FixedAgent):
                 error_code="UNSUPPORTED_ACTION"
             ).to_dict()
         
-        result = handler(request)
+        import asyncio as _asyncio
+        if _asyncio.iscoroutinefunction(handler):
+            result = await handler(request)
+        else:
+            result = handler(request)
         
         # Publish completion event
         await self.publish_event("document_generation_completed", {"success": result.get("success", False)})
@@ -1630,7 +1622,7 @@ class DocumentGenerationAgent(FixedAgent):
             warning="SKELETON_IMPLEMENTATION: Regenerate logic pending (Week 22-23)"
         ).to_dict()
     
-    def _handle_adjust_content(
+    async def _handle_adjust_content(
         self,
         request: DocumentGenerationRequest
     ) -> Dict[str, Any]:
@@ -1652,8 +1644,6 @@ class DocumentGenerationAgent(FixedAgent):
         Returns:
             Adjustment result containing new document path
         """
-        import asyncio
-        
         task_id = request.task_id or "unknown"
         
         # Extract parameters from adjustments (adjustments is List[Dict])
@@ -1700,9 +1690,8 @@ class DocumentGenerationAgent(FixedAgent):
         revised_content = None
         llm_success = False
         
-        if self._llm_skill and adjustment:
+        if adjustment:
             try:
-                # Build revision Prompt
                 revision_prompt = self._build_revision_prompt(
                     section=section_location.section_title if section_location else section,
                     original_content=original_content,
@@ -1710,13 +1699,12 @@ class DocumentGenerationAgent(FixedAgent):
                     revision_type=revision_type,
                 )
                 
-                # Call LLM
-                llm_result = asyncio.run(self._llm_skill.execute(
+                llm_result = await call_llm(
                     prompt=revision_prompt,
                     system_prompt=self._get_revision_system_prompt(),
                     max_tokens=DEFAULT_LLM_MAX_TOKENS,
                     temperature=DEFAULT_LLM_TEMPERATURE,
-                ))
+                )
                 
                 if llm_result.get("success"):
                     revised_content = llm_result.get("content", "")

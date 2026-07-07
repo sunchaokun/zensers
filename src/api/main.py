@@ -99,45 +99,72 @@ app.mount("/api/v1/html-reports", StaticFiles(directory=str(PreviewStorage.NEW_D
 # Download endpoint: serves generated documents as file downloads
 from fastapi.responses import FileResponse as _FastAPIFileResponse
 @app.get("/api/v1/download/{task_id}")
-async def download_document(task_id: str):
-    logger.info(f"[DOWNLOAD] ========== Download request for task_id={task_id} ==========")
+async def download_document(task_id: str, format: str = None):
+    logger.info(f"[DOWNLOAD] ========== Download request for task_id={task_id}, format={format} ==========")
     
-    # Look in data/reports/{task_id}/ for generated reports
     task_dir = Path("data/reports") / task_id
     logger.info(f"[DOWNLOAD] Checking primary location: {task_dir}")
     logger.info(f"[DOWNLOAD] Directory exists: {task_dir.is_dir()}")
     
+    MEDIA_TYPES = {
+        "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "pdf": "application/pdf",
+    }
+    EXTENSIONS = {"docx": "*.docx", "pptx": "*.pptx", "pdf": "*.pdf"}
+    
+    if format and format in EXTENSIONS:
+        search_ext = EXTENSIONS[format]
+        media_type = MEDIA_TYPES[format]
+    else:
+        search_ext = "*"
+        media_type = None
+    
     if task_dir.is_dir():
-        docs = sorted(task_dir.glob("*.docx"))
-        logger.info(f"[DOWNLOAD] Found {len(docs)} DOCX files in primary location")
+        if format and format in EXTENSIONS:
+            docs = sorted(task_dir.glob(EXTENSIONS[format]))
+        else:
+            all_docs = sorted(task_dir.glob("*"))
+            priority_exts = [".docx", ".pptx", ".pdf"]
+            docs = [d for d in all_docs if d.suffix in priority_exts]
+            if not docs:
+                docs = all_docs
+        
+        logger.info(f"[DOWNLOAD] Found {len(docs)} files matching '{search_ext}' in primary location")
         if docs:
             file_path = docs[-1]
             file_size = file_path.stat().st_size if file_path.exists() else 0
-            logger.info(f"[DOWNLOAD] Serving DOCX: {file_path.name}, size={file_size} bytes")
-            logger.info(f"[DOWNLOAD] ========== Download SUCCESS (DOCX from primary) ==========")
+            ext = file_path.suffix.lower().lstrip(".")
+            mt = MEDIA_TYPES.get(ext, "application/octet-stream")
+            logger.info(f"[DOWNLOAD] Serving {ext}: {file_path.name}, size={file_size} bytes")
+            logger.info(f"[DOWNLOAD] ========== Download SUCCESS ({ext} from primary) ==========")
             return _FastAPIFileResponse(
                 str(file_path),
                 filename=file_path.name,
-                media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                media_type=mt,
             )
 
-    # Fallback: look in data/{task_id}/ (legacy location for backward compatibility)
     legacy_dir = Path("data") / task_id
     logger.info(f"[DOWNLOAD] Checking legacy location: {legacy_dir}")
-    logger.info(f"[DOWNLOAD] Legacy directory exists: {legacy_dir.is_dir()}")
     
     if legacy_dir.is_dir() and legacy_dir != task_dir:
-        docs = sorted(legacy_dir.glob("*.docx"))
-        logger.info(f"[DOWNLOAD] Found {len(docs)} DOCX files in legacy location")
+        if format and format in EXTENSIONS:
+            docs = sorted(legacy_dir.glob(EXTENSIONS[format]))
+        else:
+            docs = sorted(legacy_dir.glob("*.docx"))
+        
+        logger.info(f"[DOWNLOAD] Found {len(docs)} files in legacy location")
         if docs:
             file_path = docs[-1]
             file_size = file_path.stat().st_size if file_path.exists() else 0
-            logger.info(f"[DOWNLOAD] Serving DOCX from legacy: {file_path.name}, size={file_size} bytes")
-            logger.info(f"[DOWNLOAD] ========== Download SUCCESS (DOCX from legacy) ==========")
+            ext = file_path.suffix.lower().lstrip(".")
+            mt = MEDIA_TYPES.get(ext, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+            logger.info(f"[DOWNLOAD] Serving {ext} from legacy: {file_path.name}, size={file_size} bytes")
+            logger.info(f"[DOWNLOAD] ========== Download SUCCESS ({ext} from legacy) ==========")
             return _FastAPIFileResponse(
                 str(file_path),
                 filename=file_path.name,
-                media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                media_type=mt,
             )
 
     # Fallback to HTML preview

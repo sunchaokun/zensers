@@ -16,6 +16,7 @@ Supported analysis frameworks:
 import logging
 from typing import Any, Dict, List, Optional
 from src.skills.base import Skill, SkillConfig
+from src.core.llm_client import call_llm
 
 logger = logging.getLogger(__name__)
 
@@ -48,16 +49,10 @@ class MarketAnalysisSkill(Skill):
         calc_summary = await self._precompute_metrics(data_points)
 
         # Step 2: LLM framework analysis
-        from src.skills.registry import get_skill_registry
-        reg = get_skill_registry()
-        llm = reg.get("llm_skill")
-        if not llm:
-            return self._failure("llm_skill not available")
-
         prompt = self._build_analysis_prompt(
             topic, aspect, frameworks, data_points, sources, previous_content, calc_summary
         )
-        result = await llm.execute(prompt=prompt, system_prompt=(
+        result = await call_llm(prompt=prompt, system_prompt=(
             "You are a world-class investment bank chief analyst, writing professional research reports for global investors.\n\n"
             "## Expertise\n"
             "- Deep analysis of industry structure and competitive dynamics\n"

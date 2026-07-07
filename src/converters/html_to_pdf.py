@@ -319,6 +319,35 @@ class HTMLToPDFConverter:
                         prefix = "• " if list_type == 'ul' else "1. "
                         story.append(Paragraph(prefix + text, body_style))
                 
+                elif elem_type == "image":
+                    src = element.get("src", "")
+                    if src and os.path.isfile(src):
+                        try:
+                            from reportlab.platypus import Image as RLImage
+                            from reportlab.lib.units import inch
+                            
+                            img_width = styles.get("image_width", 4.5 * inch)
+                            img_height = styles.get("image_height", 3.0 * inch)
+                            
+                            img = RLImage(src, width=img_width, height=img_height)
+                            story.append(Spacer(1, 6))
+                            story.append(img)
+                            story.append(Spacer(1, 6))
+                            
+                            alt = element.get("alt", "")
+                            if alt:
+                                caption_style = ParagraphStyle(
+                                    'ImageCaption',
+                                    parent=body_style,
+                                    fontSize=9,
+                                    textColor=colors.grey,
+                                    alignment=1,
+                                    spaceAfter=12,
+                                )
+                                story.append(Paragraph(alt, caption_style))
+                        except Exception as e:
+                            logger.warning(f"Failed to embed image in PDF: {src}, error: {e}")
+                
                 elif elem_type == "table":
                     data = element.get("data", [])
                     

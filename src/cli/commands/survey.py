@@ -133,7 +133,7 @@ async def _survey_simulate_async(survey_id: str, count: int, template: str, pers
     from src.survey.engine.persona_models import PromptLevel
 
     survey = SurveyModel(survey_id=survey_id, title=template, questions=[])
-    executor = SimulationExecutor(llm_skill=None, prompt_level=PromptLevel.ENHANCED, budget_limit=5.0)
+    executor = SimulationExecutor(prompt_level=PromptLevel.ENHANCED, budget_limit=5.0)
 
     with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), console=console) as progress:
         progress.add_task("Simulating...", total=None)

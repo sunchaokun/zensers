@@ -1,6 +1,11 @@
 """Cross-Synthesis Agent - combines desk research + survey into integrated insights."""
-import json, logging, re
+import asyncio
+import json
+import logging
+import re
 from typing import Any, Dict, Optional
+
+from src.core.llm_client import call_llm
 from src.core.prompt_manager import PromptManager
 
 logger = logging.getLogger(__name__)
@@ -9,9 +14,8 @@ logger = logging.getLogger(__name__)
 class CrossSynthesisAgent:
     """Cross-Synthesis Agent - combines desk research + survey into integrated insights."""
 
-    def __init__(self, agent_id: str, llm_skill=None):
+    def __init__(self, agent_id: str):
         self.agent_id = agent_id
-        self._llm_skill = llm_skill
         self._prompt_manager = PromptManager.get_instance()
 
     async def execute(self, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -36,15 +40,12 @@ class CrossSynthesisAgent:
             logger.warning(f"[{self.agent_id}] Prompt file not found")
             return self._fallback(topic, desk_content, survey_content, responses_count)
 
-        if not self._llm_skill:
-            return self._fallback(topic, desk_content, survey_content, responses_count)
-
         try:
-            import asyncio
             result = await asyncio.wait_for(
-                self._llm_skill.execute(
+                call_llm(
                     prompt=user_prompt, system_prompt=system_prompt,
-                    temperature=0.5, max_tokens=1500), timeout=60)
+                    temperature=0.5, max_tokens=1500),
+                timeout=60)
             if result.get("success"):
                 return self._parse_output(result["content"])
         except Exception as e:

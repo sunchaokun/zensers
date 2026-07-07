@@ -26,13 +26,12 @@ _MAX_SURVEYS = 100
 class AISimulationBackend(SurveyBackend):
     """AI Simulated Respondent Backend."""
 
-    def __init__(self, llm_skill=None, prompt_level=PromptLevel.ENHANCED,
+    def __init__(self, prompt_level=PromptLevel.ENHANCED,
                  min_fidelity=0.0, budget_limit=5.0):
-        self._llm_skill = llm_skill
         self._prompt_level = prompt_level
         self._min_fidelity = min_fidelity
         self._budget_limit = budget_limit
-        self._generator = PersonaGeneratorV2(llm_skill=llm_skill)
+        self._generator = PersonaGeneratorV2()
         self._executor = None
         self._surveys = {}
         self._personas = {}
@@ -95,7 +94,7 @@ class AISimulationBackend(SurveyBackend):
                 "persona_type", persona_type)
         logger.info(f"AI sim start: {eid}, template={template}, n={target}")
         self._executor = SimulationExecutor(
-            llm_skill=self._llm_skill, prompt_level=self._prompt_level,
+            prompt_level=self._prompt_level,
             min_fidelity=self._min_fidelity, budget_limit=self._budget_limit)
         result = await self._executor.execute(
             survey=survey, template_name=template, persona_type=persona_type,

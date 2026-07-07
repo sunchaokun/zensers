@@ -4,6 +4,7 @@ from typing import Dict, Any, List, Optional, Tuple
 from .persona_models import PersonaV2, PersonaType
 from .persona_templates import PersonaTemplateRegistry
 from .data import AGE_DISTRIBUTION, CITY_TIER_DISTRIBUTION, GENDER_DISTRIBUTION
+from src.core.llm_client import call_llm
 
 logger = logging.getLogger(__name__)
 
@@ -37,8 +38,7 @@ background_story (300 chars)."""
 
 
 class PersonaGeneratorV2:
-    def __init__(self, llm_skill=None, random_seed: Optional[int] = None):
-        self.llm_skill = llm_skill
+    def __init__(self, random_seed: Optional[int] = None):
         self._templates = PersonaTemplateRegistry()
         self._random_seed = random_seed
         if random_seed is not None:
@@ -76,8 +76,6 @@ class PersonaGeneratorV2:
         return valid, stats
 
     async def _generate_single_with_llm(self, params, persona_type, index, context):
-        if not self.llm_skill:
-            return None
         age = random.randint(*params["age_range"])
         gender = random.choices(["Male", "Female"], weights=[0.512, 0.488])[0]
         city = random.choice(params.get("cities", ["Beijing"]))
@@ -86,8 +84,8 @@ class PersonaGeneratorV2:
             prompt += f" Research context: {context}"
         try:
             result = await asyncio.wait_for(
-                self.llm_skill.execute(prompt=prompt, system_prompt=_SYSTEM_PROMPT,
-                                       temperature=0.9, max_tokens=2048), timeout=30)
+                call_llm(prompt=prompt, system_prompt=_SYSTEM_PROMPT,
+                         temperature=0.9, max_tokens=2048), timeout=30)
             if result.get("success"):
                 data = json.loads(self._clean_json(result["content"]))
                 return self._build_persona(data, params, persona_type, city, age, gender)

@@ -358,7 +358,7 @@ class PromptManager:
                         continue
         
         # Default
-        return ["llm_skill", "search_skill"]
+        return ["search_skill"]
 
 
 # Aspect Chinese to English mapping

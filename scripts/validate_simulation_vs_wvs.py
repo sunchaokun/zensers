@@ -118,8 +118,8 @@ def build_survey(country_data: Dict, question_filter: str = "all") -> "Survey":
 
 
 async def run_validation(country_code: str, country_data: Dict,
-                         sample_size: int, llm_skill=None,
-                         question_filter: str = "all"):
+                          sample_size: int,
+                          question_filter: str = "all"):
     """Run one country: simulate responses, calibrate against WVS benchmark."""
     from src.survey.models import Survey, SurveyResponse, Answer
     from src.survey.engine.persona_generator import PersonaGeneratorV2
@@ -147,7 +147,7 @@ async def run_validation(country_code: str, country_data: Dict,
         cn_templates = all_templates[:4]
 
     per_tpl = max(2, sample_size // len(cn_templates))
-    executor = SimulationExecutor(llm_skill=llm_skill, budget_limit=20.0)
+    executor = SimulationExecutor(budget_limit=20.0)
 
     all_responses = []
     all_personas = []
@@ -299,24 +299,13 @@ async def main():
         logger.error("No matching countries found in WVS data")
         sys.exit(1)
 
-    # Initialize LLM skill if not using rule-based fallback
-    llm_skill = None
     use_llm = not args.rule_based and not args.no_llm
-    if use_llm:
-        try:
-            from src.skills.llm_skill import LLMSkill
-            llm_skill = LLMSkill()
-            logger.info("LLM backend initialized: %s", llm_skill.name)
-        except Exception as e:
-            logger.warning("Failed to initialize LLM, falling back to rule-based: %s", e)
-            use_llm = False
 
     logger.info("Running validation for %d countries (mode: %s)...",
                 len(wvs_data), "LLM" if use_llm else "rule-based")
     all_reports = {}
     for cc, country_data in wvs_data.items():
         report = await run_validation(cc, country_data, args.sample_size,
-                                      llm_skill=llm_skill if use_llm else None,
                                       question_filter=args.questions)
         all_reports[cc] = report
 

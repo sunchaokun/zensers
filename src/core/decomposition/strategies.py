@@ -39,39 +39,34 @@ class ResearchPhase(Enum):
 
 # Dynamically assign Skills by research dimension, avoid all Agents carrying irrelevant skills
 ASPECT_SKILL_MAP = {
-    # DEEP_ANALYSIS phase skills: search_skill is intentionally excluded.
-    # Data collection is handled exclusively by DATA_COLLECTION phase agents (category="research").
-    # DEEP_ANALYSIS agents focus on analysis using pre-collected data.
-    "Market Size": ["llm_skill", "data_analysis", "lc_python_repl"],
-    "Market Share": ["llm_skill", "data_analysis", "lc_python_repl"],
-    "Competitive Landscape": ["llm_skill", "market_analysis"],
-    "Industry Trends": ["llm_skill", "data_analysis"],
-    "Development Trends": ["llm_skill", "data_analysis"],
-    "Financial Analysis": ["llm_skill", "stock_analysis", "data_analysis"],
-    "Valuation Analysis": ["llm_skill", "stock_analysis", "data_analysis"],
-    "Company Analysis": ["llm_skill", "stock_analysis", "market_analysis"],
-    "Policy Environment": ["llm_skill", "policy_analysis"],
-    "Technology Trends": ["llm_skill", "tech_trend"],
-    "Industry Chain": ["llm_skill", "market_analysis"],
-    "Risk Analysis": ["llm_skill", "risk_analysis"],
-    "Investment Advice": ["llm_skill", "stock_analysis", "data_analysis"],
-    "User Analysis": ["llm_skill", "data_analysis", "lc_python_repl"],
-    "Regional Distribution": ["llm_skill", "data_analysis"],
-    "Growth Analysis": ["llm_skill", "data_analysis"],
-    "Sales Analysis": ["llm_skill", "data_analysis", "lc_python_repl"],
-    "Data Comparison": ["llm_skill", "data_analysis", "lc_python_repl"],
-    "Executive Summary": ["llm_skill"],
-    "Research Conclusion": ["llm_skill"],
-    "Data Validation": ["llm_skill"],
-    "Comprehensive Analysis": ["llm_skill"],
-    "Strategic Intent": ["llm_skill", "market_analysis"],
-    "战略意图": ["llm_skill", "market_analysis"],
-    "战略意图推断": ["llm_skill", "market_analysis"],
+    "Market Size": ["data_analysis", "lc_python_repl"],
+    "Market Share": ["data_analysis", "lc_python_repl"],
+    "Competitive Landscape": ["market_analysis"],
+    "Industry Trends": ["data_analysis"],
+    "Development Trends": ["data_analysis"],
+    "Financial Analysis": ["stock_analysis", "data_analysis"],
+    "Valuation Analysis": ["stock_analysis", "data_analysis"],
+    "Company Analysis": ["stock_analysis", "market_analysis"],
+    "Policy Environment": ["policy_analysis"],
+    "Technology Trends": ["tech_trend"],
+    "Industry Chain": ["market_analysis"],
+    "Risk Analysis": ["risk_analysis"],
+    "Investment Advice": ["stock_analysis", "data_analysis"],
+    "User Analysis": ["data_analysis", "lc_python_repl"],
+    "Regional Distribution": ["data_analysis"],
+    "Growth Analysis": ["data_analysis"],
+    "Sales Analysis": ["data_analysis", "lc_python_repl"],
+    "Data Comparison": ["data_analysis", "lc_python_repl"],
+    "Executive Summary": [],
+    "Research Conclusion": [],
+    "Data Validation": [],
+    "Comprehensive Analysis": [],
+    "Strategic Intent": ["market_analysis"],
+    "战略意图": ["market_analysis"],
+    "战略意图推断": ["market_analysis"],
 }
 
-# Default skills for fallback when aspect not found in map
-# Excludes search_skill since DEEP_ANALYSIS agents should not auto-search
-DEFAULT_ASPECT_SKILLS = ["llm_skill"]
+DEFAULT_ASPECT_SKILLS = []
 
 
 def get_skills_for_aspect(aspect: str) -> List[str]:
@@ -93,7 +88,7 @@ def get_skills_for_aspect(aspect: str) -> List[str]:
         if key in aspect:
             return skills
     
-    # Default: LLM-only, no search_skill (DEEP_ANALYSIS agents use pre-collected data)
+    # Default: no search_skill (DEEP_ANALYSIS agents use pre-collected data)
     return DEFAULT_ASPECT_SKILLS.copy()
 
 
@@ -112,7 +107,6 @@ SKILL_PRIORITY_MAP = {
     "news_search": "web_search",
     "lc_tavily_search": "web_search",
     "lc_wikipedia": "web_search",
-    "llm_skill": "llm",
 }
 
 DATA_SOURCE_SKILL_MAP = {
@@ -150,9 +144,8 @@ DATA_SOURCE_SKILL_MAP = {
 def _get_data_collection_skills(aspect: str, topic: str = "", intent_result: Any = None) -> List[str]:
     db_skills: List[str] = []
     web_skills: List[str] = []
-    llm_skills: List[str] = []
 
-    base_skills = ["search_skill", "news_search", "llm_skill"]
+    base_skills = ["search_skill", "news_search"]
     aspect_skills: List[str] = []
     aspect_lower = aspect.lower()
     for keyword, extra_skills in DATA_SOURCE_SKILL_MAP.items():
@@ -174,11 +167,9 @@ def _get_data_collection_skills(aspect: str, topic: str = "", intent_result: Any
         tier = SKILL_PRIORITY_MAP.get(skill, "web_search")
         if tier == "structured_db":
             db_skills.append(skill)
-        elif tier == "llm":
-            llm_skills.append(skill)
         else:
             web_skills.append(skill)
-    return db_skills + web_skills + llm_skills
+    return db_skills + web_skills
 
 
 @dataclass
@@ -617,7 +608,7 @@ class IndustryResearchStrategy(TaskDecompositionStrategy):
                 parallel_group=0,
                 quality_threshold=0.8,
                 max_retries=2,
-                skills=["llm_skill"],
+                skills=[],
                 system_prompt=self._build_validation_prompt(topic, aspect),
                 context={"aspect": aspect, "topic": topic},
             )
@@ -705,7 +696,7 @@ class IndustryResearchStrategy(TaskDecompositionStrategy):
                 parallel_group=1,
                 quality_threshold=0.8,
                 max_retries=2,
-                skills=["llm_skill"],
+                skills=[],
                 system_prompt=self._build_synthesis_prompt(topic, aspect),
                 context={"aspect": aspect, "topic": topic, "is_dependent": True},
             )
@@ -732,7 +723,7 @@ class IndustryResearchStrategy(TaskDecompositionStrategy):
             parallel_group=2,
             quality_threshold=0.8,
             max_retries=2,
-            skills=["llm_skill", "docx_skill"],
+            skills=["docx_skill"],
             system_prompt=self._build_report_prompt(topic, requirement),
             context={"topic": topic, "aspects": aspects},
         )
@@ -1165,7 +1156,7 @@ class FixTaskStrategy(TaskDecompositionStrategy):
             parallel_group=0,
             quality_threshold=0.7,
             max_retries=3,
-            skills=["search_skill", "llm_skill"],
+            skills=["search_skill"],
             system_prompt=f"Diagnose the following problem: {topic}",
             context={"topic": topic},
         )
@@ -1184,7 +1175,7 @@ class FixTaskStrategy(TaskDecompositionStrategy):
             parallel_group=0,
             quality_threshold=0.8,
             max_retries=3,
-            skills=["llm_skill"],
+            skills=[],
             system_prompt=f"Based on diagnosis results, fix the problem: {topic}",
             context={"topic": topic},
         )
@@ -1203,7 +1194,7 @@ class FixTaskStrategy(TaskDecompositionStrategy):
             parallel_group=0,
             quality_threshold=0.9,
             max_retries=2,
-            skills=["llm_skill"],
+            skills=[],
             system_prompt=f"Validate whether the fix was successful: {topic}",
             context={"topic": topic},
         )

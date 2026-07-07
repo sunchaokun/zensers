@@ -258,25 +258,22 @@ class GenericAgent(
         
         # Skill 路由映射（动态映射，支持扩展）
         ACTION_TO_SKILL = {
-            # 内置 Skills
             "search": "search_skill",
             "news_search": "news_search",
             "file_operation": "file_skill",
             "http_request": "http_skill",
             "generate_docx": "docx_skill",
             "generate_pptx": "pptx_skill",
-            # LLM Skills（核心推理能力）
-            "llm": "llm_skill",
-            "analyze": "llm_skill",
-            "analysis": "llm_skill",
-            "reasoning": "llm_skill",
-            "summarize": "llm_skill",
-            "translate": "llm_skill",
-            "research": "llm_skill",  # 研究任务使用 LLM
-            "data_collection": "llm_skill",  # 数据收集使用 LLM 整合搜索结果
-            "calibration": "llm_skill",  # M5-b: 全报告数据校准
-            "execute": "llm_skill",  # 通用执行任务（来自ExecutionEngine._execute_batch）
-            # LangChain Skills
+            "llm": None,
+            "analyze": None,
+            "analysis": None,
+            "reasoning": None,
+            "summarize": None,
+            "translate": None,
+            "research": None,
+            "data_collection": None,
+            "calibration": None,
+            "execute": None,
             "web_search": "lc_tavily_search",
             "tavily_search": "lc_tavily_search",
             "academic_search": "lc_arxiv",
@@ -292,1017 +289,221 @@ class GenericAgent(
         
         logger.info(f"GenericAgent {self.agent_id}: action='{action}' -> skill_name='{skill_name}', available_skills={available_skills[:5]}...")
         
-        if skill_name and skill_name in available_skills and skill_registry:
+        if skill_name is not None and skill_name in available_skills and skill_registry:
             skill = skill_registry.get(skill_name)
-            # LLM是Agent内在能力，不依赖registry实例；其他skill仍需registry实例
-            if skill_name == "llm_skill" or skill:
-                _label = "LLM=intrinsic" if skill_name == "llm_skill" else "via-registry"
-                logger.info(f"GenericAgent {self.agent_id}: 执行 '{skill_name}' ({_label})")
-                # 对于 LLM skill，需要构建 prompt
-                if skill_name == "llm_skill":
-                    # 优先从 Agent context 获取 topic/aspect，再从 task 获取
-                    context = self._context or {}
-                    topic = context.get("topic") or task.get("topic", "")
-                    aspect = context.get("aspect") or task.get("aspect", "")
-                    aspects = task.get("aspects", [])
+            if skill:
+                logger.info(f"GenericAgent {self.agent_id}: executing '{skill_name}' via-registry")
+                result = await skill.execute(**parameters)
+                return self._ensure_standard_result(result, action)
+        
+        # Intrinsic LLM capability (call_llm) — no registry lookup needed
+        if skill_name is None or skill_name not in available_skills:
+            _label = "LLM=intrinsic" if skill_name is None else "no-skill-found"
+            logger.info(f"GenericAgent {self.agent_id}: executing intrinsic LLM path ({_label})")
+            # 优先从 Agent context 获取 topic/aspect，再从 task 获取
+            context = self._context or {}
+            topic = context.get("topic") or task.get("topic", "")
+            aspect = context.get("aspect") or task.get("aspect", "")
+            aspects = task.get("aspects", [])
                     
-                    # 确保 topic 是字符串（可能是 ResearchRequirement 对象）
-                    if hasattr(topic, 'topic'):
-                        topic = topic.topic
-                    if not isinstance(topic, str):
-                        topic = str(topic) if topic else ""
+            # 确保 topic 是字符串（可能是 ResearchRequirement 对象）
+            if hasattr(topic, 'topic'):
+                topic = topic.topic
+            if not isinstance(topic, str):
+                topic = str(topic) if topic else ""
                     
-                    # 确保 aspect 是字符串
-                    if not isinstance(aspect, str):
-                        aspect = str(aspect) if aspect else ""
+            # 确保 aspect 是字符串
+            if not isinstance(aspect, str):
+                aspect = str(aspect) if aspect else ""
 
-                    # 读取研究框架上下文
-                    core_question = context.get("core_question") or task.get("core_question", "")
-                    role_in_report = context.get("role_in_report") or task.get("role_in_report", "")
-                    sibling_aspects = context.get("sibling_aspects") or task.get("sibling_aspects", [])
+            # 读取研究框架上下文
+            core_question = context.get("core_question") or task.get("core_question", "")
+            role_in_report = context.get("role_in_report") or task.get("role_in_report", "")
+            sibling_aspects = context.get("sibling_aspects") or task.get("sibling_aspects", [])
                     
-                    logger.info(f"GenericAgent {self.agent_id}: topic='{topic}', aspect='{aspect}', aspects={aspects}")
+            logger.info(f"GenericAgent {self.agent_id}: topic='{topic}', aspect='{aspect}', aspects={aspects}")
                     
-                    quality_feedback = self._context.get("quality_feedback", {})
-                    if quality_feedback:
-                        logger.info(f"GenericAgent {self.agent_id}: 带质量反馈重试(第{quality_feedback.get('previous_attempt', 0)+1}次, 上次得分{quality_feedback.get('score', '?')})")
-                        self._quality_feedback = quality_feedback
-                    else:
-                        self._quality_feedback = None
+            quality_feedback = self._context.get("quality_feedback", {})
+            if quality_feedback:
+                logger.info(f"GenericAgent {self.agent_id}: 带质量反馈重试(第{quality_feedback.get('previous_attempt', 0)+1}次, 上次得分{quality_feedback.get('score', '?')})")
+                self._quality_feedback = quality_feedback
+            else:
+                self._quality_feedback = None
                     
-                    # === Knowledge enrichment (before any LLM analysis path) ===
-                    knowledge_enrichment = {}
-                    if "knowledge_query" in self._available_skills and skill_registry:
-                        kq_skill = skill_registry.get("knowledge_query")
-                        if kq_skill:
-                            try:
-                                enrichment = await kq_skill.execute(
-                                    action="enrich", topic=topic, aspect=aspect
-                                )
-                                if enrichment.get("success"):
-                                    knowledge_enrichment = enrichment.get("data", {})
-                            except Exception:
-                                logger.warning("Knowledge enrichment failed", exc_info=True)
-                    self._knowledge_enrichment = knowledge_enrichment
-                    
-                    # Initialize search results for data passing
-                    search_results = None
-                    
-                    # Phase-aware execution: check agent category from config.
-                    # Set via factory.create_agent_with_session() -> context["category"] -> config["category"].
-                    # Decomposition path categories:
-                    #   "research"       -> DATA_COLLECTION phase (search only)
-                    #   "quality-check"  -> DATA_VALIDATION phase (validate existing data)
-                    #   "market-analysis"-> DEEP_ANALYSIS phase (analyze with frameworks, no search)
-                    #   "synthesis"      -> SYNTHESIS phase (cross-section integration)
-                    # Fallback path uses "data-collection" (search + analyze, unchanged).
-                    agent_category = self.config.get("category", "")
-                    
-                    # Phase 1: DATA_COLLECTION - priority-driven execution
-                    # structured_db skills first, web_search as supplement, llm last
-                    if agent_category == "research":
-                        # [P0-5] Preloaded annual report data delivery
-                        if self._context.get("preloaded"):
-                            annual_report_data = {}
-                            if self._shared_memory and hasattr(self._shared_memory, 'get'):
-                                annual_report_data = self._shared_memory.get("annual_report_data") or {}
-                            
-                            if annual_report_data:
-                                # C11: Forensic mode — precise extraction by hypothesis data needs
-                                if self._context.get("forensic_mode") and self._context.get("hypothesis_data_needs"):
-                                    result = await self._handle_preloaded_forensic(annual_report_data, action)
-                                    if result is not None:
-                                        return result
-
-                                all_sections = annual_report_data.get("sections", [])
-
-                                # [P0-5c] Filter sections by agent's section_type if available
-                                own_section_types = set()
-                                from src.core.decomposition.section_type_map import resolve_section_types as _resolve_st
-                                section_id = self._context.get("section_id", "")
-                                if section_id:
-                                    own_section_types.update(_resolve_st(section_id))
-
-                                if own_section_types:
-                                    filtered_sections = [
-                                        s for s in all_sections
-                                        if s.get("section_type", "") in own_section_types
-                                    ]
-                                else:
-                                    filtered_sections = all_sections
-
-                                data_points = []
-                                for section in filtered_sections:
-                                    content = section.get("content", "")
-                                    if content:
-                                        data_points.append({
-                                            "title": section.get("title", ""),
-                                            "content": content[:4000],
-                                            "source": "annual_report_pdf",
-                                            "type": section.get("section_type", "document"),
-                                        })
-                                for table_type, rows in annual_report_data.get("financial_tables", {}).items():
-                                    for row in rows[:10]:
-                                        data_points.append({
-                                            "title": f"{table_type} - {row.get('科目', '')}",
-                                            "content": str(row),
-                                            "source": "annual_report_pdf_table",
-                                            "type": "structured_data",
-                                        })
-                                
-                                self._report_progress(f"Delivered {len(data_points)} preloaded data points (filtered={bool(own_section_types)}, types={own_section_types or 'all'})", "data_delivery")
-                                return self._ensure_standard_result({
-                                    "success": True,
-                                    "content": json.dumps(data_points, ensure_ascii=False),
-                                    "data_points": data_points,
-                                    "sources": [{"title": "Annual Report PDF", "url": "", "type": "document"}],
-                                    "agent_id": self.agent_id,
-                                }, action)
-                            else:
-                                return self._ensure_standard_result({
-                                    "success": False,
-                                    "error": "No annual report data available in SharedMemory",
-                                    "content": "",
-                                    "agent_id": self.agent_id,
-                                }, action)
-                        
-                        self._report_progress("Starting data collection...", "searching")
-                        data_points = []
-                        sources = []
-                        _structured_data_fetched = False
-                        _structured_data_sufficient = False
-
-                        from src.core.decomposition.strategies import SKILL_PRIORITY_MAP, DATA_SOURCE_PRIORITY
-
-                        def _skill_tier(name: str) -> str:
-                            return SKILL_PRIORITY_MAP.get(name, "web_search")
-
-                        tiered_skills = {}
-                        for s in available_skills:
-                            tiered_skills.setdefault(_skill_tier(s), []).append(s)
-                        execution_order = (
-                            tiered_skills.get("structured_db", [])
-                            + tiered_skills.get("web_search", [])
-                            + tiered_skills.get("llm", [])
+            # === Knowledge enrichment (before any LLM analysis path) ===
+            knowledge_enrichment = {}
+            if "knowledge_query" in self._available_skills and skill_registry:
+                kq_skill = skill_registry.get("knowledge_query")
+                if kq_skill:
+                    try:
+                        enrichment = await kq_skill.execute(
+                            action="enrich", topic=topic, aspect=aspect
                         )
-
-                        # Tier 1: structured_db (stock_data, wind, bloomberg, etc.)
-                        for db_skill_name in tiered_skills.get("structured_db", []):
-                            if not skill_registry:
-                                continue
-                            db_skill = skill_registry.get(db_skill_name)
-                            if not db_skill:
-                                logger.warning(f"GenericAgent {self.agent_id}: {db_skill_name} not available in registry, skipping")
-                                continue
-                            try:
-                                structured = await self._fetch_structured_data(db_skill, topic, aspect, skill_name=db_skill_name)
-                                dp_count = len(structured.get("data_points", []))
-                                if dp_count > 0:
-                                    _structured_data_fetched = True
-                                    if dp_count >= 3:
-                                        _structured_data_sufficient = True
-                                data_points.extend(structured.get("data_points", []))
-                                sources.extend(structured.get("sources", []))
-                                if self._shared_memory and hasattr(self._shared_memory, 'write_canonical'):
-                                    for metric, value in structured.get("canonical_metrics", {}).items():
-                                        await self._shared_memory.write_canonical(
-                                            metric=metric, value=value,
-                                            caliber="structured_source",
-                                            source=db_skill_name,
-                                            publisher=self.agent_id,
-                                        )
-                                logger.info(
-                                    f"GenericAgent {self.agent_id}: {db_skill_name} fetched "
-                                    f"{dp_count} data_points, sufficient={_structured_data_sufficient}"
-                                )
-                            except Exception as struct_err:
-                                logger.warning(f"GenericAgent {self.agent_id}: {db_skill_name} failed: {struct_err}")
-                        self._report_progress(f"结构化数据库查询完成，获取 {len(data_points)} 条数据", "searching")
-
-                        # Tier 2: web_search (search_skill, news_search) — supplement for structured gaps
-                        # Skip web search if annual report document_context is preloaded
-                        _has_doc_data_t2 = bool(self._context.get("document_context") or self._context.get("has_preloaded_data") or task.get("document_context"))
-                        search_results = None
-                        if topic and tiered_skills.get("web_search") and not _has_doc_data_t2:
-                            self._report_progress(f"Searching web sources for '{aspect or topic}'...", "searching")
-                            web_skills = tiered_skills.get("web_search", [])
-                            preloaded = task.get("preloaded_search_results")
-
-                            if not _structured_data_fetched and topic:
-                                fallback_queries = self._generate_structured_fallback_queries(topic, aspect or "")
-                                if fallback_queries:
-                                    logger.info(f"GenericAgent {self.agent_id}: structured_db unavailable, injecting {len(fallback_queries)} fallback queries")
-                                    if not preloaded:
-                                        preloaded = []
-                                    preloaded.extend([{"query": q, "results": []} for q in fallback_queries])
-
-                            search_depth = "basic" if _structured_data_sufficient else "deep"
-
-                            if "search_skill" in web_skills and skill_registry:
-                                search_results = await self._do_deep_research(
-                                    topic=topic, aspect=aspect, aspects=aspects, skill_registry=skill_registry,
-                                    preloaded_search_results=preloaded,
-                                    depth=search_depth,
-                                )
-                                for search in search_results.get("searches", []):
-                                    for item in search.get("results", []):
-                                        data_points.append({
-                                            "title": item.get("title", ""),
-                                            "content": item.get("body", "") or item.get("snippet", ""),
-                                            "url": item.get("href", "") or item.get("url", ""),
-                                            "quality_score": item.get("quality_score", 0),
-                                            "credibility": item.get("credibility", "unknown"),
-                                        })
-                                        sources.append({
-                                            "title": item.get("title", ""),
-                                            "url": item.get("href", "") or item.get("url", ""),
-                                            "type": "web",
-                                            "quality_score": item.get("quality_score", 0),
-                                        })
-                            self._report_progress(f"网络搜索完成，共 {len(data_points)} 条数据", "searching")
-
-                            if "news_search" in web_skills and skill_registry and topic and not _has_doc_data_t2:
-                                news_skill = skill_registry.get("news_search")
-                                if news_skill:
-                                    try:
-                                        news_query = f"{topic} {aspect} 最新 动态" if aspect else f"{topic} 最新 动态"
-                                        max_news = 5 if _structured_data_sufficient else 10
-                                        news_result = await news_skill.execute(
-                                            query=news_query, max_results=max_news, time_range="w",
-                                        )
-                                        if news_result and news_result.get("success"):
-                                            for nr in news_result.get("results", []):
-                                                news_body = nr.get("body", "") or nr.get("snippet", "")
-                                                news_url = nr.get("href", "") or nr.get("url", "")
-                                                data_points.append({
-                                                    "title": nr.get("title", ""),
-                                                    "content": news_body,
-                                                    "url": news_url,
-                                                    "quality_score": 70,
-                                                    "credibility": "news_source",
-                                                    "source_type": "news",
-                                                    "source_name": nr.get("source", ""),
-                                                    "date": nr.get("date", ""),
-                                                })
-                                                sources.append({
-                                                    "title": nr.get("title", ""),
-                                                    "url": news_url,
-                                                    "type": "news",
-                                                    "quality_score": 70,
-                                                })
-                                            logger.info(f"GenericAgent {self.agent_id}: news_search 补充 {len(news_result.get('results', []))} 条新闻")
-                                            self._report_progress(f"新闻搜索补充 {len(news_result.get('results', []))} 条", "searching")
-                                    except Exception as news_err:
-                                        logger.warning(f"GenericAgent {self.agent_id}: news_search failed: {news_err}")
-
-                            # B-FIX-3: write key metrics to SharedMemory
-                            if self._shared_memory and hasattr(self._shared_memory, 'write_canonical'):
-                                import re as _re
-                                _section_id = self.section_id
-                                for _dp in data_points[:10]:
-                                    _c = _dp.get("content", "")
-                                    _u = _dp.get("url", "")
-                                    for _p, _mn in [
-                                        (r'(?:净利润|归母|扣非)[^\d]*?(\d+\.?\d*)\s*亿元', "净利润"),
-                                        (r'(?:(?:营业)?收入|营收)[^\d]*?(\d+\.?\d*)\s*亿元', "营收"),
-                                        (r'销量[^\d]*?(\d+\.?\d*)\s*万辆', "销量"),
-                                        (r'研发[^\d]*?(\d+\.?\d*)\s*亿元', "研发投入"),
-                                        (r'毛利率[^\d]*?(\d+\.?\d*)\s*%', "毛利率"),
-                                    ]:
-                                        _m = _re.search(_p, _c)
-                                        if _m:
-                                            _metric_key = _mn if not _section_id else f"{_section_id}/{_mn}"
-                                            _conflict = await self._shared_memory.write_canonical(
-                                                metric=_metric_key,
-                                                value=float(_m.group(1)),
-                                                caliber="search_result",
-                                                source=_u,
-                                                publisher=self.agent_id,
-                                            )
-                                            if _conflict and self._message_bus:
-                                                from src.core.communication import Event
-                                                await self._message_bus.publish(
-                                                    "data.conflict.detected",
-                                                    Event(type="data.conflict.detected", data={
-                                                        "metric": _conflict.key,
-                                                        "values": _conflict.values,
-                                                        "sources": _conflict.sources,
-                                                    })
-                                                )
-                            return self._ensure_standard_result({
-                                "success": True,
-                                "data_points": data_points,
-                                "sources": sources,
-                                "total_sources": search_results.get("total_sources", 0) if search_results else len(sources),
-                                "quality_stats": search_results.get("quality_stats", {}) if search_results else {},
-                                "agent_id": self.agent_id,
-                            }, action)
-                        if data_points:
-                            return self._ensure_standard_result({
-                                "success": True,
-                                "data_points": data_points,
-                                "sources": sources,
-                                "total_sources": len(sources),
-                                "quality_stats": {},
-                                "agent_id": self.agent_id,
-                            }, action)
-                        return self._ensure_standard_result({
-                            "success": False,
-                            "error": "Data collection agent: no data source available",
-                            "agent_id": self.agent_id,
-                        }, action)
+                        if enrichment.get("success"):
+                            knowledge_enrichment = enrichment.get("data", {})
+                    except Exception:
+                        logger.warning("Knowledge enrichment failed", exc_info=True)
+            self._knowledge_enrichment = knowledge_enrichment
                     
-                    # Phase 2: DATA_VALIDATION - cross-validate collected data for quality
-                    if agent_category == "quality-check":
-                        self._report_progress("Validating collected data...", "analyzing")
-                        data_points = task.get("aggregated_data_points", [])
-                        sources = task.get("aggregated_sources", [])
-                        if data_points:
-                            validation_result = self._validate_collected_data(data_points, sources)
-                            logger.info(
-                                f"GenericAgent {self.agent_id}: validation complete - "
-                                f"{validation_result['total_validated']}/{validation_result['total_input']} points, "
-                                f"quality={validation_result['average_quality_score']}, "
-                                f"conflicts={len(validation_result['conflicts'])}"
-                            )
-                            self._report_progress(f"数据验证完成，{validation_result['total_validated']}/{validation_result['total_input']} 个数据点，质量评分 {validation_result['average_quality_score']}", "analyzing")
-                            # IMP-4: auto-resolve numerical conflicts
-                            resolved_conflicts = []
-                            if validation_result.get("has_conflicts"):
-                                resolved_conflicts = self._resolve_numerical_conflicts(
-                                    validation_result.get("conflicts", [])
-                                )
-                                if resolved_conflicts:
-                                    logger.info(
-                                        f"GenericAgent {self.agent_id}: resolved {len(resolved_conflicts)} conflicts"
-                                    )
-                            self._report_progress(f"冲突解决完成，{len(resolved_conflicts)} 个冲突已处理", "analyzing")
-                            # IMP-3: targeted re-collection on low quality (max 1 round)
-                            recollection_attempted = False
-                            if validation_result.get("quality_rating") == "low" and skill_registry:
-                                recollection_queries = self._generate_recollection_queries(
-                                    topic, aspect or "", validation_result.get("warnings", [])
-                                )
-                                if recollection_queries:
-                                    search_skill = (
-                                        skill_registry.get("web_search") or
-                                        skill_registry.get("multi_search") or
-                                        skill_registry.get("search_skill")
-                                    )
-                                    if search_skill:
-                                        try:
-                                            for rq in recollection_queries[:3]:
-                                                sr = await search_skill.execute(query=rq, max_results=5)
-                                                if sr and sr.get("success") and sr.get("results"):
-                                                    for item in sr["results"]:
-                                                        data_points.append({
-                                                            "title": item.get("title", ""),
-                                                            "content": item.get("body", "") or item.get("snippet", ""),
-                                                            "url": item.get("href", "") or item.get("url", ""),
-                                                            "quality_score": 40,
-                                                            "source_type": "recollection",
-                                                            "credibility": "recollection_search",
-                                                        })
-                                                        sources.append({
-                                                            "title": item.get("title", ""),
-                                                            "url": item.get("href", "") or item.get("url", ""),
-                                                            "type": "web",
-                                                        })
-                                            recollection_attempted = True
-                                            logger.info(
-                                                f"GenericAgent {self.agent_id}: re-collection added data, "
-                                                f"re-validating {len(data_points)} total points"
-                                            )
-                                            validation_result = self._validate_collected_data(data_points, sources)
-                                            self._report_progress(f"补充收集后重新验证，{validation_result['total_validated']} 个有效数据点", "analyzing")
-                                        except Exception as rc_err:
-                                            logger.warning(f"GenericAgent {self.agent_id}: re-collection failed: {rc_err}")
-                            validation_result["resolved_conflicts"] = resolved_conflicts
-                            validation_result["recollection_attempted"] = recollection_attempted
-                            return self._ensure_standard_result({
-                                "success": True,
-                                "data_points": validation_result.get("validated_data_points", data_points),
-                                "sources": sources,
-                                "validation": validation_result,
-                                "agent_id": self.agent_id,
-                            }, action)
+            # Initialize search results for data passing
+            search_results = None
+                    
+            # Phase-aware execution: check agent category from config.
+            # Set via factory.create_agent_with_session() -> context["category"] -> config["category"].
+            # Decomposition path categories:
+            #   "research"       -> DATA_COLLECTION phase (search only)
+            #   "quality-check"  -> DATA_VALIDATION phase (validate existing data)
+            #   "market-analysis"-> DEEP_ANALYSIS phase (analyze with frameworks, no search)
+            #   "synthesis"      -> SYNTHESIS phase (cross-section integration)
+            # Fallback path uses "data-collection" (search + analyze, unchanged).
+            agent_category = self.config.get("category", "")
+                    
+            # Phase 1: DATA_COLLECTION - priority-driven execution
+            # structured_db skills first, web_search as supplement, llm last
+            if agent_category == "research":
+                # [P0-5] Preloaded annual report data delivery
+                if self._context.get("preloaded"):
+                    annual_report_data = {}
+                    if self._shared_memory and hasattr(self._shared_memory, 'get'):
+                        annual_report_data = self._shared_memory.get("annual_report_data") or {}
+                            
+                    if annual_report_data:
+                        # C11: Forensic mode — precise extraction by hypothesis data needs
+                        if self._context.get("forensic_mode") and self._context.get("hypothesis_data_needs"):
+                            result = await self._handle_preloaded_forensic(annual_report_data, action)
+                            if result is not None:
+                                return result
+
+                        all_sections = annual_report_data.get("sections", [])
+
+                        # [P0-5c] Filter sections by agent's section_type if available
+                        own_section_types = set()
+                        from src.core.decomposition.section_type_map import resolve_section_types as _resolve_st
+                        section_id = self._context.get("section_id", "")
+                        if section_id:
+                            own_section_types.update(_resolve_st(section_id))
+
+                        if own_section_types:
+                            filtered_sections = [
+                                s for s in all_sections
+                                if s.get("section_type", "") in own_section_types
+                            ]
+                        else:
+                            filtered_sections = all_sections
+
+                        data_points = []
+                        for section in filtered_sections:
+                            content = section.get("content", "")
+                            if content:
+                                data_points.append({
+                                    "title": section.get("title", ""),
+                                    "content": content[:4000],
+                                    "source": "annual_report_pdf",
+                                    "type": section.get("section_type", "document"),
+                                })
+                        for table_type, rows in annual_report_data.get("financial_tables", {}).items():
+                            for row in rows[:10]:
+                                data_points.append({
+                                    "title": f"{table_type} - {row.get('科目', '')}",
+                                    "content": str(row),
+                                    "source": "annual_report_pdf_table",
+                                    "type": "structured_data",
+                                })
+                                
+                        self._report_progress(f"Delivered {len(data_points)} preloaded data points (filtered={bool(own_section_types)}, types={own_section_types or 'all'})", "data_delivery")
                         return self._ensure_standard_result({
                             "success": True,
-                            "data_points": [],
-                            "sources": [],
-                            "validation": {"status": "completed", "note": "no data to validate", "quality_rating": "none"},
+                            "content": json.dumps(data_points, ensure_ascii=False),
+                            "data_points": data_points,
+                            "sources": [{"title": "Annual Report PDF", "url": "", "type": "document"}],
                             "agent_id": self.agent_id,
                         }, action)
-                    
-                    # Phase 3: DEEP_ANALYSIS - use pre-collected data, apply analytical frameworks
-                    # These agents receive dependency-filtered data_points/sources from upstream phases.
-                    # No search_skill is assigned (see ASPECT_SKILL_MAP in strategies.py).
-                    if agent_category in ("market-analysis", "analysis", "financial-analysis"):
-                        self._report_progress(f"Analyzing {aspect or topic}...", "analyzing")
-                        aggregated_data_points = task.get("aggregated_data_points", [])
-                        aggregated_sources = task.get("aggregated_sources", [])
-                        # P-FIX-DEEP: search fallback when no upstream data available
-                        # Skip search if annual report document_context is preloaded
-                        _has_doc_data = bool(self._context.get("document_context") or self._context.get("has_preloaded_data") or task.get("document_context"))
-                        if not aggregated_data_points and not _has_doc_data and "search_skill" in self._available_skills and self._skill_registry:
-                            logger.info(f"GenericAgent {self.agent_id}: 无上游数据，降级执行搜索")
-                            _sr = await self._do_deep_research(
-                                topic=topic, aspect=aspect, aspects=aspects, skill_registry=self._skill_registry,
-                                preloaded_search_results=task.get("preloaded_search_results"),
-                            )
-                            if _sr and _sr.get("searches"):
-                                for _search in _sr["searches"]:
-                                    for _item in (_search.get("results") or []):
-                                        _url = _item.get("href", "") or _item.get("url", "")
-                                        aggregated_data_points.append({
-                                            "title": _item.get("title", ""),
-                                            "content": _item.get("body", "") or _item.get("snippet", ""),
-                                            "url": _url,
-                                            "quality_score": _item.get("quality_score", 0),
-                                        })
-                                        aggregated_sources.append({
-                                            "title": _item.get("title", ""),
-                                            "url": _url,
-                                            "type": "web",
-                                        })
-                                logger.info(f"GenericAgent {self.agent_id}: 降级搜索收集 {len(aggregated_data_points)} 数据点")
-                                self._report_progress(f"降级搜索完成，获取 {len(aggregated_data_points)} 条数据", "searching")
-                        canonical_data = task.get("canonical_data", {}) or {}
-                        # Filter to target currency only: zh report→CNY, en report→USD
-                        _target_cur = task.get("target_currency", "CNY")
-                        if _target_cur and canonical_data:
-                            _filtered = {}
-                            _any_with_currency = False
-                            for _k, _v in canonical_data.items():
-                                _pk = parse_entry_key(_k)
-                                _key_currency = _pk["currency"]
-                                _has_currency = _key_currency != ""
-                                if _has_currency:
-                                    _any_with_currency = True
-                                _matches_cur = _key_currency == _target_cur
-                                _has_no_currency = not _key_currency
-                                if _matches_cur or _has_no_currency:
-                                    _filtered[_k] = _v
-                            if _any_with_currency and not _filtered:
-                                canonical_data = {}
-                            elif _filtered:
-                                canonical_data = _filtered
-                        # Supplement from SharedMemory for real-time updates across batches
-                        if self._shared_memory and hasattr(self._shared_memory, 'get'):
-                            _sm_reg = self._shared_memory.get("_canonical_registry", {})
-                            if _sm_reg:
-                                for _k, _v in _sm_reg.items():
-                                    _spk = parse_entry_key(_k)
-                                    _skey_cur = _spk["currency"]
-                                    if _skey_cur == _target_cur or not _skey_cur:
-                                        canonical_data[_k] = _v
-                        # B2.3: Read cross-dimension claims from SharedMemory
-                        cross_dimension_claims = []
-                        if self._shared_memory and hasattr(self._shared_memory, 'get_all_canonical'):
-                            _all_canon = self._shared_memory.get_all_canonical()
-                            for _ck, _cv in _all_canon.items():
-                                if _ck.startswith("claim:") and _cv.get("publisher") != aspect:
-                                    _claim_val = _cv.get("value", {})
-                                    if isinstance(_claim_val, dict) and _claim_val.get("statement"):
-                                        cross_dimension_claims.append(_claim_val)
-                            _conflict_entries = {k: v for k, v in _all_canon.items() if k.startswith("conflict:claim:")}
-                        # A2.1: Generate causal hypotheses before analysis
-                        _cog_type = await self.infer_cognitive_type(aspect, topic)
-                        _cog_strategy = COGNITIVE_STRATEGY.get(_cog_type, COGNITIVE_STRATEGY["fact_driven"])
-                        self._context[f"cog_strategy:{aspect}"] = _cog_strategy
-                        causal_hypotheses = []
-                        if aggregated_data_points and len(aggregated_data_points) >= 5:
-                            try:
-                                _hyp_data = "\n".join([f"- {dp.get('title','')}: {(dp.get('content','') or '')[:200]}" for dp in aggregated_data_points[:5]])
-                                _hyp_claims = "\n".join([f"- [{c.get('source_aspect','?')}] {c.get('statement','')}" for c in (cross_dimension_claims or [])]) if cross_dimension_claims else '暂无'
-                                _l4_gen = _cog_strategy["L4"]
-                                _hcount = _l4_gen["hypothesis_count"]
-                                _hcount_str = f"{_hcount[0]}-{_hcount[1]}" if isinstance(_hcount, tuple) else str(_hcount)
-                                hypothesis_prompt = f"""基于以下数据，生成{_hcount_str}个关于「{aspect}」的{_l4_gen['hypothesis_type']}假设。
-每个假设必须：1) 可被数据验证或反驳 2) 涉及跨维度因果传导 3) 不与已知事实矛盾{'' if not _l4_gen['counter_hypothesis_required'] else ' 4) 包含反面假设'}
-
-数据摘要（前5条）：
-{_hyp_data}
-
-其他维度已有发现：
-{_hyp_claims}
-
-输出格式（每行一个假设）：
-假设：[因果陈述] | 验证数据：[需要什么数据] | 传导：[影响哪些维度] | 反面假设：[对立因果陈述]"""
-
-                                hypothesis_result = await call_llm(
-                                    prompt=hypothesis_prompt,
-                                    system_prompt="你是一位因果推断专家。只输出假设，不要分析。"
-                                )
-                                if hypothesis_result.get("success") and hypothesis_result.get("content"):
-                                    causal_hypotheses = self._parse_causal_hypotheses(hypothesis_result["content"])
-                                    self._context["causal_hypotheses"] = causal_hypotheses
-                            except Exception as _hyp_err:
-                                logger.warning(f"GenericAgent {self.agent_id}: causal hypothesis generation failed: {_hyp_err}")
-                        system_prompt = self._get_professional_role_prompt(aspect)
-                        if aggregated_data_points:
-                            prompt = self._build_analysis_prompt_with_data(
-                                topic=topic, aspect=aspect, aspects=aspects,
-                                data_points=aggregated_data_points, sources=aggregated_sources,
-                                core_question=core_question,
-                                role_in_report=role_in_report,
-                                sibling_aspects=sibling_aspects,
-                                sub_aspects=self._context.get("sub_aspects"),
-                                cross_dimension_claims=cross_dimension_claims,
-                                causal_hypotheses=causal_hypotheses,
-                                conflict_entries=_conflict_entries if self._shared_memory and hasattr(self._shared_memory, 'get_all_canonical') else {},
-                            )
-                        else:
-                            prompt = self._build_basic_research_prompt(
-                                topic, aspect, aspects,
-                                core_question=core_question,
-                                role_in_report=role_in_report,
-                                sibling_aspects=sibling_aspects,
-                            )
-                        # [P0-5] Inject annual report document context
-                        document_context = task.get("document_context", "") or self._context.get("document_context", "")
-                        document_tables = task.get("document_tables", []) or self._context.get("document_tables", [])
-                        if document_context or document_tables:
-                            doc_injection = "\n\n## 年报原始数据（来自企业年报PDF解析）\n"
-                            if document_context:
-                                truncated = self._truncate_by_tokens(document_context, max_tokens=6000, preserve_tables=bool(document_tables))
-                                doc_injection += f"\n### 年报章节原文\n{truncated}\n"
-                            if document_tables:
-                                doc_injection += "\n### 结构化财务数据\n"
-                                if isinstance(document_tables, dict):
-                                    for table_type, rows in document_tables.items():
-                                        if rows:
-                                            doc_injection += f"\n#### {table_type}\n"
-                                            for row in rows:
-                                                doc_injection += f"- {row}\n"
-                                elif isinstance(document_tables, list):
-                                    for table in document_tables[:5]:
-                                        doc_injection += f"\n{table}\n"
-                            doc_injection += "\n**重要**: 以上数据来自企业年报原文，优先使用这些数据进行分析，无需重新搜索。\n"
-                            prompt = doc_injection + prompt
-                        # S-FIX-3: inject canonical authority data into prompt
-                        if canonical_data:
-                            _canonical_section = "\n".join([
-                                f"- {k}: {v.get('value','')}{v.get('unit','')} "
-                                f"(口径: {v.get('caliber','不详')}, 来源: {v.get('source','不详')})"
-                                for k, v in canonical_data.items()
-                            ])
-                            prompt += f"\n\n## 已确认的规范数据（必须优先引用）\n{_canonical_section}\n"
-                            prompt += "\n**重要**: 以上数据已经过口径校准和权威性验证。引用时优先使用这些值，"
-                            prompt += "除非你有更新的权威数据来源。"
-                        # Final SharedMemory check before LLM call: pick up last-millisecond resolution
-                        if self._shared_memory and hasattr(self._shared_memory, 'get'):
-                            _sm_latest = self._shared_memory.get("_canonical_registry", {})
-                            if _sm_latest:
-                                _tmp = {}
-                                for k, v in _sm_latest.items():
-                                    _pk = parse_entry_key(k)
-                                    if not _pk["currency"] or _pk["currency"] == _target_cur:
-                                        _tmp[k] = v
-                                _sm_latest = _tmp
-                            if _sm_latest and _sm_latest != canonical_data:
-                                _diff = {k: v for k, v in _sm_latest.items() if k not in canonical_data or canonical_data[k] != v}
-                                if _diff:
-                                    _ds = "\n".join([f"- {k}: {v.get('value','')}{v.get('unit','')} (口径: {v.get('caliber','不详')})" for k, v in _diff.items()])
-                                    prompt += f"\n\n## 实时更新规范数据（其他agent已完成）\n{_ds}\n"
-                                    prompt += "**注意**: 这些数据来自刚刚完成的其他agent，优先级高于前面列出的规范数据。"
-                        result = await call_llm(prompt=prompt, system_prompt=system_prompt)
-
-                        # M3: canonical enforcement after LLM output
-                        if result.get("success") and result.get("content") and canonical_data:
-                            result["content"] = self._enforce_canonical_values(
-                                result["content"], canonical_data
-                            )
-
-                        # 日期验证
-                        if result.get("success") and result.get("content"):
-                            validated = self._validate_output_dates(result["content"], self.agent_id)
-                            if validated != result["content"]:
-                                logger.warning(f"GenericAgent {self.agent_id}: 分析路径日期验证修正了年份")
-                                result["content"] = validated
-
-                        # L4: Parse hypothesis verification results from analysis output
-                        if result.get("success") and result.get("content") and causal_hypotheses:
-                            try:
-                                _verified = self._parse_hypothesis_verification(result["content"], causal_hypotheses)
-                                for _vh in _verified:
-                                    await self._shared_memory.write_canonical(
-                                        metric=f"hypothesis:{aspect}:{_vh.get('id', '')}",
-                                        value=_vh,
-                                        caliber="llm_inference",
-                                        source=self.agent_id,
-                                        publisher=aspect,
-                                    )
-                            except Exception as _hyp_err:
-                                logger.warning(f"GenericAgent {self.agent_id}: hypothesis verification parse failed: {_hyp_err}")
-
-                        # B2.1: Write cross-dimension claims to SharedMemory
-                        if result.get("success") and result.get("content") and self._shared_memory:
-                            try:
-                                _claims = await self._extract_claims_from_analysis(result["content"], aspect)
-                                _caliber_map = {
-                                    "factual": "llm_inference_factual",
-                                    "inferential": "llm_inference",
-                                    "speculative": "llm_inference_speculative",
-                                }
-                                for _claim in _claims:
-                                    _caliber = _caliber_map.get(_claim.get("epistemic_level", "inferential"), "llm_inference")
-                                    # L5: Pre-write contradiction detection (agent layer)
-                                    if hasattr(self._shared_memory, 'get_all_canonical'):
-                                        _existing_claims = self._shared_memory.get_all_canonical()
-                                        for _ek, _ev in _existing_claims.items():
-                                            if _ek.startswith("claim:") and isinstance(_ev.get("value"), dict):
-                                                _contradiction = await self._detect_claim_contradiction(_ev["value"], _claim)
-                                                if _contradiction:
-                                                    logger.warning(
-                                                        f"GenericAgent {self.agent_id}: CLAIM CONTRADICTION for "
-                                                        f"'{_ek}': {_contradiction}"
-                                                    )
-                                                    from src.core.orchestrator.aggregation.result_aggregator import ConflictRecord, ConflictResolution
-                                                    await self._shared_memory.write_canonical(
-                                                        metric=f"conflict:{_ek}",
-                                                        value={"contradiction": _contradiction, "claims": [_ev["value"].get("statement",""), _claim.get("statement","")]},
-                                                        caliber="llm_inference",
-                                                        source=self.agent_id,
-                                                        publisher=aspect,
-                                                    )
-                                    await self._shared_memory.write_canonical(
-                                        metric=f"claim:{aspect}:{_claim['id']}",
-                                        value=_claim,
-                                        caliber=_caliber,
-                                        source=self.agent_id,
-                                        publisher=aspect,
-                                    )
-                            except Exception as _claim_err:
-                                logger.warning(f"GenericAgent {self.agent_id}: claim extraction failed: {_claim_err}")
-
-                        # Iterative deepening: detect knowledge gaps and supplement
-                        if result.get("success") and result.get("content") and skill_registry:
-                            gaps = self._detect_knowledge_gaps(result["content"])
-
-                            # 语义级缺口检测（仅在启发式触发后运行）
-                            if gaps:
-                                semantic_gaps = await self._detect_semantic_gaps(result["content"])
-                                gaps.extend(semantic_gaps)
-
-                            if gaps:
-                                logger.info(f"GenericAgent {self.agent_id}: detected {len(gaps)} knowledge gaps, performing supplementary search")
-                                self._report_progress(f"分析内容知识检测完成{', 发现 '+str(len(gaps))+' 个缺口' if gaps else ', 无需补充'}", "analyzing")
-                                supp_result = await self._supplementary_search_for_gaps(
-                                    topic=topic, aspect=aspect, gaps=gaps,
-                                    skill_registry=skill_registry,
-                                )
-                                if supp_result and supp_result.get("data_points"):
-                                    new_data_points = list(aggregated_data_points) + supp_result["data_points"]
-                                    new_sources = list(aggregated_sources) + supp_result["sources"]
-                                    prompt2 = self._build_analysis_prompt_with_data(
-                                        topic=topic, aspect=aspect, aspects=aspects,
-                                        data_points=new_data_points, sources=new_sources,
-                                        core_question=core_question,
-                                        role_in_report=role_in_report,
-                                        sibling_aspects=sibling_aspects,
-                                        sub_aspects=self._context.get("sub_aspects"),
-                                        cross_dimension_claims=cross_dimension_claims,
-                                        causal_hypotheses=causal_hypotheses,
-                                        conflict_entries=_conflict_entries if self._shared_memory and hasattr(self._shared_memory, 'get_all_canonical') else {},
-                                    )
-                                    revised = await call_llm(prompt=prompt2, system_prompt=system_prompt)
-
-                                    # M3: canonical enforcement on revised content
-                                    if revised.get("success") and revised.get("content") and canonical_data:
-                                        revised["content"] = self._enforce_canonical_values(
-                                            revised["content"], canonical_data
-                                        )
-
-                                    if revised.get("success") and revised.get("content"):
-                                        validated = self._validate_output_dates(revised["content"], self.agent_id)
-                                        if validated != revised["content"]:
-                                            logger.warning(f"GenericAgent {self.agent_id}: 修订路径日期验证修正了年份")
-                                            revised["content"] = validated
-                                        result = revised
-                                        aggregated_data_points = new_data_points
-                                        aggregated_sources = new_sources
-                                        logger.info(f"GenericAgent {self.agent_id}: analysis revised with supplementary data")
-                                        self._report_progress(f"补充搜索后修订完成，新增 {len(new_data_points)} 数据点", "analyzing")
-
-                        # 自评: 对生成内容进行质量评估
-                        max_self_eval = self.config.get("max_self_eval_iterations", 0)
-                        if max_self_eval > 0 and result.get("success") and result.get("content"):
-                            content_text = result.get("content", "")
-                            eval_result = await self._self_evaluate(content_text)
-                            result["self_evaluation"] = eval_result
-                            self._report_progress(f"分析内容自评完成，评分 {eval_result.get('score', 'N/A')}", "analyzing")
-
-                        if result.get("success"):
-                            result["data_points"] = aggregated_data_points
-                            result["sources"] = aggregated_sources
-                        return self._ensure_standard_result(result, action)
-                    
-                    # M5-b: CALIBRATION - cross-agent numeric consistency check
-                    if agent_category == "calibration":
-                        self._report_progress("校准跨章节数值一致性...", "analyzing")
-                        all_results = task.get("parameters", {}).get("all_results", context.get("all_results", []))
-                        canonical_data = task.get("parameters", {}).get("canonical_data", context.get("canonical_data", {}))
-                        from src.core.prompts.calibration_prompt import (
-                            CALIBRATION_SYSTEM_PROMPT,
-                            CALIBRATION_USER_PROMPT_TEMPLATE,
-                        )
-                        all_sections = []
-                        for r in all_results:
-                            agent_id = r.get("agent_id", "unknown")
-                            section_content = r.get("content", "") or r.get("result", "")
-                            status = "✓" if r.get("success") else "✗"
-                            all_sections.append(f"[{status}] Agent {agent_id}:\n{section_content}")
-                        canonical_summary = "\n".join([
-                            f"- {k}: {v.get('value','')}{v.get('unit','')}"
-                            for k, v in canonical_data.items()
-                        ]) if canonical_data else "(no canonical data provided)"
-                        prompt = CALIBRATION_USER_PROMPT_TEMPLATE.format(
-                            canonical_summary=canonical_summary,
-                            all_sections_report="\n\n".join(all_sections) if all_sections else "(no sections to calibrate)",
-                            target_currency=task.get("target_currency", "CNY"),
-                        )
-                        result = await call_llm(
-                            prompt=prompt,
-                            system_prompt=CALIBRATION_SYSTEM_PROMPT,
-                        )
-                        if result.get("success") and result.get("content"):
-                            _cal_content = result["content"]
-                            result["calibration_report"] = {"summary": _cal_content[:5000], "full_text": _cal_content}
-                            _ref = {}
-                            import re as _re
-                            _json_block = _re.search(
-                                r'```(?:json)\s*(\{.*?\})\s*```', _cal_content, _re.DOTALL
-                            )
-                            if _json_block:
-                                import json as _json
-                                try:
-                                    _parsed = _json.loads(_json_block.group(1))
-                                    if isinstance(_parsed, dict):
-                                        _ref = _parsed
-                                except _json.JSONDecodeError:
-                                    pass
-                            result["unified_data_reference"] = _ref
-                        return self._ensure_standard_result(result, action)
-                    
-                    # Check if there is aggregated content from previous phases (synthesis agent path)
-                    aggregated_data_points = task.get("aggregated_data_points", [])
-                    aggregated_sources = task.get("aggregated_sources", [])
-                    aggregated_content = task.get("aggregated_content", [])
-                    
-                    # 如果有前序数据，使用前序数据构建prompt
-                    if aggregated_data_points or aggregated_content:
-                        logger.info(f"GenericAgent {self.agent_id}: 接收到前序数据 - "
-                                   f"data_points={len(aggregated_data_points)}, "
-                                   f"sources={len(aggregated_sources)}, "
-                                   f"content={len(aggregated_content)}")
-                        
-                        # 污染修复：从 task 获取 target_aspect
-                        target_aspect = task.get("target_aspect", "")
-                        
-                        # 使用前序数据构建prompt
-                        prompt = self._build_synthesis_prompt_with_data(
-                            topic=topic,
-                            aspect=aspect,
-                            aspects=aspects,
-                            data_points=aggregated_data_points,
-                            sources=aggregated_sources,
-                            previous_content=aggregated_content,
-                            target_aspect=target_aspect,
-                            core_question=core_question,
-                            role_in_report=role_in_report,
-                            sibling_aspects=sibling_aspects,
-                        )
-                        
-                        # S-FIX-3: inject canonical authority data into synthesis prompt
-                        _canonical_data_syn = task.get("canonical_data", {}) or {}
-                        # Filter to target currency
-                        _target_cur_syn = task.get("target_currency", "CNY")
-                        if _target_cur_syn and _canonical_data_syn:
-                            _canonical_data_syn = {}
-                            for _k, _v in dict(task.get("canonical_data", {})).items():
-                                _sp = _k.split("_")
-                                _sk_cur = _sp[2] if len(_sp) >= 3 else ""
-                                if _sk_cur == _target_cur_syn or len(_sp) <= 2:
-                                    _canonical_data_syn[_k] = _v
-                        if _canonical_data_syn:
-                            _cs = "\n".join([
-                                f"- {k}: {v.get('value','')}{v.get('unit','')} "
-                                f"(口径: {v.get('caliber','不详')})"
-                                for k, v in _canonical_data_syn.items()
-                            ])
-                            prompt += f"\n\n## 全报告规范数据（跨章节一致性要求）\n{_cs}\n"
-                            prompt += "\n**重要**: 所有章节中同一指标必须使用相同的值。如有差异，以上述规范数据为准。"
-                        # Final SharedMemory check before LLM call (same pattern as analysis path)
-                        if self._shared_memory and hasattr(self._shared_memory, 'get'):
-                            _sm_latest = self._shared_memory.get("_canonical_registry", {})
-                            if _sm_latest:
-                                _tmp = {}
-                                for k, v in _sm_latest.items():
-                                    _pk = parse_entry_key(k)
-                                    if not _pk["currency"] or _pk["currency"] == _target_cur_syn:
-                                        _tmp[k] = v
-                                _sm_latest = _tmp
-                            if _sm_latest and _sm_latest != _canonical_data_syn:
-                                _diff = {k: v for k, v in _sm_latest.items() if k not in _canonical_data_syn or _canonical_data_syn[k] != v}
-                                if _diff:
-                                    _ds = "\n".join([f"- {k}: {v.get('value','')}{v.get('unit','')}" for k, v in _diff.items()])
-                                    prompt += f"\n\n## 实时更新规范数据\n{_ds}\n"
-                        
-                        # 执行LLM分析（知识富集存在时注入system_prompt）
-                        enrichment = getattr(self, '_knowledge_enrichment', {})
-                        if enrichment.get("entities") or enrichment.get("methodologies"):
-                            system_prompt = self._get_professional_role_prompt(aspect)
-                            self._report_progress(f"Generating analysis for {aspect or topic}...", "writing")
-                            result = await call_llm(prompt=prompt, system_prompt=system_prompt)
-                        else:
-                            self._report_progress(f"Generating analysis for {aspect or topic}...", "writing")
-                            result = await call_llm(prompt=prompt)
-
-                        # M3: canonical enforcement on synthesis output
-                        if result.get("success") and result.get("content") and _canonical_data_syn:
-                            result["content"] = self._enforce_canonical_values(
-                                result["content"], _canonical_data_syn
-                            )
-
-                        # 日期验证
-                        if result.get("success") and result.get("content"):
-                            validated = self._validate_output_dates(result["content"], self.agent_id)
-                            if validated != result["content"]:
-                                logger.warning(f"GenericAgent {self.agent_id}: 合成路径日期验证修正了年份")
-                                result["content"] = validated
-                        
-                        # 将前序数据传递到结果中
-                        if result.get("success"):
-                            result["data_points"] = aggregated_data_points
-                            result["sources"] = aggregated_sources
-                            result["previous_content"] = aggregated_content
-                            logger.info(f"GenericAgent {self.agent_id}: 传递前序数据到结果")
-                            
-                            # **输出过滤**：检测并清理污染内容
-                            output_content = result.get("content", "")
-                            if output_content:
-                                # 构建输入内容列表（用于污染检测）
-                                input_texts = []
-                                for pc in aggregated_content:
-                                    if pc.get("content"):
-                                        input_texts.append(pc["content"])
-                                for dp in aggregated_data_points:
-                                    if dp.get("content"):
-                                        input_texts.append(dp["content"])
-                                
-                                # 执行过滤
-                                filtered_content = self._filter_output_contamination(
-                                    output_content=output_content,
-                                    input_contents=input_texts,
-                                    similarity_threshold=0.7,
-                                    min_contamination_length=50,
-                                )
-                                
-                                # 如果过滤后内容有变化，记录日志
-                                if filtered_content != output_content:
-                                    original_len = len(output_content)
-                                    filtered_len = len(filtered_content)
-                                    logger.info(
-                                        f"GenericAgent {self.agent_id}: 输出污染过滤完成，"
-                                        f"原始长度={original_len}，过滤后长度={filtered_len}，"
-                                        f"移除={original_len - filtered_len}字符"
-                                    )
-                                    result["content"] = filtered_content
-                                    
-                                    # 提取污染来源（用于调试）
-                                    contamination_sources = self._extract_contamination_sources(
-                                        output_content=output_content,
-                                        input_contents=aggregated_content,
-                                        key_field="content",
-                                        similarity_threshold=0.6,
-                                    )
-                                    if contamination_sources:
-                                        logger.warning(
-                                            f"GenericAgent {self.agent_id}: 检测到污染来源: {contamination_sources}"
-                                        )
-                        
-                        return self._ensure_standard_result(result, action)
-                    
-                    # synthesis类型agent（执行摘要、研究结论）无前序数据时拒绝生成
-                    if aspect in aspects and (aspect.lower() in {"summary", "结论", "摘要", "执行摘要", "研究结论"}):
-                        logger.warning(f"GenericAgent {self.agent_id}: 综合分析agent无前序数据，拒绝生成虚假内容")
+                    else:
                         return self._ensure_standard_result({
                             "success": False,
-                            "error": f"无法生成{aspect}：核心研究章节未产出有效数据",
+                            "error": "No annual report data available in SharedMemory",
                             "content": "",
                             "agent_id": self.agent_id,
                         }, action)
-                    
-                    # 深度研究：先搜索再分析
-                    _has_doc_data_dp = bool(self._context.get("document_context") or self._context.get("has_preloaded_data") or task.get("document_context"))
-                    if topic and "search_skill" in available_skills and not _has_doc_data_dp:
-                        search_results = await self._do_deep_research(
-                            topic=topic,
-                            aspect=aspect,
-                            aspects=aspects,
-                            skill_registry=skill_registry,
-                        )
-                        if search_results:
-                            _n = sum(len(s.get('results', [])) for s in search_results.get('searches', []))
-                            self._report_progress(f"搜索完成，获取 {_n} 条结果", "searching")
                         
-                        # 构建包含搜索结果的 prompt
-                        if search_results:
-                            prompt = self._build_research_prompt_with_data(
-                                topic=topic,
-                                aspect=aspect,
-                                aspects=aspects,
-                                search_results=search_results,
-                            )
-                        else:
-                            # 搜索失败，回退到纯 LLM
-                            prompt = self._build_basic_research_prompt(topic, aspect, aspects)
-                    else:
-                        prompt = self._build_basic_research_prompt(topic, aspect, aspects)
-                    
-                    # 防御性检查：确保prompt不为空
-                    if not prompt or not prompt.strip():
-                        logger.error(f"GenericAgent {self.agent_id}: prompt为空，无法执行LLM任务")
-                        return {
-                            "success": False,
-                            "error": "prompt 不能为空",
-                            "agent_id": self.agent_id,
-                            "action": action,
-                            "topic": topic,
-                            "aspect": aspect,
-                        }
-                    
-                    # 根据章节类型选择专业角色
-                    system_prompt = self._get_professional_role_prompt(aspect)
-                    
-                    result = await call_llm(prompt=prompt, system_prompt=system_prompt)
-                    
-                    # 修复1: 清理LLM输出中的prompt残留文字
-                    if result.get("success") and result.get("content"):
-                        cleaned = self._clean_llm_output(result["content"])
-                        if cleaned != result["content"]:
-                            logger.info(f"GenericAgent {self.agent_id}: 清理prompt残留，减少{len(result['content'])-len(cleaned)}字符")
-                            result["content"] = cleaned
-                        
-                        # 日期验证：强制校验LLM输出中的年份引用
-                        validated = self._validate_output_dates(result["content"], self.agent_id)
-                        if validated != result["content"]:
-                            logger.warning(f"GenericAgent {self.agent_id}: 日期验证修正了输出中的年份")
-                            result["content"] = validated
-                            result["date_corrections_applied"] = True
-                        
-                        # **输出过滤**：检测并清理与搜索结果的重复内容
-                        # 只有当有搜索结果时才执行过滤
-                        if search_results:
-                            # 提取搜索结果内容作为输入参考
-                            input_texts = []
-                            for search in search_results.get("searches", []):
-                                for item in search.get("results", []):
-                                    body = item.get("body", "") or item.get("snippet", "")
-                                    if body:
-                                        input_texts.append(body)
-                            
-                            if input_texts:
-                                filtered_content = self._filter_output_contamination(
-                                    output_content=result["content"],
-                                    input_contents=input_texts,
-                                    similarity_threshold=0.7,
-                                    min_contamination_length=50,
+                self._report_progress("Starting data collection...", "searching")
+                data_points = []
+                sources = []
+                _structured_data_fetched = False
+                _structured_data_sufficient = False
+
+                from src.core.decomposition.strategies import SKILL_PRIORITY_MAP, DATA_SOURCE_PRIORITY
+
+                def _skill_tier(name: str) -> str:
+                    return SKILL_PRIORITY_MAP.get(name, "web_search")
+
+                tiered_skills = {}
+                for s in available_skills:
+                    tiered_skills.setdefault(_skill_tier(s), []).append(s)
+                execution_order = (
+                    tiered_skills.get("structured_db", [])
+                    + tiered_skills.get("web_search", [])
+                    + tiered_skills.get("llm", [])
+                )
+
+                # Tier 1: structured_db (stock_data, wind, bloomberg, etc.)
+                for db_skill_name in tiered_skills.get("structured_db", []):
+                    if not skill_registry:
+                        continue
+                    db_skill = skill_registry.get(db_skill_name)
+                    if not db_skill:
+                        logger.warning(f"GenericAgent {self.agent_id}: {db_skill_name} not available in registry, skipping")
+                        continue
+                    try:
+                        structured = await self._fetch_structured_data(db_skill, topic, aspect, skill_name=db_skill_name)
+                        dp_count = len(structured.get("data_points", []))
+                        if dp_count > 0:
+                            _structured_data_fetched = True
+                            if dp_count >= 3:
+                                _structured_data_sufficient = True
+                        data_points.extend(structured.get("data_points", []))
+                        sources.extend(structured.get("sources", []))
+                        if self._shared_memory and hasattr(self._shared_memory, 'write_canonical'):
+                            for metric, value in structured.get("canonical_metrics", {}).items():
+                                await self._shared_memory.write_canonical(
+                                    metric=metric, value=value,
+                                    caliber="structured_source",
+                                    source=db_skill_name,
+                                    publisher=self.agent_id,
                                 )
-                                
-                                if filtered_content != result["content"]:
-                                    original_len = len(result["content"])
-                                    filtered_len = len(filtered_content)
-                                    logger.info(
-                                        f"GenericAgent {self.agent_id}: 输出污染过滤完成，"
-                                        f"原始长度={original_len}，过滤后长度={filtered_len}，"
-                                        f"移除={original_len - filtered_len}字符"
-                                    )
-                                    result["content"] = filtered_content
-                    
-                    # 调试日志：记录 LLM 返回结果
-                    logger.info(f"GenericAgent {self.agent_id}: LLM 返回成功={result.get('success')}")
-                    if result.get("success"):
-                        content_len = len(result.get("content", ""))
-                        logger.info(f"GenericAgent {self.agent_id}: 内容长度={content_len} 字符")
-                        
-                        # P0-3修复：生成数据图表（ChartPlannerAgent）
-                        charts = await self._generate_charts_from_content(
-                            content=result.get("content", ""),
-                            topic=topic,
-                            aspect=aspect,
+                        logger.info(
+                            f"GenericAgent {self.agent_id}: {db_skill_name} fetched "
+                            f"{dp_count} data_points, sufficient={_structured_data_sufficient}"
                         )
-                        if charts:
-                            result["charts"] = charts
-                            logger.info(f"GenericAgent {self.agent_id}: 生成了 {len(charts)} 张图表")
-                    
-                    # **关键修复**：将搜索数据添加到返回结果中
-                    # 这是数据传递链路断裂的根本原因！
-                    if search_results:
-                        # 提取data_points（搜索结果列表）
-                        data_points = []
-                        sources = []
+                    except Exception as struct_err:
+                        logger.warning(f"GenericAgent {self.agent_id}: {db_skill_name} failed: {struct_err}")
+                self._report_progress(f"结构化数据库查询完成，获取 {len(data_points)} 条数据", "searching")
+
+                # Tier 2: web_search (search_skill, news_search) — supplement for structured gaps
+                # Skip web search if annual report document_context is preloaded
+                _has_doc_data_t2 = bool(self._context.get("document_context") or self._context.get("has_preloaded_data") or task.get("document_context"))
+                search_results = None
+                if topic and tiered_skills.get("web_search") and not _has_doc_data_t2:
+                    self._report_progress(f"Searching web sources for '{aspect or topic}'...", "searching")
+                    web_skills = tiered_skills.get("web_search", [])
+                    preloaded = task.get("preloaded_search_results")
+
+                    if not _structured_data_fetched and topic:
+                        fallback_queries = self._generate_structured_fallback_queries(topic, aspect or "")
+                        if fallback_queries:
+                            logger.info(f"GenericAgent {self.agent_id}: structured_db unavailable, injecting {len(fallback_queries)} fallback queries")
+                            if not preloaded:
+                                preloaded = []
+                            preloaded.extend([{"query": q, "results": []} for q in fallback_queries])
+
+                    search_depth = "basic" if _structured_data_sufficient else "deep"
+
+                    if "search_skill" in web_skills and skill_registry:
+                        search_results = await self._do_deep_research(
+                            topic=topic, aspect=aspect, aspects=aspects, skill_registry=skill_registry,
+                            preloaded_search_results=preloaded,
+                            depth=search_depth,
+                        )
                         for search in search_results.get("searches", []):
                             for item in search.get("results", []):
                                 data_points.append({
@@ -1318,21 +519,816 @@ class GenericAgent(
                                     "type": "web",
                                     "quality_score": item.get("quality_score", 0),
                                 })
-                        
-                        result["data_points"] = data_points
-                        result["sources"] = sources
-                        result["total_sources"] = search_results.get("total_sources", 0)
-                        result["quality_stats"] = search_results.get("quality_stats", {})
-                        
-                        logger.info(f"GenericAgent {self.agent_id}: 添加搜索数据到结果 - "
-                                   f"data_points={len(data_points)}, sources={len(sources)}")
+                    self._report_progress(f"网络搜索完成，共 {len(data_points)} 条数据", "searching")
+
+                    if "news_search" in web_skills and skill_registry and topic and not _has_doc_data_t2:
+                        news_skill = skill_registry.get("news_search")
+                        if news_skill:
+                            try:
+                                news_query = f"{topic} {aspect} 最新 动态" if aspect else f"{topic} 最新 动态"
+                                max_news = 5 if _structured_data_sufficient else 10
+                                news_result = await news_skill.execute(
+                                    query=news_query, max_results=max_news, time_range="w",
+                                )
+                                if news_result and news_result.get("success"):
+                                    for nr in news_result.get("results", []):
+                                        news_body = nr.get("body", "") or nr.get("snippet", "")
+                                        news_url = nr.get("href", "") or nr.get("url", "")
+                                        data_points.append({
+                                            "title": nr.get("title", ""),
+                                            "content": news_body,
+                                            "url": news_url,
+                                            "quality_score": 70,
+                                            "credibility": "news_source",
+                                            "source_type": "news",
+                                            "source_name": nr.get("source", ""),
+                                            "date": nr.get("date", ""),
+                                        })
+                                        sources.append({
+                                            "title": nr.get("title", ""),
+                                            "url": news_url,
+                                            "type": "news",
+                                            "quality_score": 70,
+                                        })
+                                    logger.info(f"GenericAgent {self.agent_id}: news_search 补充 {len(news_result.get('results', []))} 条新闻")
+                                    self._report_progress(f"新闻搜索补充 {len(news_result.get('results', []))} 条", "searching")
+                            except Exception as news_err:
+                                logger.warning(f"GenericAgent {self.agent_id}: news_search failed: {news_err}")
+
+                    # B-FIX-3: write key metrics to SharedMemory
+                    if self._shared_memory and hasattr(self._shared_memory, 'write_canonical'):
+                        import re as _re
+                        _section_id = self.section_id
+                        for _dp in data_points[:10]:
+                            _c = _dp.get("content", "")
+                            _u = _dp.get("url", "")
+                            for _p, _mn in [
+                                (r'(?:净利润|归母|扣非)[^\d]*?(\d+\.?\d*)\s*亿元', "净利润"),
+                                (r'(?:(?:营业)?收入|营收)[^\d]*?(\d+\.?\d*)\s*亿元', "营收"),
+                                (r'销量[^\d]*?(\d+\.?\d*)\s*万辆', "销量"),
+                                (r'研发[^\d]*?(\d+\.?\d*)\s*亿元', "研发投入"),
+                                (r'毛利率[^\d]*?(\d+\.?\d*)\s*%', "毛利率"),
+                            ]:
+                                _m = _re.search(_p, _c)
+                                if _m:
+                                    _metric_key = _mn if not _section_id else f"{_section_id}/{_mn}"
+                                    _conflict = await self._shared_memory.write_canonical(
+                                        metric=_metric_key,
+                                        value=float(_m.group(1)),
+                                        caliber="search_result",
+                                        source=_u,
+                                        publisher=self.agent_id,
+                                    )
+                                    if _conflict and self._message_bus:
+                                        from src.core.communication import Event
+                                        await self._message_bus.publish(
+                                            "data.conflict.detected",
+                                            Event(type="data.conflict.detected", data={
+                                                "metric": _conflict.key,
+                                                "values": _conflict.values,
+                                                "sources": _conflict.sources,
+                                            })
+                                        )
+                    return self._ensure_standard_result({
+                        "success": True,
+                        "data_points": data_points,
+                        "sources": sources,
+                        "total_sources": search_results.get("total_sources", 0) if search_results else len(sources),
+                        "quality_stats": search_results.get("quality_stats", {}) if search_results else {},
+                        "agent_id": self.agent_id,
+                    }, action)
+                if data_points:
+                    return self._ensure_standard_result({
+                        "success": True,
+                        "data_points": data_points,
+                        "sources": sources,
+                        "total_sources": len(sources),
+                        "quality_stats": {},
+                        "agent_id": self.agent_id,
+                    }, action)
+                return self._ensure_standard_result({
+                    "success": False,
+                    "error": "Data collection agent: no data source available",
+                    "agent_id": self.agent_id,
+                }, action)
                     
-                    # 确保返回标准格式
-                    return self._ensure_standard_result(result, action)
+            # Phase 2: DATA_VALIDATION - cross-validate collected data for quality
+            if agent_category == "quality-check":
+                self._report_progress("Validating collected data...", "analyzing")
+                data_points = task.get("aggregated_data_points", [])
+                sources = task.get("aggregated_sources", [])
+                if data_points:
+                    validation_result = self._validate_collected_data(data_points, sources)
+                    logger.info(
+                        f"GenericAgent {self.agent_id}: validation complete - "
+                        f"{validation_result['total_validated']}/{validation_result['total_input']} points, "
+                        f"quality={validation_result['average_quality_score']}, "
+                        f"conflicts={len(validation_result['conflicts'])}"
+                    )
+                    self._report_progress(f"数据验证完成，{validation_result['total_validated']}/{validation_result['total_input']} 个数据点，质量评分 {validation_result['average_quality_score']}", "analyzing")
+                    # IMP-4: auto-resolve numerical conflicts
+                    resolved_conflicts = []
+                    if validation_result.get("has_conflicts"):
+                        resolved_conflicts = self._resolve_numerical_conflicts(
+                            validation_result.get("conflicts", [])
+                        )
+                        if resolved_conflicts:
+                            logger.info(
+                                f"GenericAgent {self.agent_id}: resolved {len(resolved_conflicts)} conflicts"
+                            )
+                    self._report_progress(f"冲突解决完成，{len(resolved_conflicts)} 个冲突已处理", "analyzing")
+                    # IMP-3: targeted re-collection on low quality (max 1 round)
+                    recollection_attempted = False
+                    if validation_result.get("quality_rating") == "low" and skill_registry:
+                        recollection_queries = self._generate_recollection_queries(
+                            topic, aspect or "", validation_result.get("warnings", [])
+                        )
+                        if recollection_queries:
+                            search_skill = (
+                                skill_registry.get("web_search") or
+                                skill_registry.get("multi_search") or
+                                skill_registry.get("search_skill")
+                            )
+                            if search_skill:
+                                try:
+                                    for rq in recollection_queries[:3]:
+                                        sr = await search_skill.execute(query=rq, max_results=5)
+                                        if sr and sr.get("success") and sr.get("results"):
+                                            for item in sr["results"]:
+                                                data_points.append({
+                                                    "title": item.get("title", ""),
+                                                    "content": item.get("body", "") or item.get("snippet", ""),
+                                                    "url": item.get("href", "") or item.get("url", ""),
+                                                    "quality_score": 40,
+                                                    "source_type": "recollection",
+                                                    "credibility": "recollection_search",
+                                                })
+                                                sources.append({
+                                                    "title": item.get("title", ""),
+                                                    "url": item.get("href", "") or item.get("url", ""),
+                                                    "type": "web",
+                                                })
+                                    recollection_attempted = True
+                                    logger.info(
+                                        f"GenericAgent {self.agent_id}: re-collection added data, "
+                                        f"re-validating {len(data_points)} total points"
+                                    )
+                                    validation_result = self._validate_collected_data(data_points, sources)
+                                    self._report_progress(f"补充收集后重新验证，{validation_result['total_validated']} 个有效数据点", "analyzing")
+                                except Exception as rc_err:
+                                    logger.warning(f"GenericAgent {self.agent_id}: re-collection failed: {rc_err}")
+                    validation_result["resolved_conflicts"] = resolved_conflicts
+                    validation_result["recollection_attempted"] = recollection_attempted
+                    return self._ensure_standard_result({
+                        "success": True,
+                        "data_points": validation_result.get("validated_data_points", data_points),
+                        "sources": sources,
+                        "validation": validation_result,
+                        "agent_id": self.agent_id,
+                    }, action)
+                return self._ensure_standard_result({
+                    "success": True,
+                    "data_points": [],
+                    "sources": [],
+                    "validation": {"status": "completed", "note": "no data to validate", "quality_rating": "none"},
+                    "agent_id": self.agent_id,
+                }, action)
+                    
+            # Phase 3: DEEP_ANALYSIS - use pre-collected data, apply analytical frameworks
+            # These agents receive dependency-filtered data_points/sources from upstream phases.
+            # No search_skill is assigned (see ASPECT_SKILL_MAP in strategies.py).
+            if agent_category in ("market-analysis", "analysis", "financial-analysis"):
+                self._report_progress(f"Analyzing {aspect or topic}...", "analyzing")
+                aggregated_data_points = task.get("aggregated_data_points", [])
+                aggregated_sources = task.get("aggregated_sources", [])
+                # P-FIX-DEEP: search fallback when no upstream data available
+                # Skip search if annual report document_context is preloaded
+                _has_doc_data = bool(self._context.get("document_context") or self._context.get("has_preloaded_data") or task.get("document_context"))
+                if not aggregated_data_points and not _has_doc_data and "search_skill" in self._available_skills and self._skill_registry:
+                    logger.info(f"GenericAgent {self.agent_id}: 无上游数据，降级执行搜索")
+                    _sr = await self._do_deep_research(
+                        topic=topic, aspect=aspect, aspects=aspects, skill_registry=self._skill_registry,
+                        preloaded_search_results=task.get("preloaded_search_results"),
+                    )
+                    if _sr and _sr.get("searches"):
+                        for _search in _sr["searches"]:
+                            for _item in (_search.get("results") or []):
+                                _url = _item.get("href", "") or _item.get("url", "")
+                                aggregated_data_points.append({
+                                    "title": _item.get("title", ""),
+                                    "content": _item.get("body", "") or _item.get("snippet", ""),
+                                    "url": _url,
+                                    "quality_score": _item.get("quality_score", 0),
+                                })
+                                aggregated_sources.append({
+                                    "title": _item.get("title", ""),
+                                    "url": _url,
+                                    "type": "web",
+                                })
+                        logger.info(f"GenericAgent {self.agent_id}: 降级搜索收集 {len(aggregated_data_points)} 数据点")
+                        self._report_progress(f"降级搜索完成，获取 {len(aggregated_data_points)} 条数据", "searching")
+                canonical_data = task.get("canonical_data", {}) or {}
+                # Filter to target currency only: zh report→CNY, en report→USD
+                _target_cur = task.get("target_currency", "CNY")
+                if _target_cur and canonical_data:
+                    _filtered = {}
+                    _any_with_currency = False
+                    for _k, _v in canonical_data.items():
+                        _pk = parse_entry_key(_k)
+                        _key_currency = _pk["currency"]
+                        _has_currency = _key_currency != ""
+                        if _has_currency:
+                            _any_with_currency = True
+                        _matches_cur = _key_currency == _target_cur
+                        _has_no_currency = not _key_currency
+                        if _matches_cur or _has_no_currency:
+                            _filtered[_k] = _v
+                    if _any_with_currency and not _filtered:
+                        canonical_data = {}
+                    elif _filtered:
+                        canonical_data = _filtered
+                # Supplement from SharedMemory for real-time updates across batches
+                if self._shared_memory and hasattr(self._shared_memory, 'get'):
+                    _sm_reg = self._shared_memory.get("_canonical_registry", {})
+                    if _sm_reg:
+                        for _k, _v in _sm_reg.items():
+                            _spk = parse_entry_key(_k)
+                            _skey_cur = _spk["currency"]
+                            if _skey_cur == _target_cur or not _skey_cur:
+                                canonical_data[_k] = _v
+                # B2.3: Read cross-dimension claims from SharedMemory
+                cross_dimension_claims = []
+                if self._shared_memory and hasattr(self._shared_memory, 'get_all_canonical'):
+                    _all_canon = self._shared_memory.get_all_canonical()
+                    for _ck, _cv in _all_canon.items():
+                        if _ck.startswith("claim:") and _cv.get("publisher") != aspect:
+                            _claim_val = _cv.get("value", {})
+                            if isinstance(_claim_val, dict) and _claim_val.get("statement"):
+                                cross_dimension_claims.append(_claim_val)
+                    _conflict_entries = {k: v for k, v in _all_canon.items() if k.startswith("conflict:claim:")}
+                # A2.1: Generate causal hypotheses before analysis
+                _cog_type = await self.infer_cognitive_type(aspect, topic)
+                _cog_strategy = COGNITIVE_STRATEGY.get(_cog_type, COGNITIVE_STRATEGY["fact_driven"])
+                self._context[f"cog_strategy:{aspect}"] = _cog_strategy
+                causal_hypotheses = []
+                if aggregated_data_points and len(aggregated_data_points) >= 5:
+                    try:
+                        _hyp_data = "\n".join([f"- {dp.get('title','')}: {(dp.get('content','') or '')[:200]}" for dp in aggregated_data_points[:5]])
+                        _hyp_claims = "\n".join([f"- [{c.get('source_aspect','?')}] {c.get('statement','')}" for c in (cross_dimension_claims or [])]) if cross_dimension_claims else '暂无'
+                        _l4_gen = _cog_strategy["L4"]
+                        _hcount = _l4_gen["hypothesis_count"]
+                        _hcount_str = f"{_hcount[0]}-{_hcount[1]}" if isinstance(_hcount, tuple) else str(_hcount)
+                        hypothesis_prompt = f"""基于以下数据，生成{_hcount_str}个关于「{aspect}」的{_l4_gen['hypothesis_type']}假设。
+每个假设必须：1) 可被数据验证或反驳 2) 涉及跨维度因果传导 3) 不与已知事实矛盾{'' if not _l4_gen['counter_hypothesis_required'] else ' 4) 包含反面假设'}
+
+数据摘要（前5条）：
+{_hyp_data}
+
+其他维度已有发现：
+{_hyp_claims}
+
+输出格式（每行一个假设）：
+假设：[因果陈述] | 验证数据：[需要什么数据] | 传导：[影响哪些维度] | 反面假设：[对立因果陈述]"""
+
+                        hypothesis_result = await call_llm(
+                            prompt=hypothesis_prompt,
+                            system_prompt="你是一位因果推断专家。只输出假设，不要分析。"
+                        )
+                        if hypothesis_result.get("success") and hypothesis_result.get("content"):
+                            causal_hypotheses = self._parse_causal_hypotheses(hypothesis_result["content"])
+                            self._context["causal_hypotheses"] = causal_hypotheses
+                    except Exception as _hyp_err:
+                        logger.warning(f"GenericAgent {self.agent_id}: causal hypothesis generation failed: {_hyp_err}")
+                system_prompt = self._get_professional_role_prompt(aspect)
+                if aggregated_data_points:
+                    prompt = self._build_analysis_prompt_with_data(
+                        topic=topic, aspect=aspect, aspects=aspects,
+                        data_points=aggregated_data_points, sources=aggregated_sources,
+                        core_question=core_question,
+                        role_in_report=role_in_report,
+                        sibling_aspects=sibling_aspects,
+                        sub_aspects=self._context.get("sub_aspects"),
+                        cross_dimension_claims=cross_dimension_claims,
+                        causal_hypotheses=causal_hypotheses,
+                        conflict_entries=_conflict_entries if self._shared_memory and hasattr(self._shared_memory, 'get_all_canonical') else {},
+                    )
                 else:
-                    result = await skill.execute(**parameters)
-                    # 确保返回标准格式
-                    return self._ensure_standard_result(result, action)
+                    prompt = self._build_basic_research_prompt(
+                        topic, aspect, aspects,
+                        core_question=core_question,
+                        role_in_report=role_in_report,
+                        sibling_aspects=sibling_aspects,
+                    )
+                # [P0-5] Inject annual report document context
+                document_context = task.get("document_context", "") or self._context.get("document_context", "")
+                document_tables = task.get("document_tables", []) or self._context.get("document_tables", [])
+                if document_context or document_tables:
+                    doc_injection = "\n\n## 年报原始数据（来自企业年报PDF解析）\n"
+                    if document_context:
+                        truncated = self._truncate_by_tokens(document_context, max_tokens=6000, preserve_tables=bool(document_tables))
+                        doc_injection += f"\n### 年报章节原文\n{truncated}\n"
+                    if document_tables:
+                        doc_injection += "\n### 结构化财务数据\n"
+                        if isinstance(document_tables, dict):
+                            for table_type, rows in document_tables.items():
+                                if rows:
+                                    doc_injection += f"\n#### {table_type}\n"
+                                    for row in rows:
+                                        doc_injection += f"- {row}\n"
+                        elif isinstance(document_tables, list):
+                            for table in document_tables[:5]:
+                                doc_injection += f"\n{table}\n"
+                    doc_injection += "\n**重要**: 以上数据来自企业年报原文，优先使用这些数据进行分析，无需重新搜索。\n"
+                    prompt = doc_injection + prompt
+                # S-FIX-3: inject canonical authority data into prompt
+                if canonical_data:
+                    _canonical_section = "\n".join([
+                        f"- {k}: {v.get('value','')}{v.get('unit','')} "
+                        f"(口径: {v.get('caliber','不详')}, 来源: {v.get('source','不详')})"
+                        for k, v in canonical_data.items()
+                    ])
+                    prompt += f"\n\n## 已确认的规范数据（必须优先引用）\n{_canonical_section}\n"
+                    prompt += "\n**重要**: 以上数据已经过口径校准和权威性验证。引用时优先使用这些值，"
+                    prompt += "除非你有更新的权威数据来源。"
+                # Final SharedMemory check before LLM call: pick up last-millisecond resolution
+                if self._shared_memory and hasattr(self._shared_memory, 'get'):
+                    _sm_latest = self._shared_memory.get("_canonical_registry", {})
+                    if _sm_latest:
+                        _tmp = {}
+                        for k, v in _sm_latest.items():
+                            _pk = parse_entry_key(k)
+                            if not _pk["currency"] or _pk["currency"] == _target_cur:
+                                _tmp[k] = v
+                        _sm_latest = _tmp
+                    if _sm_latest and _sm_latest != canonical_data:
+                        _diff = {k: v for k, v in _sm_latest.items() if k not in canonical_data or canonical_data[k] != v}
+                        if _diff:
+                            _ds = "\n".join([f"- {k}: {v.get('value','')}{v.get('unit','')} (口径: {v.get('caliber','不详')})" for k, v in _diff.items()])
+                            prompt += f"\n\n## 实时更新规范数据（其他agent已完成）\n{_ds}\n"
+                            prompt += "**注意**: 这些数据来自刚刚完成的其他agent，优先级高于前面列出的规范数据。"
+                result = await call_llm(prompt=prompt, system_prompt=system_prompt)
+
+                # M3: canonical enforcement after LLM output
+                if result.get("success") and result.get("content") and canonical_data:
+                    result["content"] = self._enforce_canonical_values(
+                        result["content"], canonical_data
+                    )
+
+                # 日期验证
+                if result.get("success") and result.get("content"):
+                    validated = self._validate_output_dates(result["content"], self.agent_id)
+                    if validated != result["content"]:
+                        logger.warning(f"GenericAgent {self.agent_id}: 分析路径日期验证修正了年份")
+                        result["content"] = validated
+
+                # L4: Parse hypothesis verification results from analysis output
+                if result.get("success") and result.get("content") and causal_hypotheses:
+                    try:
+                        _verified = self._parse_hypothesis_verification(result["content"], causal_hypotheses)
+                        for _vh in _verified:
+                            await self._shared_memory.write_canonical(
+                                metric=f"hypothesis:{aspect}:{_vh.get('id', '')}",
+                                value=_vh,
+                                caliber="llm_inference",
+                                source=self.agent_id,
+                                publisher=aspect,
+                            )
+                    except Exception as _hyp_err:
+                        logger.warning(f"GenericAgent {self.agent_id}: hypothesis verification parse failed: {_hyp_err}")
+
+                # B2.1: Write cross-dimension claims to SharedMemory
+                if result.get("success") and result.get("content") and self._shared_memory:
+                    try:
+                        _claims = await self._extract_claims_from_analysis(result["content"], aspect)
+                        _caliber_map = {
+                            "factual": "llm_inference_factual",
+                            "inferential": "llm_inference",
+                            "speculative": "llm_inference_speculative",
+                        }
+                        for _claim in _claims:
+                            _caliber = _caliber_map.get(_claim.get("epistemic_level", "inferential"), "llm_inference")
+                            # L5: Pre-write contradiction detection (agent layer)
+                            if hasattr(self._shared_memory, 'get_all_canonical'):
+                                _existing_claims = self._shared_memory.get_all_canonical()
+                                for _ek, _ev in _existing_claims.items():
+                                    if _ek.startswith("claim:") and isinstance(_ev.get("value"), dict):
+                                        _contradiction = await self._detect_claim_contradiction(_ev["value"], _claim)
+                                        if _contradiction:
+                                            logger.warning(
+                                                f"GenericAgent {self.agent_id}: CLAIM CONTRADICTION for "
+                                                f"'{_ek}': {_contradiction}"
+                                            )
+                                            from src.core.orchestrator.aggregation.result_aggregator import ConflictRecord, ConflictResolution
+                                            await self._shared_memory.write_canonical(
+                                                metric=f"conflict:{_ek}",
+                                                value={"contradiction": _contradiction, "claims": [_ev["value"].get("statement",""), _claim.get("statement","")]},
+                                                caliber="llm_inference",
+                                                source=self.agent_id,
+                                                publisher=aspect,
+                                            )
+                            await self._shared_memory.write_canonical(
+                                metric=f"claim:{aspect}:{_claim['id']}",
+                                value=_claim,
+                                caliber=_caliber,
+                                source=self.agent_id,
+                                publisher=aspect,
+                            )
+                    except Exception as _claim_err:
+                        logger.warning(f"GenericAgent {self.agent_id}: claim extraction failed: {_claim_err}")
+
+                # Iterative deepening: detect knowledge gaps and supplement
+                if result.get("success") and result.get("content") and skill_registry:
+                    gaps = self._detect_knowledge_gaps(result["content"])
+
+                    # 语义级缺口检测（仅在启发式触发后运行）
+                    if gaps:
+                        semantic_gaps = await self._detect_semantic_gaps(result["content"])
+                        gaps.extend(semantic_gaps)
+
+                    if gaps:
+                        logger.info(f"GenericAgent {self.agent_id}: detected {len(gaps)} knowledge gaps, performing supplementary search")
+                        self._report_progress(f"分析内容知识检测完成{', 发现 '+str(len(gaps))+' 个缺口' if gaps else ', 无需补充'}", "analyzing")
+                        supp_result = await self._supplementary_search_for_gaps(
+                            topic=topic, aspect=aspect, gaps=gaps,
+                            skill_registry=skill_registry,
+                        )
+                        if supp_result and supp_result.get("data_points"):
+                            new_data_points = list(aggregated_data_points) + supp_result["data_points"]
+                            new_sources = list(aggregated_sources) + supp_result["sources"]
+                            prompt2 = self._build_analysis_prompt_with_data(
+                                topic=topic, aspect=aspect, aspects=aspects,
+                                data_points=new_data_points, sources=new_sources,
+                                core_question=core_question,
+                                role_in_report=role_in_report,
+                                sibling_aspects=sibling_aspects,
+                                sub_aspects=self._context.get("sub_aspects"),
+                                cross_dimension_claims=cross_dimension_claims,
+                                causal_hypotheses=causal_hypotheses,
+                                conflict_entries=_conflict_entries if self._shared_memory and hasattr(self._shared_memory, 'get_all_canonical') else {},
+                            )
+                            revised = await call_llm(prompt=prompt2, system_prompt=system_prompt)
+
+                            # M3: canonical enforcement on revised content
+                            if revised.get("success") and revised.get("content") and canonical_data:
+                                revised["content"] = self._enforce_canonical_values(
+                                    revised["content"], canonical_data
+                                )
+
+                            if revised.get("success") and revised.get("content"):
+                                validated = self._validate_output_dates(revised["content"], self.agent_id)
+                                if validated != revised["content"]:
+                                    logger.warning(f"GenericAgent {self.agent_id}: 修订路径日期验证修正了年份")
+                                    revised["content"] = validated
+                                result = revised
+                                aggregated_data_points = new_data_points
+                                aggregated_sources = new_sources
+                                logger.info(f"GenericAgent {self.agent_id}: analysis revised with supplementary data")
+                                self._report_progress(f"补充搜索后修订完成，新增 {len(new_data_points)} 数据点", "analyzing")
+
+                # 自评: 对生成内容进行质量评估
+                max_self_eval = self.config.get("max_self_eval_iterations", 0)
+                if max_self_eval > 0 and result.get("success") and result.get("content"):
+                    content_text = result.get("content", "")
+                    eval_result = await self._self_evaluate(content_text)
+                    result["self_evaluation"] = eval_result
+                    self._report_progress(f"分析内容自评完成，评分 {eval_result.get('score', 'N/A')}", "analyzing")
+
+                if result.get("success"):
+                    result["data_points"] = aggregated_data_points
+                    result["sources"] = aggregated_sources
+                return self._ensure_standard_result(result, action)
+                    
+            # M5-b: CALIBRATION - cross-agent numeric consistency check
+            if agent_category == "calibration":
+                self._report_progress("校准跨章节数值一致性...", "analyzing")
+                all_results = task.get("parameters", {}).get("all_results", context.get("all_results", []))
+                canonical_data = task.get("parameters", {}).get("canonical_data", context.get("canonical_data", {}))
+                from src.core.prompts.calibration_prompt import (
+                    CALIBRATION_SYSTEM_PROMPT,
+                    CALIBRATION_USER_PROMPT_TEMPLATE,
+                )
+                all_sections = []
+                for r in all_results:
+                    agent_id = r.get("agent_id", "unknown")
+                    section_content = r.get("content", "") or r.get("result", "")
+                    status = "✓" if r.get("success") else "✗"
+                    all_sections.append(f"[{status}] Agent {agent_id}:\n{section_content}")
+                canonical_summary = "\n".join([
+                    f"- {k}: {v.get('value','')}{v.get('unit','')}"
+                    for k, v in canonical_data.items()
+                ]) if canonical_data else "(no canonical data provided)"
+                prompt = CALIBRATION_USER_PROMPT_TEMPLATE.format(
+                    canonical_summary=canonical_summary,
+                    all_sections_report="\n\n".join(all_sections) if all_sections else "(no sections to calibrate)",
+                    target_currency=task.get("target_currency", "CNY"),
+                )
+                result = await call_llm(
+                    prompt=prompt,
+                    system_prompt=CALIBRATION_SYSTEM_PROMPT,
+                )
+                if result.get("success") and result.get("content"):
+                    _cal_content = result["content"]
+                    result["calibration_report"] = {"summary": _cal_content[:5000], "full_text": _cal_content}
+                    _ref = {}
+                    import re as _re
+                    _json_block = _re.search(
+                        r'```(?:json)\s*(\{.*?\})\s*```', _cal_content, _re.DOTALL
+                    )
+                    if _json_block:
+                        import json as _json
+                        try:
+                            _parsed = _json.loads(_json_block.group(1))
+                            if isinstance(_parsed, dict):
+                                _ref = _parsed
+                        except _json.JSONDecodeError:
+                            pass
+                    result["unified_data_reference"] = _ref
+                return self._ensure_standard_result(result, action)
+                    
+            # Check if there is aggregated content from previous phases (synthesis agent path)
+            aggregated_data_points = task.get("aggregated_data_points", [])
+            aggregated_sources = task.get("aggregated_sources", [])
+            aggregated_content = task.get("aggregated_content", [])
+                    
+            # 如果有前序数据，使用前序数据构建prompt
+            if aggregated_data_points or aggregated_content:
+                logger.info(f"GenericAgent {self.agent_id}: 接收到前序数据 - "
+                           f"data_points={len(aggregated_data_points)}, "
+                           f"sources={len(aggregated_sources)}, "
+                           f"content={len(aggregated_content)}")
+                        
+                # 污染修复：从 task 获取 target_aspect
+                target_aspect = task.get("target_aspect", "")
+                        
+                # 使用前序数据构建prompt
+                prompt = self._build_synthesis_prompt_with_data(
+                    topic=topic,
+                    aspect=aspect,
+                    aspects=aspects,
+                    data_points=aggregated_data_points,
+                    sources=aggregated_sources,
+                    previous_content=aggregated_content,
+                    target_aspect=target_aspect,
+                    core_question=core_question,
+                    role_in_report=role_in_report,
+                    sibling_aspects=sibling_aspects,
+                )
+                        
+                # S-FIX-3: inject canonical authority data into synthesis prompt
+                _canonical_data_syn = task.get("canonical_data", {}) or {}
+                # Filter to target currency
+                _target_cur_syn = task.get("target_currency", "CNY")
+                if _target_cur_syn and _canonical_data_syn:
+                    _canonical_data_syn = {}
+                    for _k, _v in dict(task.get("canonical_data", {})).items():
+                        _sp = _k.split("_")
+                        _sk_cur = _sp[2] if len(_sp) >= 3 else ""
+                        if _sk_cur == _target_cur_syn or len(_sp) <= 2:
+                            _canonical_data_syn[_k] = _v
+                if _canonical_data_syn:
+                    _cs = "\n".join([
+                        f"- {k}: {v.get('value','')}{v.get('unit','')} "
+                        f"(口径: {v.get('caliber','不详')})"
+                        for k, v in _canonical_data_syn.items()
+                    ])
+                    prompt += f"\n\n## 全报告规范数据（跨章节一致性要求）\n{_cs}\n"
+                    prompt += "\n**重要**: 所有章节中同一指标必须使用相同的值。如有差异，以上述规范数据为准。"
+                # Final SharedMemory check before LLM call (same pattern as analysis path)
+                if self._shared_memory and hasattr(self._shared_memory, 'get'):
+                    _sm_latest = self._shared_memory.get("_canonical_registry", {})
+                    if _sm_latest:
+                        _tmp = {}
+                        for k, v in _sm_latest.items():
+                            _pk = parse_entry_key(k)
+                            if not _pk["currency"] or _pk["currency"] == _target_cur_syn:
+                                _tmp[k] = v
+                        _sm_latest = _tmp
+                    if _sm_latest and _sm_latest != _canonical_data_syn:
+                        _diff = {k: v for k, v in _sm_latest.items() if k not in _canonical_data_syn or _canonical_data_syn[k] != v}
+                        if _diff:
+                            _ds = "\n".join([f"- {k}: {v.get('value','')}{v.get('unit','')}" for k, v in _diff.items()])
+                            prompt += f"\n\n## 实时更新规范数据\n{_ds}\n"
+                        
+                # 执行LLM分析（知识富集存在时注入system_prompt）
+                enrichment = getattr(self, '_knowledge_enrichment', {})
+                if enrichment.get("entities") or enrichment.get("methodologies"):
+                    system_prompt = self._get_professional_role_prompt(aspect)
+                    self._report_progress(f"Generating analysis for {aspect or topic}...", "writing")
+                    result = await call_llm(prompt=prompt, system_prompt=system_prompt)
+                else:
+                    self._report_progress(f"Generating analysis for {aspect or topic}...", "writing")
+                    result = await call_llm(prompt=prompt)
+
+                # M3: canonical enforcement on synthesis output
+                if result.get("success") and result.get("content") and _canonical_data_syn:
+                    result["content"] = self._enforce_canonical_values(
+                        result["content"], _canonical_data_syn
+                    )
+
+                # 日期验证
+                if result.get("success") and result.get("content"):
+                    validated = self._validate_output_dates(result["content"], self.agent_id)
+                    if validated != result["content"]:
+                        logger.warning(f"GenericAgent {self.agent_id}: 合成路径日期验证修正了年份")
+                        result["content"] = validated
+                        
+                # 将前序数据传递到结果中
+                if result.get("success"):
+                    result["data_points"] = aggregated_data_points
+                    result["sources"] = aggregated_sources
+                    result["previous_content"] = aggregated_content
+                    logger.info(f"GenericAgent {self.agent_id}: 传递前序数据到结果")
+                            
+                    # **输出过滤**：检测并清理污染内容
+                    output_content = result.get("content", "")
+                    if output_content:
+                        # 构建输入内容列表（用于污染检测）
+                        input_texts = []
+                        for pc in aggregated_content:
+                            if pc.get("content"):
+                                input_texts.append(pc["content"])
+                        for dp in aggregated_data_points:
+                            if dp.get("content"):
+                                input_texts.append(dp["content"])
+                                
+                        # 执行过滤
+                        filtered_content = self._filter_output_contamination(
+                            output_content=output_content,
+                            input_contents=input_texts,
+                            similarity_threshold=0.7,
+                            min_contamination_length=50,
+                        )
+                                
+                        # 如果过滤后内容有变化，记录日志
+                        if filtered_content != output_content:
+                            original_len = len(output_content)
+                            filtered_len = len(filtered_content)
+                            logger.info(
+                                f"GenericAgent {self.agent_id}: 输出污染过滤完成，"
+                                f"原始长度={original_len}，过滤后长度={filtered_len}，"
+                                f"移除={original_len - filtered_len}字符"
+                            )
+                            result["content"] = filtered_content
+                                    
+                            # 提取污染来源（用于调试）
+                            contamination_sources = self._extract_contamination_sources(
+                                output_content=output_content,
+                                input_contents=aggregated_content,
+                                key_field="content",
+                                similarity_threshold=0.6,
+                            )
+                            if contamination_sources:
+                                logger.warning(
+                                    f"GenericAgent {self.agent_id}: 检测到污染来源: {contamination_sources}"
+                                )
+                        
+                return self._ensure_standard_result(result, action)
+                    
+            # synthesis类型agent（执行摘要、研究结论）无前序数据时拒绝生成
+            if aspect in aspects and (aspect.lower() in {"summary", "结论", "摘要", "执行摘要", "研究结论"}):
+                logger.warning(f"GenericAgent {self.agent_id}: 综合分析agent无前序数据，拒绝生成虚假内容")
+                return self._ensure_standard_result({
+                    "success": False,
+                    "error": f"无法生成{aspect}：核心研究章节未产出有效数据",
+                    "content": "",
+                    "agent_id": self.agent_id,
+                }, action)
+                    
+            # 深度研究：先搜索再分析
+            _has_doc_data_dp = bool(self._context.get("document_context") or self._context.get("has_preloaded_data") or task.get("document_context"))
+            if topic and "search_skill" in available_skills and not _has_doc_data_dp:
+                search_results = await self._do_deep_research(
+                    topic=topic,
+                    aspect=aspect,
+                    aspects=aspects,
+                    skill_registry=skill_registry,
+                )
+                if search_results:
+                    _n = sum(len(s.get('results', [])) for s in search_results.get('searches', []))
+                    self._report_progress(f"搜索完成，获取 {_n} 条结果", "searching")
+                        
+                # 构建包含搜索结果的 prompt
+                if search_results:
+                    prompt = self._build_research_prompt_with_data(
+                        topic=topic,
+                        aspect=aspect,
+                        aspects=aspects,
+                        search_results=search_results,
+                    )
+                else:
+                    # 搜索失败，回退到纯 LLM
+                    prompt = self._build_basic_research_prompt(topic, aspect, aspects)
+            else:
+                prompt = self._build_basic_research_prompt(topic, aspect, aspects)
+                    
+            # 防御性检查：确保prompt不为空
+            if not prompt or not prompt.strip():
+                logger.error(f"GenericAgent {self.agent_id}: prompt为空，无法执行LLM任务")
+                return {
+                    "success": False,
+                    "error": "prompt 不能为空",
+                    "agent_id": self.agent_id,
+                    "action": action,
+                    "topic": topic,
+                    "aspect": aspect,
+                }
+                    
+            # 根据章节类型选择专业角色
+            system_prompt = self._get_professional_role_prompt(aspect)
+                    
+            result = await call_llm(prompt=prompt, system_prompt=system_prompt)
+                    
+            # 修复1: 清理LLM输出中的prompt残留文字
+            if result.get("success") and result.get("content"):
+                cleaned = self._clean_llm_output(result["content"])
+                if cleaned != result["content"]:
+                    logger.info(f"GenericAgent {self.agent_id}: 清理prompt残留，减少{len(result['content'])-len(cleaned)}字符")
+                    result["content"] = cleaned
+                        
+                # 日期验证：强制校验LLM输出中的年份引用
+                validated = self._validate_output_dates(result["content"], self.agent_id)
+                if validated != result["content"]:
+                    logger.warning(f"GenericAgent {self.agent_id}: 日期验证修正了输出中的年份")
+                    result["content"] = validated
+                    result["date_corrections_applied"] = True
+                        
+                # **输出过滤**：检测并清理与搜索结果的重复内容
+                # 只有当有搜索结果时才执行过滤
+                if search_results:
+                    # 提取搜索结果内容作为输入参考
+                    input_texts = []
+                    for search in search_results.get("searches", []):
+                        for item in search.get("results", []):
+                            body = item.get("body", "") or item.get("snippet", "")
+                            if body:
+                                input_texts.append(body)
+                            
+                    if input_texts:
+                        filtered_content = self._filter_output_contamination(
+                            output_content=result["content"],
+                            input_contents=input_texts,
+                            similarity_threshold=0.7,
+                            min_contamination_length=50,
+                        )
+                                
+                        if filtered_content != result["content"]:
+                            original_len = len(result["content"])
+                            filtered_len = len(filtered_content)
+                            logger.info(
+                                f"GenericAgent {self.agent_id}: 输出污染过滤完成，"
+                                f"原始长度={original_len}，过滤后长度={filtered_len}，"
+                                f"移除={original_len - filtered_len}字符"
+                            )
+                            result["content"] = filtered_content
+                    
+            # 调试日志：记录 LLM 返回结果
+            logger.info(f"GenericAgent {self.agent_id}: LLM 返回成功={result.get('success')}")
+            if result.get("success"):
+                content_len = len(result.get("content", ""))
+                logger.info(f"GenericAgent {self.agent_id}: 内容长度={content_len} 字符")
+                        
+                # P0-3修复：生成数据图表（ChartPlannerAgent）
+                charts = await self._generate_charts_from_content(
+                    content=result.get("content", ""),
+                    topic=topic,
+                    aspect=aspect,
+                )
+                if charts:
+                    result["charts"] = charts
+                    logger.info(f"GenericAgent {self.agent_id}: 生成了 {len(charts)} 张图表")
+                    
+            # **关键修复**：将搜索数据添加到返回结果中
+            # 这是数据传递链路断裂的根本原因！
+            if search_results:
+                # 提取data_points（搜索结果列表）
+                data_points = []
+                sources = []
+                for search in search_results.get("searches", []):
+                    for item in search.get("results", []):
+                        data_points.append({
+                            "title": item.get("title", ""),
+                            "content": item.get("body", "") or item.get("snippet", ""),
+                            "url": item.get("href", "") or item.get("url", ""),
+                            "quality_score": item.get("quality_score", 0),
+                            "credibility": item.get("credibility", "unknown"),
+                        })
+                        sources.append({
+                            "title": item.get("title", ""),
+                            "url": item.get("href", "") or item.get("url", ""),
+                            "type": "web",
+                            "quality_score": item.get("quality_score", 0),
+                        })
+                        
+                result["data_points"] = data_points
+                result["sources"] = sources
+                result["total_sources"] = search_results.get("total_sources", 0)
+                result["quality_stats"] = search_results.get("quality_stats", {})
+                        
+                logger.info(f"GenericAgent {self.agent_id}: 添加搜索数据到结果 - "
+                           f"data_points={len(data_points)}, sources={len(sources)}")
+                    
+            # 确保返回标准格式
+            return self._ensure_standard_result(result, action)
         
         # 回退：尝试直接用 action 作为 skill_name
         if action in available_skills and skill_registry:
@@ -4451,7 +4447,7 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
         **核心原则**：搜索原始数据，而非现成报告或分析结论！
         
         **变更说明**：
-        - 移除 llm_skill 参数，改用 Agent 内部 _call_llm_directly()
+        - 移除 llm_skill 依赖，改用 call_llm()
         - 新增 role_info 参数，接收 DomainRoleInferrer 推断的角色信息
         - 新增 min_queries 参数，确保生成足够的关键词
         

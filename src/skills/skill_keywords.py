@@ -7,13 +7,13 @@ Design principles:
 - Simple and practical, no vector search needed
 - Supports Chinese and English keywords
 - Supports synonyms and variants
-- Falls back to llm_skill automatically when no match is found
+- LLM capability is intrinsic (call_llm), not a registered skill
 
 Usage:
     from src.skills.skill_keywords import match_skills
     
     skills = match_skills("patent analysis")
-    # Returns: ["lc_arxiv", "llm_skill"]
+    # Returns: ["lc_arxiv"]
 """
 
 from typing import List, Dict, Set
@@ -132,10 +132,8 @@ SKILL_KEYWORDS: Dict[str, Set[str]] = {
 }
 
 # ============================================================
-# LLM Skill (universal fallback)
+# LLM capability is intrinsic (call_llm), no longer a skill
 # ============================================================
-
-LLM_FALLBACK_SKILL = "llm_skill"
 
 LLM_KEYWORDS: Set[str] = {
     "analyze", "reasoning", "summarize", "explain",
@@ -162,17 +160,17 @@ def match_skills(
         max_matches: Maximum number of Skills to return, default 3
         
     Returns:
-        List of matched Skill names (e.g. ["lc_arxiv", "llm_skill"])
+        List of matched Skill names (e.g. ["lc_arxiv"])
         
     Example:
         >>> match_skills("patent analysis")
-        ["lc_arxiv", "llm_skill"]
+        ["lc_arxiv"]
         
         >>> match_skills("data analysis")
-        ["lc_python_repl", "llm_skill"]
+        ["lc_python_repl"]
         
         >>> match_skills("quantum computing")
-        ["llm_skill"]  # No match, falls back to LLM
+        []  # No skill match found
     """
     query_lower = query.lower().strip()
     matched_skills: List[str] = []
@@ -207,21 +205,6 @@ def match_skills(
                 matched_skills.append(skill)
                 logger.debug(f"Fuzzy match: '{query}' ~ '{match}' -> {skill}")
     
-    # 3. Check if LLM is needed
-    # If the query contains LLM-related keywords, or no other match exists
-    needs_llm = False
-    
-    for kw in LLM_KEYWORDS:
-        if kw in query_lower:
-            needs_llm = True
-            break
-    
-    # If no LangChain Skill matched, or LLM is explicitly needed
-    if needs_llm or len(matched_skills) == 0:
-        if LLM_FALLBACK_SKILL not in matched_skills:
-            matched_skills.append(LLM_FALLBACK_SKILL)
-            logger.debug(f"LLM fallback: '{query}' needs reasoning")
-    
     return matched_skills[:max_matches]
 
 
@@ -241,7 +224,6 @@ def get_skill_description(skill_name: str) -> str:
         "lc_arxiv": "Academic paper search, get research results",
         "lc_python_repl": "Python code execution, data analysis and computation",
         "lc_web_scraper": "Web content scraping, extract structured data",
-        "llm_skill": "LLM reasoning analysis, intelligent understanding and generation",
         "market_analysis": "Market analysis with SWOT/PEST/Five Forces frameworks",
         "stock_data": "Stock and financial data retrieval via akshare",
         "stock_analysis": "Stock valuation and financial health analysis",

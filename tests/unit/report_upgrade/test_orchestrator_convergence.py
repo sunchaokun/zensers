@@ -35,9 +35,7 @@ def _make_orchestrator():
     global_reviewer = AsyncMock()
     data_repair = AsyncMock()
     conflict_resolver = AsyncMock()
-    llm = AsyncMock()
     orchestrator = ReportOrchestrator(
-        llm_skill=llm,
         chapter_writer=writer,
         chapter_reviewer=reviewer,
         global_reviewer=global_reviewer,

@@ -29,15 +29,13 @@ class SimulationSkill(Skill):
     - Support LLM-generated responses
     """
     
-    def __init__(self, config: Optional[SkillConfig] = None, llm_skill: Optional[Any] = None):
+    def __init__(self, config: Optional[SkillConfig] = None):
         """Initialize SimulationSkill.
         
         Args:
             config: Skill configuration
-            llm_skill: LLM Skill instance (optional, for generating more realistic responses)
         """
         super().__init__(config)
-        self.llm_skill = llm_skill
         self._agent: Optional[SimulatedResponseAgent] = None
     
     @property
@@ -54,7 +52,6 @@ class SimulationSkill(Skill):
             self._agent = SimulatedResponseAgent(
                 agent_id="simulation_skill_agent",
                 name="Simulation Response Agent",
-                llm_skill=self.llm_skill,
             )
         return self._agent
     
@@ -89,7 +86,7 @@ class SimulationSkill(Skill):
             agent = self._get_agent()
             
             # Use async execution method
-            result = await agent.execute_async(kwargs)
+            result = await agent.execute(kwargs)
             
             if result["success"]:
                 return self._success(
