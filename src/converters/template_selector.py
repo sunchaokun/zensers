@@ -74,16 +74,17 @@ class TemplateSelector:
 
     _ABS_RE = re.compile(
         r'(?<!\d)(?!(?:19|20)\d{2})'
-        r'((?:\d+\.\d+|\d{2,})\s*(?:万亿|亿|万|[BMK])'
+        r'((?:\d+\.\d+|\d{2,})\s*(?:万亿|亿|万|[BMK]|家|倍|个|辆|台|颗|款|项|人|名|次|期|支|条)'
         r'(?:\s*(?:USD|CNY|EUR|元|美元))?'
+        r'|\d+\.\d+[TBMK](?!\w)'
         r'|\d\s*[BMK]\s*(?:USD|CNY|EUR|元|美元))'
-        r'\b',
+        r'(?!\d)',
         re.I,
     )
 
     _PCT_RE = re.compile(r'(\d+\.?\d*)\s*%')
 
-    _NUM_UNIT_RE = re.compile(r'([\d.]+)\s*(万亿|亿|万|[BMK])', re.I)
+    _NUM_UNIT_RE = re.compile(r'([\d.]+)\s*(万亿|亿|万|[BMK]|家|倍|个|辆|台|颗|款|项|人|名|次|期|支|条)', re.I)
 
     _PCT_TOKEN_RE = re.compile(r'^[\d.]+%?$')
 
@@ -224,6 +225,10 @@ class TemplateSelector:
             return "data_table"
 
         kpis = kpis or []
+        if not kpis:
+            existing_kpi = slide_data.get("kpi_data", [])
+            if existing_kpi and len(existing_kpi) >= 2:
+                kpis = existing_kpi
         has_comparison = comparison is not None
 
         if kpis and len(kpis) >= 2:

@@ -595,17 +595,20 @@ class HTMLToPPTConverter:
         if self._should_use_template_renderer():
             from .template_selector import TemplateRegistry, TemplateSelector
             from .slide_renderer import SlideRenderer
+            from .layout_engine import LayoutEngine
             
             registry = TemplateRegistry()
             selector = TemplateSelector()
-            renderer = SlideRenderer(self.DESIGN)
-            section_index = 0
+            layout_engine = LayoutEngine()
             
-            has_image_slot_cache = {}
-            for tname in registry.list_templates():
-                has_image_slot_cache[tname] = any(
-                    s.get("type") == "image" for s in registry.get(tname).get("slots", [])
-                )
+            try:
+                from src.services.image_provider import ImageProvider
+                image_provider = ImageProvider()
+            except Exception:
+                image_provider = None
+            
+            renderer = SlideRenderer(self.DESIGN, image_provider=image_provider)
+            section_index = 0
             
             try:
                 from src.services.smart_chart_generator import SmartChartGenerator
@@ -625,6 +628,9 @@ class HTMLToPPTConverter:
                 if slide_type in ("section_title", "section-title"):
                     section_index += 1
                 
+                if image_provider and not slide_data.get("images"):
+                    image_provider.enrich_images(slide_data)
+                
                 template_name = selector.select_and_enhance(slide_data, section_index=section_index)
                 try:
                     template = registry.get(template_name)
@@ -637,10 +643,23 @@ class HTMLToPPTConverter:
                         if dec.get("type") == "source_text" and not dec.get("text"):
                             dec["text"] = source
                 
-                if has_image_slot_cache.get(template_name) and not slide_data.get("images") and chart_gen:
-                    self._auto_generate_charts(slide_data, template_name, chart_gen)
+                if chart_gen and layout_engine.can_accommodate_chart(slide_data, template_name):
+                    existing_images = slide_data.get("images", [])
+                    has_chart = any(
+                        img.get("image_type", "chart") == "chart" or
+                        (img.get("src", "").endswith((".png", ".jpg")) and "chart" in img.get("src", ""))
+                        for img in existing_images
+                    )
+                    if not has_chart:
+                        self._auto_generate_charts(slide_data, template_name, chart_gen)
                 
-                renderer.render(slide, slide_data, template, styles, page_num=slides_count)
+                layout_overrides = None
+                try:
+                    layout_overrides = layout_engine.compute(slide_data, template)
+                except Exception:
+                    logger.debug("LayoutEngine compute failed, using template defaults")
+                
+                renderer.render(slide, slide_data, template, styles, page_num=slides_count, layout_overrides=layout_overrides)
         else:
             for slide_data in slides:
                 slide_type = slide_data.get("slide_type", "content")
