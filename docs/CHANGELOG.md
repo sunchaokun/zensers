@@ -4,6 +4,48 @@
 
 ---
 
+## [3.1.0] - 2026-07-08
+
+### Quality System Code Audit: 15 Defect Fixes + 1 Feature Enhancement
+
+Comprehensive code audit of 8 core modules (~14000 LOC), identified 19 defects, fixed 15 with full test coverage (219 tests, 0 regressions).
+
+**P0 Fixes (Data Accuracy):**
+- **3.10** `get_canonical_sync()`: Removed prefix fallback — exact match only, eliminates cross-year data misreads (e.g., `revenue_2025` no longer matches `revenue_2024`)
+- **3.5** L5 contradiction detection: LLM failure returns `None` instead of false-positive heuristic string
+
+**P1 Fixes (Scoring Accuracy):**
+- **3.2** `_check_caliber_coverage()`: Removed `*0.3` denominator compression — caliber coverage scoring now reflects actual annotation rate
+- **4.5** `SemanticQualityAdapter`: Fallback score 40→0 — adapter failure never false-passes
+- **3.3** `_split_query_terms()`: jieba word segmentation + CJK stopwords + bigram fallback — Chinese query relevance from char-level to word-level
+- **3.4** `_assess_freshness()`: 10 date formats + relative dates (3天前/昨天) + dateutil fallback — freshness scoring accuracy significantly improved
+
+**P2 Fixes (Consistency & Safety):**
+- **3.8** `CrossTypeDuplicateDetector`: Removed `break` — scans all paragraphs, not just first
+- **3.6** L5 precheck threshold 0.15→0.25 — reduces false LLM contradiction triggers
+- **2.2** `set()`/`write()`: Canonical key write protection warning
+- **4.4** Non-numeric canonical conflict detection — string exact match + dict statement comparison
+- **3.1** `write_canonical()` source_type validation — invalid caliber logs warning
+
+**P3 Fixes (Maintenance & Dead Code):**
+- **4.3** Cross-agent reconciliation — consume `DataCollector.get_conflicts()` and `metric_conflict_details`
+- **4.6** COGNITIVE_STRATEGY: 5 dead params annotated `_DEFERRED` (preserving design intent)
+- **4.2** Dead code removal: `_check_batch_quality`, `_execute_stage_with_quality`, `_build_synthesis_task` deleted (~175 lines)
+- **3.7** Paragraph-level truncation: sliding window preserves key middle conclusions (结论/发现/验证)
+
+**Feature Enhancement:**
+- **Directional contradiction detection**: `_check_cross_chapter_consistency()` now detects semantic contradictions (看涨 vs 看空, 乐观 vs 悲观) in addition to numeric contradictions. Contradictory reports correctly fail quality gate.
+
+**Bug Fix:**
+- `content_quality.py`: SyntaxWarning `\[` escape in Python 3.13 — fixed with string concatenation
+
+**Test Coverage:**
+- 219 tests (164 unit + 37 E2E + 18 before/after comparison), all passing
+- E2E tests use real BYD financial + EV market data scenarios
+- Before/after comparison quantifies quality improvement per defect fix
+
+---
+
 ## [2.9.0] - 2026-07-06
 
 ### Feature: Three-Level Research Framework (Chapter → Sub-section → Point)

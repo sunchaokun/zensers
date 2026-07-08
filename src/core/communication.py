@@ -153,13 +153,11 @@ class SharedMemory:
             return self._data.get(key)
     
     async def write(self, key: str, value: Any) -> None:
-        """
-        Write data
-        
-        Args:
-            key: Data key
-            value: Data value
-        """
+        if key.startswith("canonical:") or key.startswith("_canonical"):
+            logger.warning(
+                f"SharedMemory.write(): writing canonical-key '{key}' via non-quality-controlled path. "
+                f"Use write_canonical() instead."
+            )
         async with self._lock:
             self._data[key] = value
     
@@ -215,20 +213,46 @@ class SharedMemory:
         
         Returns ConflictRecord if conflict detected, None otherwise.
         """
+        if caliber and caliber not in SOURCE_PRIORITY:
+            logger.warning(
+                f"SharedMemory.write_canonical(): source_type '{caliber}' not in SOURCE_PRIORITY, "
+                f"will be treated as priority=0"
+            )
         from src.core.orchestrator.aggregation.result_aggregator import ConflictRecord, ConflictResolution
         key = f"canonical:{metric}"
         async with self._lock:
             existing = self._data.get(key)
             conflict = None
-            if existing and isinstance(value, (int, float)) and isinstance(existing["value"], (int, float)):
-                if abs(existing["value"] - value) / max(abs(value), 0.01) > 0.05:
-                    conflict = ConflictRecord(
-                        key=metric,
-                        values=[existing["value"], value],
-                        sources=[existing.get("source", ""), source],
-                        resolution=ConflictResolution.MANUAL,
-                        resolved_value=None,
-                    )
+            if existing:
+                if isinstance(value, (int, float)) and isinstance(existing["value"], (int, float)):
+                    if abs(existing["value"] - value) / max(abs(value), 0.01) > 0.05:
+                        conflict = ConflictRecord(
+                            key=metric,
+                            values=[existing["value"], value],
+                            sources=[existing.get("source", ""), source],
+                            resolution=ConflictResolution.MANUAL,
+                            resolved_value=None,
+                        )
+                elif isinstance(value, str) and isinstance(existing["value"], str):
+                    if value != existing["value"] and len(value) > 2 and len(existing["value"]) > 2:
+                        conflict = ConflictRecord(
+                            key=metric,
+                            values=[existing["value"], value],
+                            sources=[existing.get("source", ""), source],
+                            resolution=ConflictResolution.MANUAL,
+                            resolved_value=None,
+                        )
+                elif isinstance(value, dict) and isinstance(existing["value"], dict):
+                    _old_stmt = existing["value"].get("statement", "")
+                    _new_stmt = value.get("statement", "")
+                    if _old_stmt and _new_stmt and _old_stmt != _new_stmt:
+                        conflict = ConflictRecord(
+                            key=metric,
+                            values=[existing["value"], value],
+                            sources=[existing.get("source", ""), source],
+                            resolution=ConflictResolution.MANUAL,
+                            resolved_value=None,
+                        )
             if existing:
                 existing_priority = SOURCE_PRIORITY.get(existing.get("caliber", ""), 0)
                 new_priority = SOURCE_PRIORITY.get(caliber, 0)
@@ -296,12 +320,6 @@ class SharedMemory:
         entry = self._data.get(f"canonical:{metric}")
         if entry:
             return entry
-        prefix = metric.split("_")[0]
-        for key, value in self._data.items():
-            if key.startswith("canonical:"):
-                key_metric = key[len("canonical:"):]
-                if key_metric == metric or key_metric.split("_")[0] == prefix:
-                    return value
         return None
     
     def get_all_canonical(self) -> Dict[str, Dict]:
@@ -333,17 +351,11 @@ class SharedMemory:
         return self._data.get(key, default)
     
     def set(self, key: str, value: Any) -> None:
-        """
-        Synchronously write data (non-thread-safe, for performance-critical paths)
-        
-        Note: This method does not use locks, suitable for:
-        - When sync access is needed in async context
-        - Performance-critical scenarios where strict thread safety is not required
-        
-        Args:
-            key: Data key
-            value: Data value
-        """
+        if key.startswith("canonical:") or key.startswith("_canonical"):
+            logger.warning(
+                f"SharedMemory.set(): writing canonical-key '{key}' via non-quality-controlled path. "
+                f"Use write_canonical() instead."
+            )
         self._data[key] = value
     
     def get_all(self) -> Dict[str, Any]:

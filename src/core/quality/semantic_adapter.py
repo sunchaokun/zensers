@@ -140,10 +140,10 @@ class SemanticQualityAdapter(BaseQualityChecker):
                     logger.warning(f"Fallback checker also failed: {e2}")
             return QualityResult(
                 checker_type=self.get_checker_type(),
-                score=40.0,
+                score=0.0,
                 threshold=self.threshold,
                 passed=False,
-                issues=[f"三层评分异常: {str(e)[:80]}"],
+                issues=[f"三层评分异常（适配器+降级均失败）: {str(e)[:80]}"],
             )
 
     def generate_suggestions(self, score: float, data: Dict, context: Optional[Dict] = None) -> List[str]:

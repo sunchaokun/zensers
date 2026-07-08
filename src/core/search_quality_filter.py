@@ -414,13 +414,29 @@ class SearchQualityFilter:
     def _split_query_terms(query: str) -> set:
         """Split query into terms, handling both English (space) and Chinese."""
         terms = set(query.lower().split())
-        # Chinese text has no spaces — extract individual CJK characters
-        cjk_chars = set()
+        _CJK_STOPWORDS = {
+            "的", "了", "是", "在", "和", "与", "或", "但", "而", "这", "那",
+            "有", "被", "把", "从", "到", "对", "为", "以", "及", "等",
+            "个", "只", "也", "都", "就", "还", "又", "再", "不", "没",
+            "上", "下", "中", "里", "外", "前", "后", "时", "年", "月", "日",
+        }
+        cjk_text = ""
+        has_cjk = False
         for ch in query:
             if '\u4e00' <= ch <= '\u9fff' or '\u3000' <= ch <= '\u303f':
-                cjk_chars.add(ch)
-        if cjk_chars:
-            terms.update(cjk_chars)
+                cjk_text += ch
+                has_cjk = True
+            else:
+                cjk_text += " "
+        if has_cjk:
+            try:
+                import jieba
+                cjk_words = jieba.cut(cjk_text)
+                terms.update(w for w in cjk_words if w.strip() and w not in _CJK_STOPWORDS)
+            except ImportError:
+                for i in range(len(cjk_text) - 1):
+                    if cjk_text[i].strip() and cjk_text[i + 1].strip():
+                        terms.add(cjk_text[i:i + 2])
         return terms
 
     def _assess_relevance(
@@ -496,6 +512,25 @@ class SearchQualityFilter:
         else:
             return 100.0
 
+    _DATE_FORMATS = [
+        "%Y-%m-%d", "%Y/%m/%d", "%Y年%m月%d日",
+        "%Y.%m.%d",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M:%SZ",
+        "%d/%m/%Y",
+        "%m/%d/%Y",
+        "%Y年%m月",
+        "%B %d, %Y",
+    ]
+
+    _RELATIVE_DATE_PATTERNS = {
+        r'(\d+)\s*(?:天前|days?\s*ago)': lambda m: -int(m.group(1)),
+        r'(\d+)\s*(?:周前|weeks?\s*ago)': lambda m: -int(m.group(1)) * 7,
+        r'(\d+)\s*(?:月前|months?\s*ago)': lambda m: -int(m.group(1)) * 30,
+        r'昨天|yesterday': lambda m: -1,
+        r'前天': lambda m: -2,
+    }
+
     def _assess_freshness(
         self,
         result: Dict[str, Any],
@@ -506,35 +541,44 @@ class SearchQualityFilter:
         Returns:
             Timeliness score 0-100
         """
-        # If has date field, calculate based on date
         date_str = result.get("date", "") or result.get("published", "")
 
         if date_str:
-            # Try to parse date
             try:
                 from datetime import datetime, timedelta
-                # Common date formats
-                for fmt in ["%Y-%m-%d", "%Y/%m/%d", "%Y年%m月%d日"]:
+                import re as _re
+
+                def _score_by_days(days_ago: int) -> float:
+                    if days_ago < 30: return 100.0
+                    elif days_ago < 90: return 80.0
+                    elif days_ago < 180: return 60.0
+                    elif days_ago < 365: return 40.0
+                    else: return 20.0
+
+                for pattern, delta_fn in self._RELATIVE_DATE_PATTERNS.items():
+                    m = _re.search(pattern, date_str, _re.IGNORECASE)
+                    if m:
+                        days_ago = abs(delta_fn(m))
+                        return _score_by_days(days_ago)
+
+                for fmt in self._DATE_FORMATS:
                     try:
                         pub_date = datetime.strptime(date_str, fmt)
                         days_ago = (datetime.now() - pub_date).days
-
-                        if days_ago < 30:
-                            return 100.0
-                        elif days_ago < 90:
-                            return 80.0
-                        elif days_ago < 180:
-                            return 60.0
-                        elif days_ago < 365:
-                            return 40.0
-                        else:
-                            return 20.0
+                        return _score_by_days(days_ago)
                     except ValueError:
                         continue
+
+                try:
+                    from dateutil.parser import parse as dateutil_parse
+                    pub_date = dateutil_parse(date_str)
+                    days_ago = (datetime.now() - pub_date).days
+                    return _score_by_days(days_ago)
+                except (ValueError, ImportError, OverflowError):
+                    pass
             except (ValueError, OverflowError, ImportError):
                 pass
 
-        # Default to medium timeliness score
         return 60.0
 
 

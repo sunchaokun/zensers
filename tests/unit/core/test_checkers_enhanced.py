@@ -5,7 +5,8 @@ import sys
 sys.path.insert(0, "E:/market_report_systerm/src")
 
 import pytest
-from core.quality.checkers import ReportQualityChecker
+from core.quality.checkers import ReportQualityChecker, AnalysisQualityChecker
+from core.quality.semantic_adapter import SemanticQualityAdapter
 
 
 class TestReportCheckerConsistency:
@@ -35,12 +36,12 @@ class TestReportCheckerConsistency:
         ]
         checker = ReportQualityChecker()
         score = checker._check_cross_chapter_consistency(sections)
-        assert score == 100.0
+        assert score == 70.0  # <2 sections: neutral score, cannot verify cross-chapter
 
     def test_empty_sections(self):
         checker = ReportQualityChecker()
         score = checker._check_cross_chapter_consistency([])
-        assert score == 100.0
+        assert score == 70.0  # no sections: neutral score
 
 
 class TestReportCheckerRedundancy:
@@ -94,11 +95,67 @@ class TestReportCheckerProvenance:
         assert score > 0
 
     def test_no_findings_graceful_degradation(self):
-        """When findings_extractor not deployed, return 80 as neutral score"""
+        """When findings_extractor not deployed, return 50 as low-score signal"""
         data = {"sections": [], "findings": []}
         checker = ReportQualityChecker()
         score = checker._check_finding_provenance(data, {})
-        assert score == 80.0
+        assert score == 50.0
+
+
+class TestCaliberCoverageScoreFormula:
+    """Test _check_caliber_coverage scoring formula (defect 3.2)"""
+
+    def test_one_ref_one_caliber_scores_100(self):
+        """1 numeric ref with 1 caliber annotation = full coverage = 100"""
+        checker = AnalysisQualityChecker()
+        content = "营收为100亿元（GAAP口径）"
+        score = checker._check_caliber_coverage(content)
+        assert score == 100.0
+
+    def test_three_refs_one_caliber_not_auto_100(self):
+        """3 numeric refs with 1 caliber annotation should NOT get 100 via 0.3 compression"""
+        checker = AnalysisQualityChecker()
+        content = "营收100亿元，利润50亿元，增速20%（GAAP口径）"
+        score = checker._check_caliber_coverage(content)
+        assert score < 100.0
+
+    def test_multiple_caliber_types_full_coverage(self):
+        """When all CALIBER_PATTERNS types match, coverage approaches 100"""
+        checker = AnalysisQualityChecker()
+        content = "营收100亿元（GAAP口径），利润同比增速20%，调整后净利润50亿元，不含少数股东权益"
+        score = checker._check_caliber_coverage(content)
+        assert score >= 90.0
+
+    def test_five_refs_two_calibers_partial_coverage(self):
+        """5 refs with 1 caliber annotation = 1/5 = 20% coverage (not inflated by 0.3)"""
+        checker = AnalysisQualityChecker()
+        content = "营收100亿元，利润50亿元（GAAP口径），增速20%，产量30万辆，投资额200亿元"
+        score = checker._check_caliber_coverage(content)
+        assert score < 50.0
+
+    def test_no_numeric_refs_returns_50(self):
+        checker = AnalysisQualityChecker()
+        score = checker._check_caliber_coverage("这段没有数字引用")
+        assert score == 50.0
+
+
+class TestSemanticAdapterFallbackScore:
+    """Test SemanticQualityAdapter fallback score (defect 4.5)"""
+
+    def test_fallback_score_is_zero_not_40(self):
+        from unittest.mock import patch
+        adapter = SemanticQualityAdapter(threshold=75.0)
+        with patch.object(adapter._scorer, 'score', side_effect=RuntimeError("scorer broken")):
+            result = adapter.check({"content": "some content"}, {})
+            assert result.score == 0.0
+            assert not result.passed
+
+    def test_fallback_does_not_false_pass_with_low_threshold(self):
+        from unittest.mock import patch
+        adapter = SemanticQualityAdapter(threshold=30.0)
+        with patch.object(adapter._scorer, 'score', side_effect=RuntimeError("scorer broken")):
+            result = adapter.check({"content": "some content"}, {})
+            assert result.score < 1.0
 
 
 class TestReportCheckerSearchAudit:

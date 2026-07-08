@@ -97,6 +97,21 @@ class TestCrossTypeDuplicateDetector:
         assert detector.apply("") == ""
         assert detector.apply(None) is None or detector.apply("") == ""
 
+    def test_scans_multiple_paragraphs_not_just_first(self):
+        """Heading should be checked against ALL following paragraphs, not just the first (defect 3.8)"""
+        detector = CrossTypeDuplicateDetector(threshold=0.3, max_scan_lines=10)
+        
+        content = """### 竞争格局分析
+
+这是第一段概述，与标题不重复。
+
+竞争格局分析显示市场集中度较高。
+"""
+        result = detector.apply(content)
+        
+        assert "竞争格局分析显示市场集中度较高" in result
+        assert "### 竞争格局分析" not in result
+
 
 class TestGlobalDuplicateDetector:
     """全局跨章节去重测试"""

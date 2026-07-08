@@ -293,9 +293,6 @@ class CrossTypeDuplicateDetector(ContentFilter):
                         found_duplicate = True
                         removed_count += 1
                         break
-                    
-                    # 只检查第一个非空段落
-                    break
                 
                 if found_duplicate:
                     # 策略：跳过标题，保留段落（段落信息更完整）
@@ -314,7 +311,8 @@ class CrossTypeDuplicateDetector(ContentFilter):
         """计算文本相似度"""
         # 移除标点符号和空白（含中文标点）
         # 使用原始字符串避免转义警告
-        pattern = r'[\s,，。、；：""''！？()（）【】\[\]《》—…·]'
+        _BRACKETS = '\\' + '[' + '\\' + ']'
+        pattern = r'[\s,，。、；：\u201c\u201d\u2018\u2019！？()（）【】《》—…·]' + _BRACKETS
         clean1 = re.sub(pattern, '', text1)
         clean2 = re.sub(pattern, '', text2)
         
@@ -494,7 +492,8 @@ class GlobalDuplicateDetector(ContentFilter):
     
     def _normalize(self, text: str) -> str:
         """归一化文本"""
-        pattern = r'[\s,，。、；：""''！？()（）【】\[\]《》—…·\d]'
+        _BRACKETS = '\\' + '[' + '\\' + ']'
+        pattern = r'[\s,，。、；：\u201c\u201d\u2018\u2019！？()（）【】《》—…·\d]' + _BRACKETS
         return re.sub(pattern, '', text)
     
     def _calculate_similarity(self, text1: str, text2: str) -> float:

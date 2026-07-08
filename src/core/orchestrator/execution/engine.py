@@ -601,35 +601,6 @@ class ExecutionEngine:
             return aspect_mapping[last.lower()]
         return last
     
-    def _build_synthesis_task(
-        self,
-        requirement: Dict[str, Any],
-        previous_results: List[Dict[str, Any]],
-        target_aspect: Optional[str] = None,
-        **kwargs
-    ) -> Dict[str, Any]:
-        """
-        构建综合分析任务（已废弃）
-        
-        **Path A 清理**: 此方法不再被调用。
-        """
-        logger.warning("_build_synthesis_task 被调用（遗留路径）")
-        return {}
-
-    def _build_report_task(
-        self,
-        requirement: Dict[str, Any],
-        previous_results: List[Dict[str, Any]],
-        **kwargs
-    ) -> Dict[str, Any]:
-        """
-        构建报告生成任务（已废弃）
-        
-        **Path A 清理**: 此方法不再被调用。
-        """
-        logger.warning("_build_report_task 被调用（遗留路径）")
-        return {}
-    
     def _extract_section_name(self, agent_id: str) -> str:
         """
         从agent_id提取章节名称
@@ -852,64 +823,6 @@ class ExecutionEngine:
             "failed": sum(1 for r in results if not r.get("success")),
             "data": results,
         }
-    
-    def _check_batch_quality(
-        self,
-        batch_results: List[Dict[str, Any]],
-        batch_index: int,
-    ) -> bool:
-        """
-        检查批次质量
-        
-        Args:
-            batch_results: 批次结果
-            batch_index: 批次索引
-            
-        Returns:
-            质量是否通过
-        """
-        # 统计成功率和数据量
-        success_count = sum(1 for r in batch_results if r.get("success"))
-        total_count = len(batch_results)
-        
-        # 统计数据点数量
-        total_data_points = 0
-        total_sources = 0
-        total_content_length = 0
-        
-        for r in batch_results:
-            if r.get("success"):
-                total_data_points += len(r.get("data_points", []))
-                total_sources += len(r.get("sources", []))
-                content = r.get("content", "") or r.get("result", "")
-                if isinstance(content, dict):
-                    content = str(content)
-                if isinstance(content, str):
-                    total_content_length += len(content)
-        
-        # 质量标准
-        MIN_SUCCESS_RATE = 0.5  # 至少50%成功
-        MIN_CONTENT_LENGTH = 100  # 每个成功的结果至少100字符
-        
-        # 计算质量分数
-        success_rate = success_count / total_count if total_count > 0 else 0
-        avg_content_length = total_content_length / success_count if success_count > 0 else 0
-        
-        quality_passed = (
-            success_rate >= MIN_SUCCESS_RATE and
-            avg_content_length >= MIN_CONTENT_LENGTH
-        )
-        
-        logger.info(
-            f"批次 {batch_index + 1} 质量检查: "
-            f"成功率={success_rate:.1%}, "
-            f"平均内容长度={avg_content_length:.0f}, "
-            f"数据点={total_data_points}, "
-            f"来源={total_sources}, "
-            f"通过={quality_passed}"
-        )
-        
-        return quality_passed
     
     def _build_stats(self) -> Dict[str, Any]:
         """构建执行统计"""
@@ -1613,6 +1526,31 @@ class ExecutionEngine:
                 all_results.extend(batch_results)
                 result.stage_results[f"batch_{batch_index + 1}"] = batch_results
                 
+                # B-FIX-6: 跨批次冲突告警 + 注入下游 context (defect 4.3)
+                if hasattr(self, '_data_collector') and self._data_collector:
+                    _dc_conflicts = self._data_collector.get_conflicts()
+                    if _dc_conflicts:
+                        logger.warning(
+                            f"Cross-batch data conflicts: {len(_dc_conflicts)} conflicts detected"
+                        )
+                        for _c in _dc_conflicts[:10]:
+                            logger.warning(
+                                f"  Conflict: metric={_c.get('metric','?')}, "
+                                f"values={_c.get('values',[])}, sources={_c.get('sources',[])}"
+                            )
+                        _conflict_summary = "; ".join(
+                            f"{_c.get('metric','?')}: {len(_c.get('values',[]))} versions"
+                            for _c in _dc_conflicts
+                        )
+                        if self._shared_memory and hasattr(self._shared_memory, 'write_canonical'):
+                            await self._shared_memory.write_canonical(
+                                metric="cross_batch_conflicts",
+                                value={"count": len(_dc_conflicts), "summary": _conflict_summary},
+                                caliber="llm_inference",
+                                source="reconciliation",
+                                publisher="engine",
+                            )
+                
                 # C-FIX-1: execute newly unlocked agents at batch end
                 if pending_unlocked and result.status != "failed":
                     logger.info(f"Re-executing {len(pending_unlocked)} newly unlocked agents")
@@ -1666,6 +1604,19 @@ class ExecutionEngine:
                 result.status = "completed"
                 result.final_result = self._aggregate_results(all_results)
                 result.stats = self._build_stats()
+                # B-FIX-6: 消费 metric_conflict_details（L3 对账结果）(defect 4.3)
+                if isinstance(result.final_result, dict):
+                    _agg_stats = result.final_result.get("stats", {})
+                    _mc_details = _agg_stats.get("metric_conflict_details", [])
+                    if _mc_details:
+                        logger.warning(
+                            f"Metric-level conflicts: {len(_mc_details)} across agents"
+                        )
+                        for _mcd in _mc_details[:5]:
+                            logger.warning(
+                                f"  {_mcd['key']}({_mcd['year']}): "
+                                f"values={_mcd['values']}, agents={_mcd['sources']}"
+                            )
             result.completed_at = datetime.now()
             
             logger.info(f"执行完成: 成功={sum(1 for r in all_results if r.get('success'))}, "
@@ -2651,87 +2602,6 @@ class ExecutionEngine:
     # ============================================================
     # 质量控制相关方法
     # ============================================================
-    
-    async def _execute_stage_with_quality(
-        self,
-        stage_name: str,
-        agents: List["IAgent"],
-        checker,
-        task_builder: Callable,
-        requirement: Dict[str, Any],
-        previous_results: Optional[List[Dict[str, Any]]] = None,
-    ) -> List[Dict[str, Any]]:
-        """
-        带质量控制的阶段执行
-        
-        Args:
-            stage_name: 阶段名称
-            agents: Agent列表
-            checker: 质量检查器
-            task_builder: 任务构建函数
-            requirement: 需求定义
-            previous_results: 前一阶段结果
-            
-        Returns:
-            执行结果列表
-        """
-        if not self.enable_quality_control:
-            # 未启用质量控制，直接执行
-            return await self._execute_stage(
-                stage_name=stage_name,
-                agents=agents,
-                task_builder=task_builder,
-                requirement=requirement,
-                previous_results=previous_results or [],
-            )
-        
-        async def execute_func(context: Dict[str, Any]) -> Dict[str, Any]:
-            """执行函数"""
-            results = await self._execute_stage(
-                stage_name=stage_name,
-                agents=agents,
-                task_builder=task_builder,
-                requirement=context.get("requirement", requirement),
-                previous_results=context.get("previous_results", previous_results or []),
-            )
-            
-            # 提取质量元数据
-            for result in results:
-                if result.get("success"):
-                    # 兼容多种输出格式
-                    raw_output = self._extract_raw_output(result)
-                    quality_metadata = self.metadata_extractor.extract(
-                        raw_output, 
-                        skill_name=result.get("agent_id", "")
-                    )
-                    result["quality_metadata"] = quality_metadata.to_dict()
-            
-            # 聚合结果
-            aggregated = self._aggregate_stage_results(results)
-            return aggregated
-        
-        # 构建上下文
-        context = {
-            "requirement": requirement,
-            "previous_results": previous_results or [],
-        }
-        
-        # 使用反馈执行器
-        data, quality_result = await self.quality_executor.execute_with_retry(
-            stage=stage_name,
-            execute_func=execute_func,
-            checker=checker,
-            context=context,
-        )
-        
-        # 记录质量结果
-        if quality_result:
-            logger.info(
-                f"[{stage_name}] 质量检查完成: "
-                f"score={quality_result.score:.1f}, passed={quality_result.passed}"
-            )
-        
-        return data.get("results", [])
     
     def _aggregate_stage_results(
         self,

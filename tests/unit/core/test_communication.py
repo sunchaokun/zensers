@@ -194,3 +194,192 @@ class TestSharedMemory:
         # 验证所有数据正确
         assert len(results) == 10
         assert set(results) == set(range(10))
+
+
+class TestGetCanonicalSyncPrefixFallback:
+    """Test get_canonical_sync prefix fallback removal (defect 3.10)"""
+
+    @pytest.mark.unit
+    async def test_exact_match_returns_correct_value(self):
+        from src.core.communication import SharedMemory
+
+        memory = SharedMemory()
+        await memory.write_canonical(
+            metric="净利润_2024", value=100.0,
+            caliber="structured_source", source="年报", publisher="agent1",
+        )
+        result = memory.get_canonical_sync("净利润_2024")
+        assert result is not None
+        assert result["value"] == 100.0
+
+    @pytest.mark.unit
+    async def test_missing_exact_match_returns_none_not_prefix_fallback(self):
+        from src.core.communication import SharedMemory
+
+        memory = SharedMemory()
+        await memory.write_canonical(
+            metric="净利润_2024", value=100.0,
+            caliber="structured_source", source="年报", publisher="agent1",
+        )
+        result = memory.get_canonical_sync("净利润_2025")
+        assert result is None
+
+    @pytest.mark.unit
+    async def test_prefix_fallback_does_not_return_wrong_year(self):
+        from src.core.communication import SharedMemory
+
+        memory = SharedMemory()
+        await memory.write_canonical(
+            metric="营收_2024", value=500.0,
+            caliber="structured_source", source="年报", publisher="agent1",
+        )
+        result = memory.get_canonical_sync("营收_2025")
+        assert result is None
+
+    @pytest.mark.unit
+    async def test_different_prefix_no_cross_match(self):
+        from src.core.communication import SharedMemory
+
+        memory = SharedMemory()
+        await memory.write_canonical(
+            metric="毛利率_2024", value=30.0,
+            caliber="structured_source", source="年报", publisher="agent1",
+        )
+        result = memory.get_canonical_sync("净利率_2024")
+        assert result is None
+
+
+class TestCanonicalKeyWriteProtection:
+    """Test canonical key write protection via non-canonical paths (defect 2.2)"""
+
+    @pytest.mark.unit
+    def test_set_canonical_key_logs_warning(self, caplog):
+        import logging
+        from src.core.communication import SharedMemory
+
+        memory = SharedMemory()
+        with caplog.at_level(logging.WARNING):
+            memory.set("canonical:净利润_2024", {"value": 100.0})
+        assert any("canonical" in r.message.lower() and "non-quality-controlled" in r.message.lower()
+                    for r in caplog.records)
+
+    @pytest.mark.unit
+    def test_set_canonical_registry_prefix_logs_warning(self, caplog):
+        import logging
+        from src.core.communication import SharedMemory
+
+        memory = SharedMemory()
+        with caplog.at_level(logging.WARNING):
+            memory.set("_canonical_registry", {"净利润": 100.0})
+        assert any("canonical" in r.message.lower() and "non-quality-controlled" in r.message.lower()
+                    for r in caplog.records)
+
+    @pytest.mark.unit
+    def test_set_non_canonical_key_no_warning(self, caplog):
+        import logging
+        from src.core.communication import SharedMemory
+
+        memory = SharedMemory()
+        with caplog.at_level(logging.WARNING):
+            memory.set("search_results", [1, 2, 3])
+        assert not any("canonical" in r.message.lower() for r in caplog.records)
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_write_canonical_key_logs_warning(self, caplog):
+        import logging
+        from src.core.communication import SharedMemory
+
+        memory = SharedMemory()
+        with caplog.at_level(logging.WARNING):
+            await memory.write("canonical:净利润_2024", {"value": 100.0})
+        assert any("canonical" in r.message.lower() and "non-quality-controlled" in r.message.lower()
+                    for r in caplog.records)
+
+
+class TestWriteCanonicalSourceValidation:
+    """Test write_canonical source_type validation (defect 3.1)"""
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_invalid_source_type_logs_warning(self, caplog):
+        import logging
+        from src.core.communication import SharedMemory
+
+        memory = SharedMemory()
+        with caplog.at_level(logging.WARNING):
+            await memory.write_canonical(
+                metric="净利润_2024", value=100.0,
+                caliber="unknown_source_type", source="test", publisher="agent1",
+            )
+        assert any("source_type" in r.message and "not in SOURCE_PRIORITY" in r.message
+                    for r in caplog.records)
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_valid_source_type_no_warning(self, caplog):
+        import logging
+        from src.core.communication import SharedMemory
+
+        memory = SharedMemory()
+        with caplog.at_level(logging.WARNING):
+            await memory.write_canonical(
+                metric="净利润_2024", value=100.0,
+                caliber="structured_source", source="test", publisher="agent1",
+            )
+        assert not any("source_type" in r.message for r in caplog.records)
+
+
+class TestNonNumericCanonicalConflictDetection:
+    """Test conflict detection for non-numeric canonical data (defect 4.4)"""
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_same_caliber_string_conflict_detected(self):
+        from src.core.communication import SharedMemory
+
+        memory = SharedMemory()
+        await memory.write_canonical(
+            metric="target_market", value="新能源汽车",
+            caliber="llm_inference", source="agent1", publisher="风险",
+        )
+        conflict = await memory.write_canonical(
+            metric="target_market", value="传统燃油车",
+            caliber="llm_inference", source="agent2", publisher="风险",
+        )
+        assert conflict is not None
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_cross_priority_string_conflict_recorded(self):
+        """Different-priority string values should still generate a conflict event for audit"""
+        from src.core.communication import SharedMemory
+
+        memory = SharedMemory()
+        await memory.write_canonical(
+            metric="target_market", value="新能源汽车",
+            caliber="llm_inference", source="agent1", publisher="风险",
+        )
+        conflict = await memory.write_canonical(
+            metric="target_market", value="传统燃油车",
+            caliber="structured_source", source="年报", publisher="agent1",
+        )
+        assert conflict is not None
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_dict_statement_conflict_detected(self):
+        from src.core.communication import SharedMemory
+
+        memory = SharedMemory()
+        await memory.write_canonical(
+            metric="claim:风险:0",
+            value={"statement": "市场前景乐观", "confidence": "HIGH"},
+            caliber="llm_inference", source="agent1", publisher="风险",
+        )
+        conflict = await memory.write_canonical(
+            metric="claim:风险:0",
+            value={"statement": "市场前景悲观", "confidence": "HIGH"},
+            caliber="llm_inference", source="agent2", publisher="风险",
+        )
+        assert conflict is not None

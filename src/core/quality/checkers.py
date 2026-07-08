@@ -448,7 +448,7 @@ class AnalysisQualityChecker(BaseQualityChecker):
         caliber_refs = sum(1 for p in self.CALIBER_PATTERNS if re.search(p, content))
         if len(numeric_refs) == 0:
             return 50.0
-        ratio = caliber_refs / max(1, len(numeric_refs) * 0.3)
+        ratio = caliber_refs / max(1, len(numeric_refs))
         return min(100.0, ratio * 100.0)
     
     def _check_risk_disclosure(self, content: str) -> float:
@@ -659,10 +659,17 @@ class ReportQualityChecker(BaseQualityChecker):
         (r'负债[率]?[^\d]*?(\d+\.?\d*)\s*%', "负债率"),
     ]
     
+    _DIRECTIONAL_CONTRADICTION_PAIRS = [
+        (["看涨", "上升", "增长", "走高", "攀升", "改善", "利好", "强劲"], ["看空", "下降", "萎缩", "走低", "恶化", "利空", "疲软", "放缓"]),
+        (["乐观", "积极", "正面"], ["悲观", "消极", "负面"]),
+        (["加速", "扩大", "扩张"], ["减速", "缩小", "收缩"]),
+    ]
+
     def _check_cross_chapter_consistency(self, sections: List[Any]) -> float:
         """
-        Q-FIX-2: Full-text numeric contradiction detection across chapters.
+        Q-FIX-2: Full-text numeric + directional contradiction detection across chapters.
         Extracts (metric, value) pairs from ALL sections and detects conflicts (>5% difference).
+        Also detects directional word contradictions (看涨 vs 看空).
         Only compares entries with the same year AND caliber.
         """
         if not sections or len(sections) < 2:
@@ -670,13 +677,16 @@ class ReportQualityChecker(BaseQualityChecker):
         
         from collections import defaultdict
         
-        metric_values = defaultdict(list)  # {metric_year_caliber: [(value, section_id), ...]}
-        
+        metric_values = defaultdict(list)
+
+        section_texts = []
         for idx, s in enumerate(sections):
             text = s.get("content", "") if isinstance(s, dict) else (s if isinstance(s, str) else "")
             sid = s.get("id", f"section_{idx}") if isinstance(s, dict) else f"section_{idx}"
             if not text:
                 continue
+            section_texts.append((sid, text))
+
             
             for pattern, metric_name in self._METRIC_PATTERNS_FOR_CROSS_CHECK:
                 for match in re.finditer(pattern, text):
@@ -697,9 +707,6 @@ class ReportQualityChecker(BaseQualityChecker):
                     except (ValueError, IndexError):
                         continue
         
-        if not metric_values:
-            return 70.0
-        
         contradictions = 0
         total = 0
         for key, entries in metric_values.items():
@@ -715,10 +722,35 @@ class ReportQualityChecker(BaseQualityChecker):
                     contradictions += 1
                     logger.warning(f"Cross-chapter numeric contradiction: {key} values={values}")
         
-        if total == 0:
+        directional_contradictions = 0
+        if len(section_texts) >= 2:
+            all_words = []
+            for sid, text in section_texts:
+                for pos_group, neg_group in self._DIRECTIONAL_CONTRADICTION_PAIRS:
+                    pos_found = [w for w in pos_group if w in text]
+                    neg_found = [w for w in neg_group if w in text]
+                    all_words.append((sid, pos_found, neg_found))
+            for i in range(len(all_words)):
+                for j in range(i + 1, len(all_words)):
+                    sid_a, pos_a, neg_a = all_words[i]
+                    sid_b, pos_b, neg_b = all_words[j]
+                    if pos_a and neg_b or neg_a and pos_b:
+                        directional_contradictions += 1
+                        logger.warning(
+                            f"Cross-chapter directional contradiction: "
+                            f"{sid_a}({pos_a+neg_a}) vs {sid_b}({pos_b+neg_b})"
+                        )
+
+        if total == 0 and directional_contradictions == 0:
             return 100.0
-        
-        score = max(0.0, 100.0 - (contradictions / total) * 100)
+
+        if total > 0:
+            numeric_penalty = (contradictions / total) * 100
+        else:
+            numeric_penalty = 0
+        directional_penalty = directional_contradictions * 55
+
+        score = max(0.0, 100.0 - numeric_penalty - directional_penalty)
         return score
     
     # ── 维度 3: Data redundancy ────────────────────────

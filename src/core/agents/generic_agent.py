@@ -88,31 +88,51 @@ def _load_quality_rubric() -> str:
 COGNITIVE_STRATEGY = {
     "fact_driven": {
         "L1": {"dimension_ceiling": "inferential", "speculative_word_downgrade": "strict", "confidence_threshold": {"factual": "HIGH"}},
-        "L2": {"caliber_floor_for_citation": "llm_inference_factual", "same_caliber_resolution": "newer_timestamp", "speculative_write_policy": "never"},
-        "L3": {"speculative_policy": "reference_only", "reasoning_mode": "cross_validation", "inferential_instruction": "用数据验证推断，标注未经验证的主张", "falsification_requirement": "all_inferential", "evidence_chain_template": "数据 → 发现 → 确认", "cross_dimension_instruction": "与其他事实维度交叉验证", "insight_instruction": "寻找数据中隐含的反直觉模式"},
+        "L2": {"caliber_floor_for_citation": "llm_inference_factual",  # _DEFERRED: not consumed by communication.py
+             "same_caliber_resolution": "newer_timestamp",           # _DEFERRED: TODO in communication.py:204
+             "speculative_write_policy": "never"},                    # _DEFERRED: TODO in communication.py:204
+        "L3": {"speculative_policy": "reference_only", "reasoning_mode": "cross_validation",                  # _DEFERRED: not consumed by any code
+             "inferential_instruction": "用数据验证推断，标注未经验证的主张", "falsification_requirement": "all_inferential",  # _DEFERRED: not enforced at runtime
+             "evidence_chain_template": "数据 → 发现 → 确认", "cross_dimension_instruction": "与其他事实维度交叉验证", "insight_instruction": "寻找数据中隐含的反直觉模式"},
         "L4": {"hypothesis_type": "描述性", "hypothesis_count": (1, 2), "hypothesis_template": "【数据观察H1】 → 【支持证据】→ 【确认/否定】→ 【发现】", "counter_hypothesis_required": False, "agent_hypothesis_count": 0, "verification_focus": "Data accuracy", "output_suffix": "数据验证结果"},
-        "L5": {"contradiction_resolution": "Data conflict resolution", "contradiction_instruction": "两项事实性主张冲突，请：(1)判断哪个数据源更可信并说明理由 (2)解释矛盾产生的可能原因（数据口径差异、统计时间窗口不同、样本偏差等）(3)说明该矛盾对本维度结论的影响程度", "auto_resolve_threshold": 0.8, "escalation_action": "Flag for human review"},
+        "L5": {"contradiction_resolution": "Data conflict resolution", "contradiction_instruction": "两项事实性主张冲突，请：(1)判断哪个数据源更可信并说明理由 (2)解释矛盾产生的可能原因（数据口径差异、统计时间窗口不同、样本偏差等）(3)说明该矛盾对本维度结论的影响程度", "auto_resolve_threshold": 0.8,    # _DEFERRED: spec v1.3 Section 4.6 Note 2
+             "escalation_action": "Flag for human review"},  # _DEFERRED: spec v1.3 Section 4.6 Note 2
     },
     "inference_driven": {
         "L1": {"dimension_ceiling": "speculative", "speculative_word_downgrade": "moderate", "confidence_threshold": {"factual": "MEDIUM"}},
-        "L2": {"caliber_floor_for_citation": "llm_inference_speculative", "same_caliber_resolution": "higher_source_count", "speculative_write_policy": "with_uncertainty_tag"},
-        "L3": {"speculative_policy": "cautious_use", "reasoning_mode": "causal_chain", "inferential_instruction": "Build causal chain; check premises", "falsification_requirement": "speculative_only", "evidence_chain_template": "前提 → 推理 → 结论", "cross_dimension_instruction": "Trace causal transmission from other dimensions", "insight_instruction": "在假设验证之外，关注假设之间的关联和涌现模式——多个假设的交叉验证可能揭示比单个假设更深层的关系"},
+        "L2": {"caliber_floor_for_citation": "llm_inference_speculative",  # _DEFERRED: not consumed by communication.py
+             "same_caliber_resolution": "higher_source_count",           # _DEFERRED: TODO in communication.py:204
+             "speculative_write_policy": "with_uncertainty_tag"},        # _DEFERRED: TODO in communication.py:204
+        "L3": {"speculative_policy": "cautious_use", "reasoning_mode": "causal_chain",                  # _DEFERRED: not consumed by any code
+             "inferential_instruction": "Build causal chain; check premises", "falsification_requirement": "speculative_only",  # _DEFERRED: not enforced at runtime
+             "evidence_chain_template": "前提 → 推理 → 结论", "cross_dimension_instruction": "Trace causal transmission from other dimensions", "insight_instruction": "在假设验证之外，关注假设之间的关联和涌现模式——多个假设的交叉验证可能揭示比单个假设更深层的关系"},
         "L4": {"hypothesis_type": "因果性", "hypothesis_count": (3, 5), "hypothesis_template": "【因果假设H1】 → 【支持证据】→ 【确认/修正/推翻】→ 【结论】", "counter_hypothesis_required": True, "agent_hypothesis_count": 2, "verification_focus": "Logic completeness", "output_suffix": "假设验证结果"},
-        "L5": {"contradiction_resolution": "Premise re-examination", "contradiction_instruction": "两项结论冲突，请追溯哪个前提或推理步骤出现了分歧，并分析：(1)分歧前提的具体内容 (2)各前提的支撑证据强度 (3)修正前提后结论如何变化", "auto_resolve_threshold": 0.6, "escalation_action": "Inject as reasoning challenge"},
+        "L5": {"contradiction_resolution": "Premise re-examination", "contradiction_instruction": "两项结论冲突，请追溯哪个前提或推理步骤出现了分歧，并分析：(1)分歧前提的具体内容 (2)各前提的支撑证据强度 (3)修正前提后结论如何变化", "auto_resolve_threshold": 0.6,    # _DEFERRED: spec v1.3 Section 4.6 Note 2
+             "escalation_action": "Inject as reasoning challenge"},  # _DEFERRED: spec v1.3 Section 4.6 Note 2
     },
     "forward_looking": {
         "L1": {"dimension_ceiling": None, "speculative_word_downgrade": "relaxed", "confidence_threshold": {"speculative": "LOW"}},
-        "L2": {"caliber_floor_for_citation": "llm_inference_speculative", "same_caliber_resolution": "wider_coverage", "speculative_write_policy": "with_falsification_condition"},
-        "L3": {"speculative_policy": "open_use", "reasoning_mode": "scenario_analysis", "inferential_instruction": "Map to scenarios; assign probabilities", "falsification_requirement": "all_claims", "evidence_chain_template": "信号 → 情景 → 概率", "cross_dimension_instruction": "Check consistency with other forward-looking claims", "insight_instruction": "在情景推演之外，关注不同情景之间的转折信号——什么条件变化会导致从一种情景切换到另一种，这些转折点往往是最有价值的洞察"},
+        "L2": {"caliber_floor_for_citation": "llm_inference_speculative",  # _DEFERRED: not consumed by communication.py
+             "same_caliber_resolution": "wider_coverage",              # _DEFERRED: TODO in communication.py:204
+             "speculative_write_policy": "with_falsification_condition"},  # _DEFERRED: TODO in communication.py:204
+        "L3": {"speculative_policy": "open_use", "reasoning_mode": "scenario_analysis",                  # _DEFERRED: not consumed by any code
+             "inferential_instruction": "Map to scenarios; assign probabilities", "falsification_requirement": "all_claims",  # _DEFERRED: not enforced at runtime
+             "evidence_chain_template": "信号 → 情景 → 概率", "cross_dimension_instruction": "Check consistency with other forward-looking claims", "insight_instruction": "在情景推演之外，关注不同情景之间的转折信号——什么条件变化会导致从一种情景切换到另一种，这些转折点往往是最有价值的洞察"},
         "L4": {"hypothesis_type": "预测性", "hypothesis_count": (2, 3), "hypothesis_template": "【预测性假设H1】 → 【支持信号】→ 【概率评估】→ 【情景】", "counter_hypothesis_required": True, "agent_hypothesis_count": 1, "verification_focus": "Falsification conditions", "output_suffix": "前瞻验证结果"},
-        "L5": {"contradiction_resolution": "Scenario reconciliation", "contradiction_instruction": "两项预测冲突，请分析在什么条件下各自成立，并给出情景分析：(1)各预测成立的条件集 (2)当前数据更支持哪个条件集 (3)两个预测是否可以在不同时间尺度上同时成立", "auto_resolve_threshold": 0.4, "escalation_action": "Present both scenarios"},
+        "L5": {"contradiction_resolution": "Scenario reconciliation", "contradiction_instruction": "两项预测冲突，请分析在什么条件下各自成立，并给出情景分析：(1)各预测成立的条件集 (2)当前数据更支持哪个条件集 (3)两个预测是否可以在不同时间尺度上同时成立", "auto_resolve_threshold": 0.4,    # _DEFERRED: spec v1.3 Section 4.6 Note 2
+             "escalation_action": "Present both scenarios"},  # _DEFERRED: spec v1.3 Section 4.6 Note 2
     },
     "assessment_driven": {
         "L1": {"dimension_ceiling": None, "speculative_word_downgrade": "relaxed", "confidence_threshold": {"factual": "HIGH", "inferential": "MEDIUM", "speculative": "LOW"}},
-        "L2": {"caliber_floor_for_citation": "llm_inference_speculative", "same_caliber_resolution": "wider_coverage", "speculative_write_policy": "with_falsification_condition"},
-        "L3": {"speculative_policy": "open_use", "reasoning_mode": "risk_scenario", "inferential_instruction": "Build risk scenarios from cross-dimension signals", "falsification_requirement": "key_risks_only", "evidence_chain_template": "风险触发条件 → 传导路径 → 影响评估 → 应对策略", "cross_dimension_instruction": "Map cross-dimension claims to risk scenarios, must reference them explicitly", "insight_instruction": "深入分析每个风险的作用机制和传导路径，识别风险间的关联和级联效应"},
+        "L2": {"caliber_floor_for_citation": "llm_inference_speculative",  # _DEFERRED: not consumed by communication.py
+             "same_caliber_resolution": "wider_coverage",              # _DEFERRED: TODO in communication.py:204
+             "speculative_write_policy": "with_falsification_condition"},  # _DEFERRED: TODO in communication.py:204
+        "L3": {"speculative_policy": "open_use", "reasoning_mode": "risk_scenario",                    # _DEFERRED: not consumed by any code
+             "inferential_instruction": "Build risk scenarios from cross-dimension signals", "falsification_requirement": "key_risks_only",  # _DEFERRED: not enforced at runtime
+             "evidence_chain_template": "风险触发条件 → 传导路径 → 影响评估 → 应对策略", "cross_dimension_instruction": "Map cross-dimension claims to risk scenarios, must reference them explicitly", "insight_instruction": "深入分析每个风险的作用机制和传导路径，识别风险间的关联和级联效应"},
         "L4": {"hypothesis_type": "风险情景", "hypothesis_count": (1, 2), "hypothesis_template": "【风险情景H1】 → 【触发条件】→ 【传导路径】→ 【影响评估】", "counter_hypothesis_required": False, "agent_hypothesis_count": 0, "verification_focus": "Scenario plausibility", "output_suffix": "风险情景评估"},
-        "L5": {"contradiction_resolution": "Risk scenario reconciliation", "contradiction_instruction": "两项评估冲突，请分析：(1)各评估隐含的风险情景 (2)当前数据更支持哪个情景 (3)是否可在不同条件下先后发生", "auto_resolve_threshold": 0.5, "escalation_action": "Present both risk scenarios with probability"},
+        "L5": {"contradiction_resolution": "Risk scenario reconciliation", "contradiction_instruction": "两项评估冲突，请分析：(1)各评估隐含的风险情景 (2)当前数据更支持哪个情景 (3)是否可在不同条件下先后发生", "auto_resolve_threshold": 0.5,    # _DEFERRED: spec v1.3 Section 4.6 Note 2
+             "escalation_action": "Present both risk scenarios with probability"},  # _DEFERRED: spec v1.3 Section 4.6 Note 2
     },
 }
 
@@ -1743,11 +1763,31 @@ class GenericAgent(
         
         L1: Each claim is annotated with epistemic_level (factual/inferential/speculative)
         and falsification condition. Rule-based validation enforces consistency.
-        L1-C: Head-tail truncation preserves conclusion section.
+        L1-C: Paragraph-level sliding window preserves key middle conclusions.
         L1-D: Dimension-level epistemic ceiling prevents misclassification.
         """
         if len(analysis_content) > 3000:
-            _truncated = analysis_content[:2500] + "\n\n...[中间省略]...\n\n" + analysis_content[-500:]
+            _paragraphs = [p for p in analysis_content.split("\n\n") if p.strip()]
+            if len(_paragraphs) <= 5:
+                _truncated = analysis_content[:2500] + "\n\n...[中间省略]...\n\n" + analysis_content[-500:]
+            else:
+                _head = "\n\n".join(_paragraphs[:2])
+                _tail = "\n\n".join(_paragraphs[-2:])
+                _key_patterns = ["结论", "发现", "验证", "结果", "综上", "因此", "表明", "证明"]
+                _mid_candidates = []
+                for p in _paragraphs[2:-2]:
+                    if any(kw in p for kw in _key_patterns):
+                        _mid_candidates.append(p)
+                _mid = "\n\n".join(_mid_candidates[:2]) if _mid_candidates else ""
+                _parts = [_head]
+                if _mid:
+                    _parts.append("...[关键中间段落]...")
+                    _parts.append(_mid)
+                _parts.append("...[中间省略]...")
+                _parts.append(_tail)
+                _truncated = "\n\n".join(_parts)
+                if len(_truncated) > 3000:
+                    _truncated = analysis_content[:2500] + "\n\n...[中间省略]...\n\n" + analysis_content[-500:]
         else:
             _truncated = analysis_content
 
@@ -2060,7 +2100,7 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
             content_b = bigrams_b - dir_bigrams
             if content_a and content_b:
                 overlap = len(content_a & content_b) / max(len(content_a), 1)
-                if overlap > 0.15:
+                if overlap > 0.25:
                     return True
         
         return False
@@ -2116,11 +2156,11 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
                 else:
                     return None
             
-            logger.debug(f"GenericAgent L5: LLM output not valid JSON, falling back to heuristic: {content[:100]}")
+            logger.debug(f"GenericAgent L5: LLM output not valid JSON, skipping contradiction report: {content[:100]}")
         except Exception as e:
-            logger.debug(f"GenericAgent L5: LLM call failed, falling back to heuristic: {e}")
+            logger.debug(f"GenericAgent L5: LLM call failed, skipping contradiction report: {e}")
         
-        return f"方向矛盾(启发式): '{stmt_a[:50]}' vs '{stmt_b[:50]}'"
+        return None
 
     def _enforce_canonical_values(self, content: str, canonical_data: Dict) -> str:
         """

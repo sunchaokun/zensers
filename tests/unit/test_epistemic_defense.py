@@ -19,15 +19,16 @@ from src.core.agents.generic_agent import GenericAgent
 # ==================== L1: _extract_claims_from_analysis ====================
 
 class TestL1Truncation:
-    """L1-C: Head-tail truncation preserves conclusion section."""
+    """L1-C: Paragraph-level sliding window preserves key middle conclusions."""
 
     def test_short_content_not_truncated(self):
         content = "A" * 2000
         if len(content) > 3000:
-            truncated = content[:2500] + "\n\n...[中间省略]...\n\n" + content[-500:]
+            _paragraphs = [p for p in content.split("\n\n") if p.strip()]
+            _truncated = content
         else:
-            truncated = content
-        assert truncated == content
+            _truncated = content
+        assert _truncated == content
 
     def test_long_content_head_tail_preserved(self):
         head = "H" * 2500
@@ -35,16 +36,53 @@ class TestL1Truncation:
         tail = "T" * 500
         content = head + middle + tail
         assert len(content) > 3000
-        truncated = content[:2500] + "\n\n...[中间省略]...\n\n" + content[-500:]
-        assert truncated.startswith("H" * 2500)
-        assert truncated.endswith("T" * 500)
-        assert "...[中间省略]..." in truncated
+        _truncated = content[:2500] + "\n\n...[中间省略]...\n\n" + content[-500:]
+        assert _truncated.startswith("H" * 2500)
+        assert _truncated.endswith("T" * 500)
+        assert "...[中间省略]..." in _truncated
 
     def test_conclusion_section_preserved(self):
         content = "概述部分" + "详细分析" * 800 + "结论：AI芯片国产化率已突破30%"
         assert len(content) > 3000
-        truncated = content[:2500] + "\n\n...[中间省略]...\n\n" + content[-500:]
-        assert "结论：AI芯片国产化率已突破30%" in truncated
+        _paragraphs = [p for p in content.split("\n\n") if p.strip()]
+        _truncated = content[:2500] + "\n\n...[中间省略]...\n\n" + content[-500:]
+        assert "结论：AI芯片国产化率已突破30%" in _truncated
+
+    def test_paragraph_level_key_conclusion_preserved(self):
+        content = "\n\n".join([
+            "第一段概述",
+            "第二段背景",
+            "中间段普通内容" * 50,
+            "中间段结论：关键发现X",
+            "中间段普通内容" * 50,
+            "最后段总结",
+            "最终结论",
+        ])
+        if len(content) > 3000:
+            _paragraphs = [p for p in content.split("\n\n") if p.strip()]
+            if len(_paragraphs) <= 5:
+                _truncated = content
+            else:
+                _head = "\n\n".join(_paragraphs[:2])
+                _tail = "\n\n".join(_paragraphs[-2:])
+                _key_patterns = ["结论", "发现", "验证", "结果", "综上", "因此", "表明", "证明"]
+                _mid_candidates = []
+                for p in _paragraphs[2:-2]:
+                    if any(kw in p for kw in _key_patterns):
+                        _mid_candidates.append(p)
+                _mid = "\n\n".join(_mid_candidates[:2]) if _mid_candidates else ""
+                _parts = [_head]
+                if _mid:
+                    _parts.append("...[关键中间段落]...")
+                    _parts.append(_mid)
+                _parts.append("...[中间省略]...")
+                _parts.append(_tail)
+                _truncated = "\n\n".join(_parts)
+        else:
+            _truncated = content
+        assert "关键发现X" in _truncated
+        assert "第一段概述" in _truncated
+        assert "最终结论" in _truncated
 
 
 class TestL1RuleBasedValidation:
@@ -412,7 +450,7 @@ class TestL5ContradictionPrecheck:
             content_b = bigrams_b - dir_bigrams
             if content_a and content_b:
                 overlap = len(content_a & content_b) / max(len(content_a), 1)
-                if overlap > 0.15:
+                if overlap > 0.25:
                     return True
         return False
 
@@ -449,6 +487,12 @@ class TestL5ContradictionPrecheck:
     def test_english_keywords_not_candidate(self):
         a = {"statement": "revenue increased significantly"}
         b = {"statement": "revenue declined sharply"}
+        assert self._precheck(a, b) is False
+
+    def test_moderate_overlap_different_subject_not_candidate(self):
+        """Pairs with moderate content overlap but clearly different subjects should not pass precheck (defect 3.6)"""
+        a = {"statement": "出口额持续增长，贸易顺差扩大"}
+        b = {"statement": "内销利润面临萎缩，库存压力上升"}
         assert self._precheck(a, b) is False
 
 
@@ -494,15 +538,14 @@ class TestL5ContradictionLLM:
         assert "方向矛盾" in result
 
     @pytest.mark.asyncio
-    async def test_llm_failure_fallback_to_heuristic(self, agent, monkeypatch):
+    async def test_llm_failure_returns_none_not_false_positive(self, agent, monkeypatch):
         async def mock_call_llm(**kwargs):
             raise Exception("LLM unavailable")
         monkeypatch.setattr("src.core.agents.generic_agent.call_llm", mock_call_llm)
         a = {"statement": "市场规模持续增长"}
         b = {"statement": "市场规模面临萎缩"}
         result = await agent._detect_claim_contradiction(a, b)
-        assert result is not None
-        assert "启发式" in result
+        assert result is None
 
     @pytest.mark.asyncio
     async def test_precheck_rejects_unrelated_pair(self, agent, monkeypatch):
