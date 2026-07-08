@@ -27,6 +27,9 @@ class ConversationState(Enum):
     CANCELLED = "cancelled"               # 已取消（终态）
     PREVIEWING = "previewing"             # 预览报告
     COMPLETED = "completed"               # 完成
+    DATA_EXTRACTED = "data_extracted"           # 数据已提取
+    REQUIREMENT_CONFIRM = "requirement_confirm"  # 确认PPT需求
+    DATA_SUPPLEMENT = "data_supplement"          # 补充数据缺口
 
 
 class InvalidTransitionError(Exception):
@@ -48,6 +51,7 @@ class ConversationStateMachine:
             ConversationState.CLARIFYING,
             ConversationState.EXECUTING,
             ConversationState.FRAMEWORK_CONFIRM,
+            ConversationState.DATA_EXTRACTED,
             ConversationState.CANCELLED,
         ],
         ConversationState.CLARIFYING: [
@@ -88,6 +92,26 @@ class ConversationStateMachine:
         ],
         ConversationState.COMPLETED: [
             ConversationState.COMPLETED,    # 终态
+        ],
+        ConversationState.DATA_EXTRACTED: [
+            ConversationState.DATA_EXTRACTED,
+            ConversationState.REQUIREMENT_CONFIRM,
+            ConversationState.CLARIFYING,
+            ConversationState.EXECUTING,
+            ConversationState.CANCELLED,
+        ],
+        ConversationState.REQUIREMENT_CONFIRM: [
+            ConversationState.REQUIREMENT_CONFIRM,
+            ConversationState.DATA_SUPPLEMENT,
+            ConversationState.FRAMEWORK_CONFIRM,
+            ConversationState.CLARIFYING,
+            ConversationState.CANCELLED,
+        ],
+        ConversationState.DATA_SUPPLEMENT: [
+            ConversationState.DATA_SUPPLEMENT,
+            ConversationState.FRAMEWORK_CONFIRM,
+            ConversationState.CLARIFYING,
+            ConversationState.CANCELLED,
         ],
     }
     
@@ -291,6 +315,19 @@ class ConversationStateMachine:
         if self.current_state == ConversationState.FRAMEWORK_CONFIRM:
             if intent_state.readiness_level in (ReadinessLevel.INSUFFICIENT, ReadinessLevel.PARTIAL):
                 return ConversationState.CLARIFYING
+            return None
+
+        if self.current_state == ConversationState.DATA_EXTRACTED:
+            return None
+
+        if self.current_state == ConversationState.REQUIREMENT_CONFIRM:
+            if intent_state.readiness_level == ReadinessLevel.SUFFICIENT:
+                return ConversationState.DATA_SUPPLEMENT
+            return None
+
+        if self.current_state == ConversationState.DATA_SUPPLEMENT:
+            if intent_state.readiness_level == ReadinessLevel.SUFFICIENT:
+                return ConversationState.FRAMEWORK_CONFIRM
             return None
 
         return None

@@ -4,6 +4,36 @@
 
 ---
 
+## [3.2.0] - 2026-07-08
+
+### PPT Data-Driven Generation Pipeline
+
+Full pipeline: user uploads files (DOCX/PDF/Excel/TXT/CSV/JSON) → extract data → confirm intent → supplement gaps → generate PPT. 317 new tests, 0 regressions.
+
+**Core Components (P0-P3):**
+- `extraction_types.py`: ExtractionResult, ExtractionSummary, SectionSummary, DataParser ABC
+- `ppt_input_adapter.py`: PptInputAdapter + 7 DataParser subclasses (docx/pdf/xlsx/xls/txt/md/csv/json)
+- `ppt_requirement_extractor.py`: PptRequirement, PptRequirementExtractor with Chinese topic regex
+- `ppt_data_supplementer.py`: DataGap, PptDataSupplementer with gap analysis + mock search
+- `SlideDataBuilder`: 13-field slide_data schema with cover/end auto-generation
+- `IntentType.PPT_GENERATION`: New intent type for PPT generation routing
+- `ConversationState`: DATA_EXTRACTED, REQUIREMENT_CONFIRM, DATA_SUPPLEMENT states + transitions
+
+**API Integration:**
+- `POST /api/v1/research/start` now accepts `file_ids: Optional[str]` with JSON parsing, file validation, size limits (100MB/file, 300MB total)
+- `research_api.py`: extraction flow, extraction summary builder, dialogue context for new states, state-mode sync, transition resolution
+
+**Bug Fixes (Code Audit):**
+- `CsvDataParser.key_topics` returned double-wrapped `List[List[str]]` → fixed to `List[str]`
+- `_build_extraction_summary.has_table` incorrectly checked `s.charts` → fixed to check tables
+- `total_pages` only counted "Page " prefixed titles → fixed to use `metadata.get("page_count", len(sections))`
+
+**Test Coverage:**
+- 257 adjustment unit tests, 23 state/intent tests, 13 API tests, 11 integration tests, 13 E2E tests
+- Total: 317 new tests, all passing, 0 regressions
+
+---
+
 ## [3.1.0] - 2026-07-08
 
 ### Quality System Code Audit: 15 Defect Fixes + 1 Feature Enhancement

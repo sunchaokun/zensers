@@ -227,7 +227,8 @@ async def start_research(user_input: str = Form(...), user_id: Optional[str] = F
                          llm_temperature: Optional[float] = Form(None), llm_max_tokens: Optional[int] = Form(None),
                          llm_top_p: Optional[float] = Form(None),
                          llm_frequency_penalty: Optional[float] = Form(None),
-                         llm_presence_penalty: Optional[float] = Form(None)):
+                         llm_presence_penalty: Optional[float] = Form(None),
+                         file_ids: Optional[str] = Form(None)):
     from src.config.settings import settings
     llm_config: Dict[str, Any] = {}
     if llm_provider:
@@ -250,7 +251,35 @@ async def start_research(user_input: str = Form(...), user_id: Optional[str] = F
         llm_config["presence_penalty"] = llm_presence_penalty
 
     settings.update_from_request(llm_config)
-    return await research_api.start_research(user_input, user_id, llm_config)
+
+    parsed_file_ids = None
+    if file_ids:
+        try:
+            fid_list = json.loads(file_ids)
+            if not isinstance(fid_list, list):
+                raise HTTPException(status_code=400, detail="file_ids must be a JSON array")
+            parsed_file_ids = []
+            for fid in fid_list:
+                candidates = list(_upload_dir.glob(f"{fid}.*"))
+                if not candidates:
+                    raise HTTPException(status_code=400, detail=f"File not found: {fid}")
+                candidate = candidates[0]
+                file_size_mb = candidate.stat().st_size / (1024 * 1024)
+                if file_size_mb > 100:
+                    raise HTTPException(status_code=413, detail=f"File {candidate.name} too large: {file_size_mb:.1f}MB (max 100MB)")
+                parsed_file_ids.append({
+                    "id": fid,
+                    "path": str(candidate),
+                    "filename": candidate.name,
+                    "size_mb": round(file_size_mb, 1),
+                })
+            total_size_mb = sum(f["size_mb"] for f in parsed_file_ids)
+            if total_size_mb > 300:
+                raise HTTPException(status_code=413, detail=f"Total file size too large: {total_size_mb:.1f}MB (max 300MB)")
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="Invalid file_ids JSON")
+
+    return await research_api.start_research(user_input, user_id, llm_config, parsed_file_ids)
 
 
 @app.post("/api/v1/research/{task_id}/pause")
@@ -580,6 +609,8 @@ def list_all_sessions(limit: int = 20, offset: int = 0):
                         "framework_confirm": "analyzing", "executing": "reporting",
                         "paused": "paused", "previewing": "completed",
                         "completed": "completed", "cancelled": "paused",
+                        "data_extracted": "analyzing", "requirement_confirm": "analyzing",
+                        "data_supplement": "analyzing",
                     }
                     state = status_map.get(state_machine.current_state.value, "paused")
                 else:
@@ -632,6 +663,8 @@ async def get_research_detail(task_id: str):
             "framework_confirm": "analyzing", "executing": "reporting",
             "paused": "paused", "previewing": "completed",
             "completed": "completed", "cancelled": "paused",
+            "data_extracted": "analyzing", "requirement_confirm": "analyzing",
+            "data_supplement": "analyzing",
         }
         state = status_map.get(state_machine.current_state.value, "analyzing")
         # If state_machine says executing but task already finished, correct to completed

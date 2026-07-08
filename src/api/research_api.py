@@ -312,7 +312,7 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
                     context[key] = value
             session['research_context'] = context
 
-    async def start_research(self, user_input, user_id, llm_config):
+    async def start_research(self, user_input, user_id, llm_config, file_ids=None):
         """
         
         Start research dialogue
@@ -330,6 +330,28 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
         detected_lang = detect_language(user_input).value
         session_manager.create(session_id, {'user_input': user_input, 'user_id': user_id, 'state_machine': state_machine, 'clarifier': SmartClarifier(), 'created_at': datetime.now(), 'current_step': 0, 'mode': 'chat', 'llm_config': llm_config, 'language': detected_lang, '_session_id': session_id, 'conversation_history': [], 'research_context': {'topic': None, 'directions': [], 'framework': None, 'details': {}}})
         set_global_language(Language(detected_lang))
+
+        if file_ids:
+            from src.core.adjustment.ppt_input_adapter import PptInputAdapter
+            file_paths = [f["path"] for f in file_ids]
+            try:
+                adapter = PptInputAdapter()
+                extraction_result = adapter.extract(file_paths)
+                summary = self._build_extraction_summary(extraction_result, file_ids)
+                state_machine.transition(ConversationState.DATA_EXTRACTED)
+                session = session_manager.get(session_id)
+                if session:
+                    ctx = session.get('research_context', {})
+                    ctx['extraction_result'] = extraction_result
+                    ctx['extraction_summary'] = summary
+                    ctx['file_ids'] = file_ids
+                    session['research_context'] = ctx
+                    session['mode'] = 'chat'
+                summary_text = self._format_extraction_summary_message(summary)
+                return self._chat_response(session_id, summary_text)
+            except Exception as e:
+                logger.warning(f"File extraction failed, falling back to normal research: {e}")
+
         return await self._handle_user_message(session_id, user_input)
 
     async def _handle_user_message(self, session_id, user_input, skip_lang_detect=False):
@@ -772,6 +794,12 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
         elif state == ConversationState.COMPLETED:
             if session.get('mode') != 'chat':
                 session['mode'] = 'chat'
+        elif state in (ConversationState.DATA_EXTRACTED, ConversationState.REQUIREMENT_CONFIRM):
+            if session.get('mode') != 'chat':
+                session['mode'] = 'chat'
+        elif state == ConversationState.DATA_SUPPLEMENT:
+            if session.get('mode') != 'chat':
+                session['mode'] = 'chat'
 
     def _action_aligns_with_state(self, llm_action, target_state):
         """continue_chat"""
@@ -784,13 +812,61 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
             return ConversationState.FRAMEWORK_CONFIRM
         if llm_action == 'modify_research':
             return ConversationState.PAUSED
+        if llm_action == 'confirm_requirements':
+            return ConversationState.DATA_SUPPLEMENT
+        if llm_action == 'enter_ppt_generation':
+            return ConversationState.REQUIREMENT_CONFIRM
         return None
 
     def _build_dialogue_context(self, conversation_state):
         """Build dialogue phase guidance (without intent state injection)"""
-        state_guidance = {ConversationState.UNDERSTANDING: '## Current Dialogue Phase: Understanding\nFocus on understanding the user\'s research need.\n- If the request is vague, ask 1-2 targeted questions.\n- Do NOT propose a research framework yet.\n- NEVER use "revise_report" — research has not started yet.\n', ConversationState.CLARIFYING: '## Current Dialogue Phase: Clarifying\nThe topic is identified but details may be missing.\n- Ask focused questions about specific gaps. Max 2 per turn.\n- If enough information, you may propose a framework.\n- NEVER use "revise_report" — research has not started yet.\n', ConversationState.FRAMEWORK_CONFIRM: '## Current Dialogue Phase: Framework Confirmation\nRequirements are clear. Propose a research framework.\n- Use action="enter_framework" with framework_sections.\n- If the topic has natural sub-structure (e.g., industry segments, regional breakdowns), also output "framework_tree" with hierarchical section→sub_section→points structure.\n', ConversationState.EXECUTING: '## Current Dialogue Phase: Research Executing\nResearch is actively running with professional agents working.\nCRITICAL RULES for action selection:\n- Default action: "continue_chat" — for confirmations, greetings, simple questions, status queries.\n- "inject_requirement" — ONLY when user clearly asks to add/remove/supplement sections.\n- "modify_research" — ONLY when user EXPLICITLY uses words like 修改/调整/修订/adjust/modify. Do NOT use this for vague suggestions.\n- "enter_framework" — ONLY when user EXPLICITLY uses words like 重新规划/重新开始/换个方向/restart/redesign. NEVER use this for simple messages like "继续" or "好的".\n- NEVER use "revise_report" — use "inject_requirement" instead for mid-research modifications.\n- When in doubt, use "continue_chat" with a brief reassuring message.\n', ConversationState.PAUSED: '## Current Dialogue Phase: Research Paused\nResearch was interrupted. Cached data available.\n- Resume → resume_research; Modify → modify_research; Chat → continue_chat.\n- NEVER use "revise_report" — research is not complete yet.\n', ConversationState.PREVIEWING: '## Current Dialogue Phase: Report Preview\nReport is being previewed.\n- Handle user feedback on the report.\n- Use "revise_report" when user asks to modify specific content in the report (e.g., 修改某节, 更新数据, 调整结论).\n', ConversationState.CANCELLED: '## Current Dialogue Phase: Research Cancelled\nResearch was cancelled and cannot be resumed.\n- NEVER use "revise_report" — there is no report to revise.\n- If user wants to start over, use "enter_framework".\n', ConversationState.COMPLETED: '## Current Dialogue Phase: Research Completed\nResearch and report generation are complete.\n- Use "revise_report" when user asks to modify specific content in the report.\n- Use "regenerate_report" when user asks to regenerate the entire report.\n- Use "enter_framework" when user asks to start a completely new research.\n'}
+        state_guidance = {ConversationState.UNDERSTANDING: '## Current Dialogue Phase: Understanding\nFocus on understanding the user\'s research need.\n- If the request is vague, ask 1-2 targeted questions.\n- Do NOT propose a research framework yet.\n- NEVER use "revise_report" — research has not started yet.\n', ConversationState.CLARIFYING: '## Current Dialogue Phase: Clarifying\nThe topic is identified but details may be missing.\n- Ask focused questions about specific gaps. Max 2 per turn.\n- If enough information, you may propose a framework.\n- NEVER use "revise_report" — research has not started yet.\n', ConversationState.FRAMEWORK_CONFIRM: '## Current Dialogue Phase: Framework Confirmation\nRequirements are clear. Propose a research framework.\n- Use action="enter_framework" with framework_sections.\n- If the topic has natural sub-structure (e.g., industry segments, regional breakdowns), also output "framework_tree" with hierarchical section→sub_section→points structure.\n', ConversationState.EXECUTING: '## Current Dialogue Phase: Research Executing\nResearch is actively running with professional agents working.\nCRITICAL RULES for action selection:\n- Default action: "continue_chat" — for confirmations, greetings, simple questions, status queries.\n- "inject_requirement" — ONLY when user clearly asks to add/remove/supplement sections.\n- "modify_research" — ONLY when user EXPLICITLY uses words like 修改/调整/修订/adjust/modify. Do NOT use this for vague suggestions.\n- "enter_framework" — ONLY when user EXPLICITLY uses words like 重新规划/重新开始/换个方向/restart/redesign. NEVER use this for simple messages like "继续" or "好的".\n- NEVER use "revise_report" — use "inject_requirement" instead for mid-research modifications.\n- When in doubt, use "continue_chat" with a brief reassuring message.\n', ConversationState.PAUSED: '## Current Dialogue Phase: Research Paused\nResearch was interrupted. Cached data available.\n- Resume → resume_research; Modify → modify_research; Chat → continue_chat.\n- NEVER use "revise_report" — research is not complete yet.\n', ConversationState.PREVIEWING: '## Current Dialogue Phase: Report Preview\nReport is being previewed.\n- Handle user feedback on the report.\n- Use "revise_report" when user asks to modify specific content in the report (e.g., 修改某节, 更新数据, 调整结论).\n', ConversationState.CANCELLED: '## Current Dialogue Phase: Research Cancelled\nResearch was cancelled and cannot be resumed.\n- NEVER use "revise_report" — there is no report to revise.\n- If user wants to start over, use "enter_framework".\n', ConversationState.COMPLETED: '## Current Dialogue Phase: Research Completed\nResearch and report generation are complete.\n- Use "revise_report" when user asks to modify specific content in the report.\n- Use "regenerate_report" when user asks to regenerate the entire report.\n- Use "enter_framework" when user asks to start a completely new research.\n', ConversationState.DATA_EXTRACTED: '## Current Dialogue Phase: Data Extracted\nUser files have been parsed and a summary was provided.\n- The user has been asked what they want to do with the data.\n- If the user wants a PPT, use action="enter_ppt_generation".\n- If the user wants research/analysis, use action="continue_chat" to proceed with normal research flow.\n- Do NOT propose a framework yet — first determine the user\'s intent.\n', ConversationState.REQUIREMENT_CONFIRM: '## Current Dialogue Phase: Requirement Confirmation\nUser wants to generate a PPT from their data. Clarify PPT requirements.\n- Ask about: audience, focus areas, page count, style preferences.\n- Max 2 questions per turn. Keep it concise.\n- When requirements are clear, use action="confirm_requirements" to proceed to data supplementation.\n- NEVER use "revise_report" — PPT has not been generated yet.\n', ConversationState.DATA_SUPPLEMENT: '## Current Dialogue Phase: Data Supplementation\nChecking for data gaps and supplementing if needed.\n- If the user provides additional data or context, incorporate it.\n- If all gaps are filled, use action="enter_framework" to propose a PPT framework.\n- If the user wants to skip supplementation, use action="enter_framework" directly.\n- NEVER use "revise_report" — PPT has not been generated yet.\n'}
         guidance = state_guidance.get(conversation_state, '')
         return f"""\n{guidance}\n"""
+
+    def _build_extraction_summary(self, extraction_result, file_ids):
+        from src.core.adjustment.extraction_types import ExtractionSummary, SectionSummary
+        sections = [
+            SectionSummary(
+                title=s.title or f"Section {i+1}",
+                page_range="",
+                content_preview=s.content[:100] if s.content else "",
+                has_table=i < len(extraction_result.tables),
+                has_chart=bool(s.charts) if hasattr(s, 'charts') and s.charts else False,
+            )
+            for i, s in enumerate(extraction_result.sections)
+        ]
+        format_types = list(set(
+            f.get("filename", "").rsplit(".", 1)[-1] if "." in f.get("filename", "") else "unknown"
+            for f in file_ids
+        ))
+        return ExtractionSummary(
+            file_count=len(file_ids),
+            total_pages=extraction_result.metadata.get("page_count", len(extraction_result.sections)),
+            format_types=format_types,
+            title=extraction_result.title or None,
+            sections=sections,
+            tables_count=len(extraction_result.tables),
+            charts_count=0,
+            key_topics=extraction_result.key_topics,
+            word_count=sum(len(s.content.split()) for s in extraction_result.sections),
+            extraction_status="success",
+            warnings=[],
+        )
+
+    def _format_extraction_summary_message(self, summary):
+        title_part = f"《{summary.title}》" if summary.title else "您的文档"
+        sections_part = f"{len(summary.sections)}章节" if summary.sections else ""
+        tables_part = f"{summary.tables_count}表" if summary.tables_count else ""
+        topics_part = "、".join(summary.key_topics[:5]) if summary.key_topics else ""
+        msg = f"已读取{summary.file_count}个文件{title_part}"
+        details = [d for d in [sections_part, tables_part] if d]
+        if details:
+            msg += f"，共{'/'.join(details)}"
+        if topics_part:
+            msg += f"。主要涵盖：{topics_part}"
+        msg += "。您想基于这份材料做什么？"
+        return msg
 
     def _sync_state_machine_to_framework(self, session, session_id):
         """state_machine"""

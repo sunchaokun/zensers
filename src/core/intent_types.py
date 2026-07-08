@@ -40,6 +40,7 @@ class IntentType(Enum):
     OPEN_ENDED = "open_ended"          # Open-ended task (exploratory research)
     CLARIFICATION = "clarification"    # Clarification task (requires further user input)
     FORENSIC_ANALYSIS = "forensic_analysis"  # Forensic analysis (explain causality from preloaded data)
+    PPT_GENERATION = "ppt_generation"        # PPT generation task
 
 
 class TaskComplexity(Enum):
