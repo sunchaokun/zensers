@@ -2384,13 +2384,16 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
                         _dp_credibility = "search_result"
                         _src_type = "web"
                         _src_quality = 50
-                    result["data_points"].append({
+                    dp = {
                         "title": f"{identifier} {action}",
                         "content": content,
                         "url": f"{skill_name}://{identifier}/{action}",
                         "quality_score": _dp_quality,
                         "credibility": _dp_credibility,
-                    })
+                    }
+                    if isinstance(data, dict) and data:
+                        dp["data"] = data
+                    result["data_points"].append(dp)
                     result["sources"].append({
                         "title": f"{skill_name} {identifier} {action}",
                         "url": f"{skill_name}://{identifier}/{action}",
@@ -5079,12 +5082,16 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
         for i, dp in enumerate(data_points[:50], 1):
             title = dp.get("title", "")
             raw_content = dp.get("content", "") or ""
+            raw_data = dp.get("data")
             url = dp.get("url", "")
-            is_structured = any(url.startswith(f"{s}://") for s in ("stock_data", "wind_data", "bloomberg_data"))
-            max_len = 800 if is_structured else 300
-            content = raw_content[:max_len]
+            is_structured = any(url.startswith(f"{s}://") for s in ("stock_data", "wind_data", "bloomberg_data", "xueqiu"))
             quality = dp.get("quality_score", 0)
             credibility = dp.get("credibility", "unknown")
+
+            if raw_data and isinstance(raw_data, dict) and raw_data:
+                content = json.dumps(raw_data, ensure_ascii=False, indent=2, default=str)
+            else:
+                content = raw_content
             
             cred_labels = {
                 "tier1_authority": " [AUTHORITY]",
