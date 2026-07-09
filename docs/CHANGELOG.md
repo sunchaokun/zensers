@@ -4,6 +4,25 @@
 
 ---
 
+## [3.4.0] - 2026-07-09
+
+### Fix: Chat History Duplication & Conversation Interruption
+
+Two critical bugs fixed that caused duplicated conversation history and LLM losing context mid-conversation.
+
+**Bug 1: Chat History Duplication (3-layer fix)**
+- **SSE double-put** (`session_streamer.py`): `subscribe()` loaded persisted events into queue twice — once inside the load loop and again in the outer `for msg in recent` loop. Removed the inner `put_nowait` so messages enter the queue exactly once.
+- **Timestamp mismatch** (`useResearch.ts`): HTTP responses used `new Date().toISOString()` while SSE used backend timestamp. `onChatResponse` dedup check `m.timestamp === data.timestamp` never matched. Fixed to use `(data as any).timestamp || new Date().toISOString()`.
+- **addMessage no dedup** (`useChatStore.ts`): `addMessage` unconditionally appended messages. Added `role + content + timestamp` triple dedup check.
+
+**Bug 2: Conversation Interruption / LLM Amnesia (2-layer fix)**
+- **Background tool chain cancelled** (`research_api.py`): `_handle_chat_mode` unconditionally called `_cancel_existing_task()` on every new user message. When user sent "?" during an ongoing search, the entire tool chain was killed and search results lost. Added guard: if a background task is running, queue the new message in `_queued_user_messages` instead of cancelling. After tool chain completes, queued messages are automatically processed.
+- **Frontend allows interrupt** (`ChatInput.tsx`): `isWaitingForReply` state allowed sending new messages, which triggered the backend cancel. Added `if (isWaitingForReply && !isRunning) return;` to block send during search. Updated placeholder to "Searching... please wait for results".
+
+**Tests**: 96 frontend tests passing (4 new dedup tests added), Python syntax verified, SSE double-put and message queue tests passing.
+
+---
+
 ## [3.3.0] - 2026-07-09
 
 ### Skill System Evolution: Manifest-Driven Self-Describing Architecture

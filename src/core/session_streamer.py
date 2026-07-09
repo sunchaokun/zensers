@@ -380,13 +380,11 @@ class SessionStreamer:
                             id=ev.get("created_at"),
                         )
                         recent.append(msg)
-                        try:
-                            self._queue.put_nowait(msg)
-                        except asyncio.QueueFull:
-                            break
             except Exception:
                 pass
 
+        # Put all messages into queue (single pass — fixes double-put bug where
+        # persisted events were put inside the load loop AND again here)
         for msg in recent:
             try:
                 self._queue.put_nowait(msg)

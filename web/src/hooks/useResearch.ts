@@ -178,12 +178,13 @@ export function useResearch() {
 
       setStep(data.step, data.options);
 
+      const respTimestamp = (data as any).timestamp || new Date().toISOString();
       addMessage({
         id: nanoid(),
         role: 'assistant',
         content: data.message,
         ...(data.thinking_content ? { thinkingContent: data.thinking_content } : {}),
-        timestamp: new Date().toISOString(),
+        timestamp: respTimestamp,
       });
 
       return data;
@@ -502,7 +503,7 @@ export function useResearch() {
           role: 'assistant',
           content: data.message,
           ...(data.thinking_content ? { thinkingContent: data.thinking_content } : {}),
-          timestamp: new Date().toISOString(),
+          timestamp: (data as any).timestamp || new Date().toISOString(),
         });
         
         return data;

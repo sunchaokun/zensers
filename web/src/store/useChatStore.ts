@@ -27,7 +27,14 @@ export const useChatStore = create<ChatState>()((set, get) => {
     messages: [],
 
     addMessage: (msg) => {
-      const messages = [...get().messages, msg];
+      const current = get().messages;
+      const isDuplicate = current.some(m =>
+        m.role === msg.role
+        && m.content === msg.content
+        && m.timestamp === msg.timestamp
+      );
+      if (isDuplicate) return;
+      const messages = [...current, msg];
       set({ messages });
       useSessionStore.getState().syncActive({ messages });
     },

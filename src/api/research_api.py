@@ -642,6 +642,19 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
             return {'error': 'Session not found', 'error_code': 'SESSION_NOT_FOUND'}
         context = session.get('research_context', {})
 
+        # Guard: if a background tool chain is still running for this session,
+        # queue the user message instead of cancelling the ongoing search.
+        # The queued message will be processed after the tool chain completes.
+        bg_task = self._background_tasks.get(session_id)
+        if bg_task and not bg_task.done():
+            logger.info(f"[QUEUE] Background tool chain running for {session_id}, queuing user message: {user_input[:50]}")
+            queued = session.get('_queued_user_messages', [])
+            queued.append(user_input)
+            session['_queued_user_messages'] = queued
+            return {'session_id': session_id, 'step': 0, 'mode': 'chat', 'status': 'processing',
+                    'message': '正在搜索中，您的新消息将在搜索完成后处理。',
+                    'suggestions': [], 'next_step': 'tool_executing'}
+
         if not skip_lang_detect:
             current_lang = detect_language(user_input).value
             session['language'] = current_lang
@@ -1441,6 +1454,18 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
         if ProgressStreamer:
             ProgressStreamer.push_chat_response(session_id, response_data)
         logger.info(f"[BG] Background tool chain completed: {session_id}")
+
+        # Process any user messages queued during tool chain execution
+        session = session_manager.get(session_id)
+        if session:
+            queued = session.pop('_queued_user_messages', [])
+            if queued:
+                for qmsg in queued:
+                    logger.info(f"[BG] Processing queued message for {session_id}: {qmsg[:50]}")
+                    try:
+                        await self._handle_user_message(session_id, qmsg, skip_lang_detect=True)
+                    except Exception as e:
+                        logger.warning(f"[BG] Failed to process queued message for {session_id}: {e}")
 
     def _fallback_response(self, session_id, context):
         """Safe fallback when LLM fails — acknowledges issue without alarming user"""

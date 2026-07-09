@@ -85,9 +85,11 @@ export function ChatInput({
   };
 
   const handleSend = () => {
-    // Block send only during active HTTP requests, not while waiting for SSE reply (Issue 4)
+    // Block send during active HTTP requests or while waiting for async SSE reply
+    // (sending during tool execution cancels the background search on the backend)
     const isBusy = isNetworkBusy ?? isLoading;
     if (isBusy && !isRunning) return;
+    if (isWaitingForReply && !isRunning) return;
     const trimmed = text.trim();
     if ((trimmed || attachments.length > 0) && !disabled) {
       onSend(trimmed, attachments, llm.model);
@@ -278,7 +280,7 @@ export function ChatInput({
             onKeyDown={handleKeyDown}
             onFocus={() => setIsFocused(true)}
             onBlur={() => setIsFocused(false)}
-            placeholder={isLoading ? 'Processing...' : isWaitingForReply ? 'System is responding... (you can still type a new question)' : isRunning ? 'Type query or click ■ to pause' : placeholder}
+            placeholder={isLoading ? 'Processing...' : isWaitingForReply ? 'Searching... please wait for results' : isRunning ? 'Type query or click ■ to pause' : placeholder}
             disabled={disabled}
             className="min-h-[80px] max-h-[180px] resize-none border-0 focus-visible:ring-0 p-4 pr-14 text-sm leading-relaxed"
             rows={3}
