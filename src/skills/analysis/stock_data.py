@@ -29,6 +29,52 @@ class StockDataSkill(Skill):
     """
     
     _memory_cache: Dict[tuple, Dict[str, Any]] = {}
+
+    _FINANCIALS_KEY_COLUMNS = {
+        "income_statement": {
+            "date": ["REPORT_DATE", "报告期", "日期"],
+            "key_cols": ["OPERATE_INCOME", "营业总收入", "TOTAL_OPERATE_INCOME",
+                         "NET_PROFIT", "净利润", "PARENT_NETPROFIT", "归属净利润",
+                         "BASIC_EPS", "基本每股收益"],
+        },
+        "balance_sheet": {
+            "date": ["REPORT_DATE", "报告期", "日期"],
+            "key_cols": ["TOTAL_ASSETS", "总资产", "TOTAL_LIABILITIES", "总负债",
+                         "TOTAL_EQUITY", "所有者权益", "PARENT_EQUITY", "归属母公司权益"],
+        },
+        "cash_flow": {
+            "date": ["REPORT_DATE", "报告期", "日期"],
+            "key_cols": ["OPERATE_CASH_FLOW", "经营活动现金流量", "NET_CASH_OPERATE",
+                         "投资活动现金流量"],
+        },
+    }
+
+    _THS_METRIC_CN = {
+        "operating_income_total": "营业总收入",
+        "parent_holder_net_profit": "归属净利润",
+        "index_deduct_holder_net_profit": "扣非净利润",
+        "calculate_operating_income_total_yoy_growth_ratio": "营收同比增长",
+        "calculate_parent_holder_net_profit_yoy_growth_ratio": "净利润同比增长",
+        "deduct_net_profit_yoy_growth_ratio": "扣非净利润同比增长",
+        "basic_eps": "基本每股收益",
+        "calc_per_net_assets": "每股净资产",
+        "per_capital_reserve": "每股资本公积金",
+        "per_undistributed_profits": "每股未分配利润",
+        "index_per_operating_cash_flow_net": "每股经营现金流",
+        "sale_net_interest_ratio": "销售净利率",
+        "sale_gross_margin": "销售毛利率",
+        "index_weighted_avg_roe": "加权ROE",
+        "index_full_diluted_roe": "摊薄ROE",
+        "business_cycle": "营业周期",
+        "inventory_turnover_ratio": "存货周转率",
+        "inventory_turnover_days": "存货周转天数",
+        "receive_accounts_turnover_days": "应收账款周转天数",
+        "current_ratio": "流动比率",
+        "quick_ratio": "速动比率",
+        "conservative_quick_ratio": "保守速动比率",
+        "equity_ratio": "产权比率",
+        "assets_debt_ratio": "资产负债率",
+    }
     
     @property
     def name(self) -> str:
@@ -169,3 +215,141 @@ class StockDataSkill(Skill):
             }
         except Exception as e:
             return self._failure(f"Metric retrieval failed: {e}")
+
+    def format_data(self, data: dict, action: str, identifier: str) -> str:
+        if action == "financials":
+            return self._format_financials(data, identifier)
+        elif action == "price_history":
+            return self._format_price_history(data, identifier)
+        elif action == "key_metrics":
+            return self._format_key_metrics(data, identifier)
+        elif action == "company_info":
+            return self._format_company_info(data, identifier)
+        elif action == "industry_comparison":
+            return self._format_industry_comparison(data, identifier)
+        return ""
+
+    def _format_financials(self, data: dict, symbol: str) -> str:
+        lines = []
+        for section_key, config in self._FINANCIALS_KEY_COLUMNS.items():
+            records = data.get(section_key, [])
+            if not records or not isinstance(records, list):
+                continue
+            section_names = {
+                "income_statement": "利润表",
+                "balance_sheet": "资产负债表",
+                "cash_flow": "现金流量表",
+            }
+            lines.append(f"=== {section_names.get(section_key, section_key)} (最近{min(len(records), 4)}期) ===")
+            date_cols = config["date"]
+            key_cols = config["key_cols"]
+            for rec in records[:4]:
+                date_val = ""
+                for dc in date_cols:
+                    if dc in rec:
+                        date_val = str(rec[dc])[:10]
+                        break
+                parts = []
+                for kc in key_cols:
+                    if kc in rec and rec[kc] is not None:
+                        val = rec[kc]
+                        if isinstance(val, float):
+                            if abs(val) >= 1e8:
+                                parts.append(f"{kc} {val/1e8:.2f}亿")
+                            elif abs(val) >= 1e4:
+                                parts.append(f"{kc} {val/1e4:.2f}万")
+                            else:
+                                parts.append(f"{kc} {val:.2f}")
+                        else:
+                            parts.append(f"{kc} {val}")
+                if date_val or parts:
+                    if parts:
+                        line = f"{date_val}: " + " | ".join(parts[:5]) if date_val else " | ".join(parts[:5])
+                    else:
+                        line = str(date_val)
+                    lines.append(line)
+        return "\n".join(lines) if lines else ""
+
+    def _format_price_history(self, data: dict, symbol: str) -> str:
+        records = data.get("records", [])
+        if not records:
+            return ""
+        lines = [f"=== {symbol} 股价数据 ==="]
+        recent = records[:30]
+        closes = []
+        highs = []
+        lows = []
+        for r in recent:
+            c = r.get("收盘", r.get("close"))
+            h = r.get("最高", r.get("high"))
+            l = r.get("最低", r.get("low"))
+            if isinstance(c, (int, float)):
+                closes.append(c)
+            if isinstance(h, (int, float)):
+                highs.append(h)
+            if isinstance(l, (int, float)):
+                lows.append(l)
+        if closes and highs and lows:
+            lines.append(f"最近{len(recent)}日: 最高{max(highs):.2f} | 最低{min(lows):.2f} | 最新{closes[-1]:.2f}")
+        for rec in recent[:10]:
+            date_val = rec.get("日期", rec.get("date", ""))
+            close = rec.get("收盘", rec.get("close", ""))
+            open_val = rec.get("开盘", rec.get("open", ""))
+            change = rec.get("涨跌幅", rec.get("change_pct", ""))
+            line_parts = [str(date_val)[:10]]
+            if open_val:
+                line_parts.append(f"开{open_val}")
+            if close:
+                line_parts.append(f"收{close}")
+            if change:
+                line_parts.append(f"涨幅{change}")
+            lines.append(" ".join(str(p) for p in line_parts))
+        return "\n".join(lines)
+
+    def _format_key_metrics(self, data: dict, symbol: str) -> str:
+        periods = data.get("periods", [])
+        if not periods:
+            if isinstance(data, dict) and not data.get("periods"):
+                lines = [f"=== {symbol} 关键财务指标 ==="]
+                for k, v in list(data.items())[:15]:
+                    if v is not None and v is not False:
+                        cn = self._THS_METRIC_CN.get(k, k)
+                        lines.append(f"{cn}: {v}")
+                return "\n".join(lines)
+            return ""
+        lines = [f"=== {symbol} 关键财务指标 (最近{min(len(periods), 4)}期) ==="]
+        for rec in periods[:4]:
+            period = rec.get("报告期", rec.get("report_date", rec.get("REPORT_DATE", "")))
+            parts = [str(period)[:10]]
+            for k, v in rec.items():
+                if k in ("报告期", "report_date", "REPORT_DATE"):
+                    continue
+                if v is not None and v is not False:
+                    if isinstance(v, float) and v != v:
+                        continue
+                    cn = self._THS_METRIC_CN.get(k, k)
+                    parts.append(f"{cn}:{v}")
+            lines.append(" | ".join(parts[:8]))
+        return "\n".join(lines)
+
+    def _format_company_info(self, data: dict, symbol: str) -> str:
+        if not data:
+            return ""
+        lines = [f"=== {symbol} 公司信息 ==="]
+        key_fields = ["股票简称", "行业", "总股本", "流通股", "主营业务",
+                       "上市时间", "注册资本", "所属申万行业"]
+        found = set()
+        for k in key_fields:
+            if k in data:
+                lines.append(f"{k}: {data[k]}")
+                found.add(k)
+        for k, v in data.items():
+            if k not in found:
+                lines.append(f"{k}: {v}")
+        return "\n".join(lines)
+
+    def _format_industry_comparison(self, data: dict, symbol: str) -> str:
+        if not data:
+            return ""
+        industry = data.get("industry", "")
+        return f"=== {symbol} 行业对比 ===\n行业: {industry}" if industry else ""

@@ -4,6 +4,45 @@
 
 ---
 
+## [3.3.0] - 2026-07-09
+
+### Skill System Evolution: Manifest-Driven Self-Describing Architecture
+
+Complete migration from hardcoded skill routing to manifest-driven self-describing architecture. Adding a new Skill now requires only SKILL.md + skill.py — zero changes to strategies.py, generic_agent.py, orchestrator.py, or factory.py. 308 unit tests + 25 integration tests, 0 regressions.
+
+**Phase 1: SKILL.md Migration (Task 1.1-1.7)**
+- Created SKILL.md manifests for all 17 skills: search_skill, news_search, file_skill, http_skill, docx_skill, web_scraper, stock_data, stock_analysis, market_analysis, data_analysis, policy_analysis, tech_trend, risk_analysis, annual_report_parser, knowledge_query, 4 LangChain skills (lc_tavily_search, lc_arxiv, lc_wikipedia, lc_python_repl), and llm intrinsic skill
+- Fixed `base.py:infer_actions()` from exclusive to cumulative matching (Task 1.3a)
+- Added alias registration with instance sharing in `init_from_discovery()` (Task 1.7)
+- Removed orchestrator.py manual registration, replaced with `init_from_discovery()`
+
+**Phase 2: Strategy Dynamic Routing (Task 2.1-2.3)**
+- Created `ManifestStrategyBuilder` in `manifest_strategy.py` — dynamically builds ASPECT_SKILL_MAP, SKILL_PRIORITY_MAP, DATA_SOURCE_SKILL_MAP, ACTION_TO_SKILL from manifests
+- Injected builder into `strategies.py` via `_manifest_strategy` global + `set_manifest_strategy()`
+- Replaced hardcoded `ACTION_TO_SKILL` in `generic_agent.py` with `_build_action_to_skill_map()`
+
+**Phase 3: Universal Data Pipeline (Task 3.0-3.4)**
+- Created `_process_skill_output()` + 6 helper methods with F1-F13 defensive design (60s timeout, non-dict results, circular references, non-serializable objects, etc.)
+- Refactored DATA_COLLECTION Tier 1+2 to use unified pipeline
+- Implemented `StockDataSkill.format_data()` (5 actions: financials, price_history, key_metrics, company_info, industry_comparison)
+- Implemented `XueqiuSkill.format_data()` (6 actions: quote, kline, hot_stocks, search_and_quote, hot_posts, user_posts)
+- Three-layer content transformation: L1 (skill content) → L2 (format_data) → L3 (LLM summarize) → JSON dump fallback
+
+**Phase 4: Agent Generalization (Task 4.1-4.4)**
+- Deleted 9 dead code elements: `_fetch_structured_data`, `_infer_stock_actions`, `_format_structured_data` + 4 sub-methods + `_FINANCIALS_KEY_COLUMNS` + `_THS_METRIC_CN`
+- Replaced 4 hardcoded search_skill fallback chains with unified `registry.get("search_skill")`
+- Added `web_search` → `search_skill` alias in `DynamicAgentFactory._SKILL_ALIAS_MAP`
+- Rewrote `discover_skills()` using manifest keywords + difflib fuzzy fallback
+- Deleted `skill_keywords.py` (replaced by manifest-driven discovery)
+
+**Phase 6: End-to-End Verification (Task 6.1-6.4)**
+- Zero-touch skill onboarding test: new Skill auto-discovered, registered, routed, and executed
+- Existing skill regression: stock_data, xueqiu, search_skill, news_search all verified through new pipeline
+- LLM integration: `_llm_summarize_data` verified with real API calls
+- Code review fixes: C1 (web_search alias in factory), C2 (difflib duplicate keyword handling), C3 (stale comment)
+
+---
+
 ## [3.2.0] - 2026-07-08
 
 ### PPT Data-Driven Generation Pipeline

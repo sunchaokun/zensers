@@ -294,14 +294,17 @@ class TestE2E5LoadSkillsForCategory:
 class TestE2E6DiscoverSkills:
     """端到端: discover_skills 含分析 skill 关键词匹配 + factory auto_load"""
 
-    def test_skill_keywords_source_code_has_analysis_skills(self):
-        """验证 skill_keywords.py 源码含 7 个分析 skill 关键词"""
-        kw_path = SRC_ROOT / "skills" / "skill_keywords.py"
-        content = kw_path.read_text(encoding="utf-8")
+    def test_discover_skills_manifest_keywords_has_analysis_skills(self):
+        """验证 manifest keywords 含 7 个分析 skill 关键词"""
+        from src.skills.discovery import SkillDiscovery
+        from pathlib import Path
+        discovery = SkillDiscovery()
+        manifests = discovery.discover_all(Path("src/skills"))
+        manifest_names = {m.name for m in manifests}
         for name in ["market_analysis", "stock_data", "stock_analysis",
                       "data_analysis", "policy_analysis", "tech_trend", "risk_analysis"]:
-            assert f'"{name}"' in content or f"'{name}'" in content, \
-                f"skill_keywords.py must contain keyword mapping for {name}"
+            assert name in manifest_names, \
+                f"manifest must exist for {name}"
 
     def test_discover_skills_code_checks_factories(self):
         """验证 registry.py 源码中 discover_skills auto_load 检查 _factories"""

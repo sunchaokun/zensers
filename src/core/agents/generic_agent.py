@@ -214,6 +214,7 @@ class GenericAgent(
         # === GenericAgent特有属性（从config提取） ===
         self._skill_registry = self.config.get("skill_registry")
         self._available_skills = self.config.get("skills", [])
+        self._action_to_skill_cache = None
         self._role = self.config.get("role", "")
         self._goal = self.config.get("goal", "")
         self._backstory = self.config.get("backstory", "")
@@ -276,33 +277,9 @@ class GenericAgent(
         skill_registry = self._skill_registry
         available_skills = self._available_skills
         
-        # Skill 路由映射（动态映射，支持扩展）
-        ACTION_TO_SKILL = {
-            "search": "search_skill",
-            "news_search": "news_search",
-            "file_operation": "file_skill",
-            "http_request": "http_skill",
-            "generate_docx": "docx_skill",
-            "generate_pptx": "pptx_skill",
-            "llm": None,
-            "analyze": None,
-            "analysis": None,
-            "reasoning": None,
-            "summarize": None,
-            "translate": None,
-            "research": None,
-            "data_collection": None,
-            "calibration": None,
-            "execute": None,
-            "web_search": "lc_tavily_search",
-            "tavily_search": "lc_tavily_search",
-            "academic_search": "lc_arxiv",
-            "arxiv_search": "lc_arxiv",
-            "wiki_search": "lc_wikipedia",
-            "wikipedia_search": "lc_wikipedia",
-            "data_analysis": "lc_python_repl",
-            "python_repl": "lc_python_repl",
-        }
+        if self._action_to_skill_cache is None:
+            self._action_to_skill_cache = self._build_action_to_skill_map()
+        ACTION_TO_SKILL = self._action_to_skill_cache
         
         # 查找对应的 Skill
         skill_name = ACTION_TO_SKILL.get(action)
@@ -470,12 +447,17 @@ class GenericAgent(
                 for db_skill_name in tiered_skills.get("structured_db", []):
                     if not skill_registry:
                         continue
+                    if db_skill_name == "llm":
+                        continue
                     db_skill = skill_registry.get(db_skill_name)
                     if not db_skill:
                         logger.warning(f"GenericAgent {self.agent_id}: {db_skill_name} not available in registry, skipping")
                         continue
                     try:
-                        structured = await self._fetch_structured_data(db_skill, topic, aspect, skill_name=db_skill_name)
+                        structured = await self._process_skill_output(
+                            db_skill, db_skill_name, topic, aspect, skill_registry,
+                            structured_data_sufficient=_structured_data_sufficient,
+                        )
                         dp_count = len(structured.get("data_points", []))
                         if dp_count > 0:
                             _structured_data_fetched = True
@@ -519,59 +501,31 @@ class GenericAgent(
                     search_depth = "basic" if _structured_data_sufficient else "deep"
 
                     if "search_skill" in web_skills and skill_registry:
-                        search_results = await self._do_deep_research(
-                            topic=topic, aspect=aspect, aspects=aspects, skill_registry=skill_registry,
-                            preloaded_search_results=preloaded,
-                            depth=search_depth,
-                        )
-                        for search in search_results.get("searches", []):
-                            for item in search.get("results", []):
-                                data_points.append({
-                                    "title": item.get("title", ""),
-                                    "content": item.get("body", "") or item.get("snippet", ""),
-                                    "url": item.get("href", "") or item.get("url", ""),
-                                    "quality_score": item.get("quality_score", 0),
-                                    "credibility": item.get("credibility", "unknown"),
-                                })
-                                sources.append({
-                                    "title": item.get("title", ""),
-                                    "url": item.get("href", "") or item.get("url", ""),
-                                    "type": "web",
-                                    "quality_score": item.get("quality_score", 0),
-                                })
+                        search_skill = skill_registry.get("search_skill")
+                        if search_skill:
+                            search_result = await self._process_skill_output(
+                                search_skill, "search_skill", topic, aspect, skill_registry,
+                                structured_data_sufficient=_structured_data_sufficient,
+                                preloaded_search_results=preloaded,
+                                search_depth=search_depth,
+                            )
+                            data_points.extend(search_result.get("data_points", []))
+                            sources.extend(search_result.get("sources", []))
+                            search_results = search_result
                     self._report_progress(f"网络搜索完成，共 {len(data_points)} 条数据", "searching")
 
                     if "news_search" in web_skills and skill_registry and topic and not _has_doc_data_t2:
                         news_skill = skill_registry.get("news_search")
                         if news_skill:
                             try:
-                                news_query = f"{topic} {aspect} 最新 动态" if aspect else f"{topic} 最新 动态"
-                                max_news = 5 if _structured_data_sufficient else 10
-                                news_result = await news_skill.execute(
-                                    query=news_query, max_results=max_news, time_range="w",
+                                news_result = await self._process_skill_output(
+                                    news_skill, "news_search", topic, aspect, skill_registry,
+                                    structured_data_sufficient=_structured_data_sufficient,
                                 )
-                                if news_result and news_result.get("success"):
-                                    for nr in news_result.get("results", []):
-                                        news_body = nr.get("body", "") or nr.get("snippet", "")
-                                        news_url = nr.get("href", "") or nr.get("url", "")
-                                        data_points.append({
-                                            "title": nr.get("title", ""),
-                                            "content": news_body,
-                                            "url": news_url,
-                                            "quality_score": 70,
-                                            "credibility": "news_source",
-                                            "source_type": "news",
-                                            "source_name": nr.get("source", ""),
-                                            "date": nr.get("date", ""),
-                                        })
-                                        sources.append({
-                                            "title": nr.get("title", ""),
-                                            "url": news_url,
-                                            "type": "news",
-                                            "quality_score": 70,
-                                        })
-                                    logger.info(f"GenericAgent {self.agent_id}: news_search 补充 {len(news_result.get('results', []))} 条新闻")
-                                    self._report_progress(f"新闻搜索补充 {len(news_result.get('results', []))} 条", "searching")
+                                data_points.extend(news_result.get("data_points", []))
+                                sources.extend(news_result.get("sources", []))
+                                logger.info(f"GenericAgent {self.agent_id}: news_search 补充 {len(news_result.get('data_points', []))} 条新闻")
+                                self._report_progress(f"新闻搜索补充 {len(news_result.get('data_points', []))} 条", "searching")
                             except Exception as news_err:
                                 logger.warning(f"GenericAgent {self.agent_id}: news_search failed: {news_err}")
 
@@ -664,11 +618,7 @@ class GenericAgent(
                             topic, aspect or "", validation_result.get("warnings", [])
                         )
                         if recollection_queries:
-                            search_skill = (
-                                skill_registry.get("web_search") or
-                                skill_registry.get("multi_search") or
-                                skill_registry.get("search_skill")
-                            )
+                            search_skill = skill_registry.get("search_skill")
                             if search_skill:
                                 try:
                                     for rq in recollection_queries[:3]:
@@ -1392,11 +1342,7 @@ class GenericAgent(
             search_results = None
             _has_doc_data_fb = bool(self._context.get("document_context") or self._context.get("has_preloaded_data") or task.get("document_context"))
             if topic and skill_registry and not _has_doc_data_fb:
-                search_skill = (
-                    skill_registry.get("search_skill")
-                    or skill_registry.get("web_search")
-                    or skill_registry.get("multi_search")
-                )
+                search_skill = skill_registry.get("search_skill")
                 if search_skill:
                     try:
                         logger.info(
@@ -2308,121 +2254,435 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
                 "agent_type": self.agent_type,
             }
     
-    # === 深度研究方法 ===
-    
-    async def _fetch_structured_data(
+    # === 通用数据管道 (Phase 3) ===
+
+    async def _process_skill_output(
         self,
-        stock_skill: Any,
+        skill,
+        skill_name: str,
         topic: str,
         aspect: str,
-        skill_name: str = "stock_data",
+        skill_registry: Any = None,
+        structured_data_sufficient: bool = False,
+        preloaded_search_results: Optional[List] = None,
+        search_depth: str = "deep",
+    ) -> Dict[str, Any]:
+        """通用 Skill 输出处理器。
+
+        不假设 Skill 返回什么数据结构，用三层策略将任意数据
+        转为下游可消费的 content + canonical_metrics。
+
+        这是所有 Skill 数据进入系统的唯一入口。
+
+        Args:
+            structured_data_sufficient: 跨 Tier 状态，控制 news_search 数量和 search_depth
+            preloaded_search_results: 跨 Tier 状态，search_skill 的预加载结果
+            search_depth: 跨 Tier 状态，"basic" 或 "deep"
+        """
+        result = {"data_points": [], "sources": [], "canonical_metrics": {}}
+
+        try:
+            processed = await asyncio.wait_for(
+                self._process_skill_output_inner(
+                    skill, skill_name, topic, aspect, skill_registry,
+                    structured_data_sufficient, preloaded_search_results, search_depth,
+                ),
+                timeout=60.0,
+            )
+            return processed
+        except asyncio.TimeoutError:
+            logger.error(f"GenericAgent {self.agent_id}: {skill_name} timed out (60s)")
+            return result
+        except Exception as e:
+            logger.error(f"GenericAgent {self.agent_id}: {skill_name} unexpected error: {e}")
+            return result
+
+    async def _process_skill_output_inner(
+        self,
+        skill,
+        skill_name: str,
+        topic: str,
+        aspect: str,
+        skill_registry: Any = None,
+        structured_data_sufficient: bool = False,
+        preloaded_search_results: Optional[List] = None,
+        search_depth: str = "deep",
     ) -> Dict[str, Any]:
         result = {"data_points": [], "sources": [], "canonical_metrics": {}}
-        try:
-            symbols: List[str] = []
-            raw_entities = getattr(self, '_context', {}).get("entities", [])
-            if raw_entities:
-                from src.core.entity_resolver import EntityInfo
-                entities = [
-                    EntityInfo.from_dict(e) if isinstance(e, dict) else e
-                    for e in raw_entities
-                ]
-                listed = [e for e in entities if e.is_listed and e.resolved_code]
-                if listed:
-                    symbols = [e.resolved_code for e in listed]
-                    logger.info(
-                        f"GenericAgent {self.agent_id}: _fetch_structured_data "
-                        f"resolved {len(symbols)} symbols from context entities: {symbols}"
-                    )
-            if not symbols:
-                symbol = self._extract_stock_symbol(topic)
-                logger.info(
-                    f"GenericAgent {self.agent_id}: _fetch_structured_data "
-                    f"topic='{topic}' → symbol='{symbol}'"
-                )
-                if not symbol:
-                    chinese_m_retry = re.search(r'[\u4e00-\u9fff]+', topic)
-                    retry_name = chinese_m_retry.group(0) if chinese_m_retry else topic
-                    resolved = self._resolve_company_to_code(retry_name)
-                    if resolved:
-                        symbol = resolved
-                        logger.info(
-                            f"GenericAgent {self.agent_id}: resolved '{retry_name}' -> symbol='{symbol}' via _resolve_company_to_code"
-                        )
-                if symbol:
-                    symbols = [symbol]
-            if not symbols:
-                _skill_manifest = self._skill_registry.get_manifest(skill_name) if hasattr(self, '_skill_registry') and self._skill_registry else None
-                if _skill_manifest and _skill_manifest.supports_topic_fallback and topic:
-                    _fb_skill = self._skill_registry.get(skill_name) if hasattr(self, '_skill_registry') else None
-                    if _fb_skill:
-                        _fb_skill._manifest = _skill_manifest
-                        _identifier = _fb_skill.resolve_identifier(topic, aspect)
-                        if _identifier:
-                            symbols = [_identifier]
-                            logger.info(
-                                f"GenericAgent {self.agent_id}: {skill_name} topic fallback "
-                                f"→ symbol='{_identifier}'"
-                            )
-            if not symbols:
-                return result
 
-            for symbol in symbols:
-                _infer_manifest = self._skill_registry.get_manifest(skill_name) if hasattr(self, '_skill_registry') and self._skill_registry else None
-                if _infer_manifest and _infer_manifest.action_rules:
-                    _infer_skill = self._skill_registry.get(skill_name) if hasattr(self, '_skill_registry') else None
-                    if _infer_skill:
-                        _infer_skill._manifest = _infer_manifest
-                        actions = _infer_skill.infer_actions(aspect, symbol)
-                    else:
-                        actions = self._infer_stock_actions(aspect)
-                else:
-                    actions = self._infer_stock_actions(aspect)
-                for action in actions:
+        if skill_name == "search_skill":
+            return await self._process_search_skill(
+                skill, topic, aspect, skill_registry,
+                preloaded_search_results=preloaded_search_results,
+                search_depth=search_depth,
+            )
+
+        if skill_name == "news_search":
+            return await self._process_news_skill(
+                skill, topic, aspect,
+                max_results=5 if structured_data_sufficient else 10,
+            )
+
+        identifiers = self._resolve_identifiers(
+            skill_name, topic, aspect, skill_registry
+        )
+        if not identifiers:
+            identifiers = [topic]
+
+        manifest = skill_registry.get_manifest(skill_name) if skill_registry else None
+        actions = self._infer_actions_from_manifest(manifest, skill, aspect, identifiers[0])
+
+        if len(identifiers) > 10:
+            logger.info(f"GenericAgent {self.agent_id}: truncating identifiers "
+                        f"from {len(identifiers)} to 10 for {skill_name}")
+        for identifier in identifiers[:10]:
+            for action in actions:
+                try:
+                    kwargs = self._build_execute_kwargs(
+                        manifest, action, identifier, topic
+                    )
                     try:
-                        _exec_manifest = self._skill_registry.get_manifest(skill_name) if hasattr(self, '_skill_registry') and self._skill_registry else None
-                        if _exec_manifest and _exec_manifest.action_param_map and action in _exec_manifest.action_param_map:
-                            _param_map = _exec_manifest.action_param_map[action]
-                            _exec_kwargs = {"action": action}
-                            for _pname, _psource in _param_map.items():
-                                _exec_kwargs[_pname] = symbol
-                            skill_result = await stock_skill.execute(**_exec_kwargs)
-                        else:
-                            skill_result = await stock_skill.execute(
-                                action=action, symbol=symbol,
-                            )
-                        if skill_result and skill_result.get("success"):
-                            data = skill_result.get("data", {})
-                            if isinstance(data, list):
-                                data = {"records": data}
-                            if isinstance(data, dict):
-                                content = skill_result.get("content", "")
-                                formatted = self._format_structured_data(data, action, symbol)
-                                if formatted and (not content or len(formatted) > len(content)):
-                                    content = formatted
-                                if not content:
-                                    content = json.dumps(data, ensure_ascii=False, indent=2)
-                                result["data_points"].append({
-                                    "title": f"{symbol} {action}",
-                                    "content": content,
-                                    "url": f"{skill_name}://{symbol}/{action}",
-                                    "quality_score": 95,
-                                    "credibility": "structured_source",
-                                })
-                                result["sources"].append({
-                                    "title": f"{skill_name} {symbol} {action}",
-                                    "url": f"{skill_name}://{symbol}/{action}",
-                                    "type": "structured",
-                                    "quality_score": 95,
-                                })
-                                result["canonical_metrics"].update(
-                                    self._extract_numeric_metrics(data)
-                                )
-                    except Exception as action_err:
-                        logger.warning(f"GenericAgent {self.agent_id}: stock_data action '{action}' failed: {action_err}")
-        except Exception as e:
-            logger.warning(f"GenericAgent {self.agent_id}: _fetch_structured_data failed: {e}")
+                        skill_result = await skill.execute(**kwargs)
+                    except TypeError as te:
+                        logger.warning(f"GenericAgent {self.agent_id}: {skill_name}.execute() "
+                                       f"rejected kwargs {kwargs}: {te}")
+                        continue
+
+                    if skill_result is None:
+                        continue
+                    if not isinstance(skill_result, dict):
+                        logger.warning(f"GenericAgent {self.agent_id}: {skill_name} returned "
+                                       f"{type(skill_result).__name__}, expected dict")
+                        skill_result = {"success": True, "data": {},
+                                        "content": str(skill_result)}
+
+                    if not skill_result.get("success"):
+                        continue
+
+                    data = skill_result.get("data")
+                    if data is None:
+                        data = {}
+                    elif isinstance(data, list):
+                        data = {"records": data}
+                    elif not isinstance(data, dict):
+                        data = {"value": data}
+
+                    content = await self._to_readable_content(
+                        skill_result, skill, data, action, identifier, skill_name, topic
+                    )
+
+                    metrics = self._extract_numeric_metrics(data)
+
+                    _manifest_priority = (manifest.priority if manifest else "web_search")
+                    if _manifest_priority == "structured_db":
+                        _dp_quality = 95
+                        _dp_credibility = "structured_source"
+                        _src_type = "structured"
+                        _src_quality = 95
+                    else:
+                        _dp_quality = 50
+                        _dp_credibility = "search_result"
+                        _src_type = "web"
+                        _src_quality = 50
+                    result["data_points"].append({
+                        "title": f"{identifier} {action}",
+                        "content": content,
+                        "url": f"{skill_name}://{identifier}/{action}",
+                        "quality_score": _dp_quality,
+                        "credibility": _dp_credibility,
+                    })
+                    result["sources"].append({
+                        "title": f"{skill_name} {identifier} {action}",
+                        "url": f"{skill_name}://{identifier}/{action}",
+                        "type": _src_type,
+                        "quality_score": _src_quality,
+                    })
+                    result["canonical_metrics"].update(metrics)
+
+                except Exception as action_err:
+                    logger.warning(
+                        f"GenericAgent {self.agent_id}: {skill_name} "
+                        f"action '{action}' failed: {action_err}"
+                    )
+
         return result
+
+    async def _process_search_skill(
+        self, skill, topic, aspect, skill_registry,
+        preloaded_search_results=None, search_depth="deep",
+    ) -> Dict[str, Any]:
+        result = {"data_points": [], "sources": [], "canonical_metrics": {}}
+        aspects = [aspect] if aspect else []
+        search_results = await self._do_deep_research(
+            topic=topic, aspect=aspect, aspects=aspects, skill_registry=skill_registry,
+            preloaded_search_results=preloaded_search_results,
+            depth=search_depth,
+        )
+        for search in search_results.get("searches", []):
+            for item in search.get("results", []):
+                result["data_points"].append({
+                    "title": item.get("title", ""),
+                    "content": item.get("body", "") or item.get("snippet", ""),
+                    "url": item.get("href", "") or item.get("url", ""),
+                    "quality_score": item.get("quality_score", 0),
+                    "credibility": item.get("credibility", "unknown"),
+                })
+                result["sources"].append({
+                    "title": item.get("title", ""),
+                    "url": item.get("href", "") or item.get("url", ""),
+                    "type": "web",
+                    "quality_score": item.get("quality_score", 0),
+                })
+        result["total_sources"] = search_results.get("total_sources", 0)
+        result["quality_stats"] = search_results.get("quality_stats", {})
+        return result
+
+    async def _process_news_skill(
+        self, skill, topic: str, aspect: str, max_results: int = 10,
+    ) -> Dict[str, Any]:
+        result = {"data_points": [], "sources": [], "canonical_metrics": {}}
+        news_query = f"{topic} {aspect} 最新 动态" if aspect else f"{topic} 最新 动态"
+        try:
+            news_result = await skill.execute(
+                query=news_query, max_results=max_results, time_range="w",
+            )
+            if news_result and isinstance(news_result, dict) and news_result.get("success"):
+                results_data = news_result.get("results", [])
+                if not results_data:
+                    results_data = news_result.get("data", {}).get("results", [])
+                if not isinstance(results_data, list):
+                    logger.warning(f"GenericAgent {self.agent_id}: news_search results is "
+                                   f"{type(results_data).__name__}, skipping")
+                    return result
+                for nr in results_data[:20]:
+                    if not isinstance(nr, dict):
+                        continue
+                    news_body = nr.get("body", "") or nr.get("snippet", "")
+                    news_url = nr.get("href", "") or nr.get("url", "")
+                    result["data_points"].append({
+                        "title": nr.get("title", ""),
+                        "content": news_body,
+                        "url": news_url,
+                        "quality_score": 70,
+                        "credibility": "news_source",
+                        "source_type": "news",
+                        "source_name": nr.get("source", ""),
+                        "date": nr.get("date", ""),
+                    })
+                    result["sources"].append({
+                        "title": nr.get("title", ""),
+                        "url": news_url,
+                        "type": "news",
+                        "quality_score": 70,
+                    })
+        except Exception as e:
+            logger.warning(f"GenericAgent {self.agent_id}: news_search failed: {e}")
+        return result
+
+    async def _to_readable_content(
+        self,
+        skill_result: Dict,
+        skill: Any,
+        data: dict,
+        action: str,
+        identifier: str,
+        skill_name: str,
+        topic: str,
+    ) -> str:
+        """三层内容转换 — 适用于任意 Skill，不依赖 Skill 配合。
+
+        L1: Skill 自带的 content 字段
+        L2: Skill 实现了 format_data()（structured_db 类必需）
+        L3: LLM 总结（通用兜底，structured_db 类跳过以控制成本）
+        兜底: JSON dump
+        """
+        content = skill_result.get("content", "")
+        if content and not isinstance(content, str):
+            content = str(content)
+
+        formatted = ""
+        if hasattr(skill, 'format_data') and callable(skill.format_data):
+            try:
+                formatted = skill.format_data(data, action, identifier) or ""
+                if not isinstance(formatted, str):
+                    formatted = str(formatted)
+            except Exception:
+                pass
+
+        if formatted and (not content or len(formatted) > len(content)):
+            content = formatted
+        if content:
+            return content
+
+        manifest = None
+        if hasattr(self, '_skill_registry') and self._skill_registry:
+            manifest = self._skill_registry.get_manifest(skill_name)
+
+        data_preview = str(data)
+        if len(data_preview) > 2000:
+            data_preview = data_preview[:2000] + "...(truncated)"
+
+        if data and len(data_preview) > 100 and (not manifest or manifest.priority != "structured_db"):
+            try:
+                llm_summary = await self._llm_summarize_data(
+                    data, skill_name, action, topic
+                )
+                if llm_summary:
+                    return llm_summary
+            except Exception:
+                pass
+
+        if isinstance(data, dict) and data:
+            try:
+                return json.dumps(data, ensure_ascii=False, indent=2, default=str)
+            except (ValueError, TypeError, OverflowError) as e:
+                logger.warning(f"GenericAgent {self.agent_id}: JSON dump failed for "
+                               f"{skill_name}: {e}")
+                return str(data)[:2000]
+        return content or ""
+
+    async def _llm_summarize_data(
+        self,
+        data: dict,
+        skill_name: str,
+        action: str,
+        topic: str,
+    ) -> str:
+        data_str = json.dumps(data, ensure_ascii=False, indent=2, default=str)
+        if len(data_str) > 6000:
+            data_str = data_str[:6000] + "\n... (truncated)"
+
+        max_chars = 500 if len(data_str) > 2000 else 200
+
+        try:
+            from src.config.llm_profiles import RoutingHint
+            from src.core.llm_client import call_llm
+            llm_result = await call_llm(
+                prompt=(
+                    f"将以下来自 {skill_name} 的 {action} 数据整理为结构化摘要。\n"
+                    f"研究主题：{topic}\n\n"
+                    f"原始数据：\n{data_str}\n\n"
+                    f"要求：\n"
+                    f"1. 提取关键数值并标注含义（如'市值22600亿'而非'market_capital: 22600'）\n"
+                    f"2. 用中文表述\n"
+                    f"3. 不超过{max_chars}字"
+                ),
+                system_prompt="你是数据摘要引擎，只输出摘要，不分析。",
+                routing_hint=RoutingHint(action="data_summarization"),
+            )
+            if llm_result.get("success") and llm_result.get("content"):
+                return llm_result["content"]
+        except Exception as e:
+            logger.warning(f"GenericAgent {self.agent_id}: LLM summarize failed: {e}")
+        return ""
+
+    def _resolve_identifiers(
+        self,
+        skill_name: str,
+        topic: str,
+        aspect: str,
+        skill_registry: Any = None,
+    ) -> List[str]:
+        identifiers = []
+
+        raw_entities = getattr(self, '_context', {}).get("entities", [])
+        if raw_entities:
+            from src.core.entity_resolver import EntityInfo
+            entities = [
+                EntityInfo.from_dict(e) if isinstance(e, dict) else e
+                for e in raw_entities
+            ]
+            listed = [e for e in entities if e.is_listed and e.resolved_code]
+            if listed:
+                return [e.resolved_code for e in listed]
+
+        symbol = self._extract_stock_symbol(topic)
+        if symbol:
+            return [symbol]
+
+        chinese_m = re.search(r'[\u4e00-\u9fff]+', topic)
+        if chinese_m:
+            resolved = self._resolve_company_to_code(chinese_m.group(0))
+            if resolved:
+                return [resolved]
+
+        if skill_registry:
+            manifest = skill_registry.get_manifest(skill_name)
+            if manifest and manifest.supports_topic_fallback and topic:
+                skill = skill_registry.get(skill_name)
+                if skill:
+                    old_manifest = getattr(skill, '_manifest', None)
+                    try:
+                        skill._manifest = manifest
+                        identifier = skill.resolve_identifier(topic, aspect)
+                        if identifier:
+                            return [identifier]
+                    finally:
+                        skill._manifest = old_manifest
+
+        return identifiers
+
+    def _infer_actions_from_manifest(
+        self,
+        manifest: Any,
+        skill: Any,
+        aspect: str,
+        identifier: str,
+    ) -> List[str]:
+        if manifest and manifest.action_rules:
+            if skill:
+                old_manifest = getattr(skill, '_manifest', None)
+                try:
+                    skill._manifest = manifest
+                    return skill.infer_actions(aspect, identifier)
+                finally:
+                    skill._manifest = old_manifest
+            all_actions = []
+            matched = False
+            for rule in manifest.action_rules:
+                if not re.match(rule.pattern, identifier):
+                    continue
+                if rule.aspect_keywords:
+                    aspect_lower = (aspect or "").lower()
+                    if any(kw.lower() in aspect_lower for kw in rule.aspect_keywords):
+                        all_actions.extend(rule.actions)
+                        matched = True
+                    continue
+                if not matched:
+                    return rule.actions
+            if matched:
+                return list(dict.fromkeys(all_actions))
+
+        return ["default"]
+
+    def _build_execute_kwargs(
+        self,
+        manifest: Any,
+        action: str,
+        identifier: str,
+        topic: str,
+    ) -> Dict[str, Any]:
+        kwargs = {"action": action}
+
+        if manifest and manifest.action_param_map and action in manifest.action_param_map:
+            param_map = manifest.action_param_map[action]
+            for param_name, source in param_map.items():
+                if source == "symbol":
+                    kwargs[param_name] = identifier
+                elif source == "query":
+                    kwargs[param_name] = identifier
+                elif source == "topic":
+                    kwargs[param_name] = topic
+                else:
+                    kwargs[param_name] = identifier
+        else:
+            kwargs["symbol"] = identifier
+
+        return kwargs
+
+    # === 深度研究方法 ===
+    
+
 
     _STOCK_CODE_CACHE: Dict[str, str] = {}
 
@@ -2490,174 +2750,19 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
                                         pass
         return metrics
 
-    _FINANCIALS_KEY_COLUMNS = {
-        "income_statement": {
-            "date": ["REPORT_DATE", "报告期", "日期"],
-            "key_cols": ["OPERATE_INCOME", "营业总收入", "TOTAL_OPERATE_INCOME",
-                         "NET_PROFIT", "净利润", "PARENT_NETPROFIT", "归属净利润",
-                         "BASIC_EPS", "基本每股收益"],
-        },
-        "balance_sheet": {
-            "date": ["REPORT_DATE", "报告期", "日期"],
-            "key_cols": ["TOTAL_ASSETS", "总资产", "TOTAL_LIABILITIES", "总负债",
-                         "TOTAL_EQUITY", "所有者权益", "PARENT_EQUITY", "归属母公司权益"],
-        },
-        "cash_flow": {
-            "date": ["REPORT_DATE", "报告期", "日期"],
-            "key_cols": ["OPERATE_CASH_FLOW", "经营活动现金流量", "NET_CASH_OPERATE",
-                         "投资活动现金流量"],
-        },
-    }
 
-    def _format_structured_data(self, data: dict, action: str, symbol: str) -> str:
-        if action == "financials":
-            return self._format_financials(data, symbol)
-        elif action == "price_history":
-            return self._format_price_history(data, symbol)
-        elif action == "key_metrics":
-            return self._format_key_metrics(data, symbol)
-        elif action == "company_info":
-            return self._format_company_info(data, symbol)
-        return ""
 
-    def _format_financials(self, data: dict, symbol: str) -> str:
-        lines = []
-        for section_key, config in self._FINANCIALS_KEY_COLUMNS.items():
-            records = data.get(section_key, [])
-            if not records or not isinstance(records, list):
-                continue
-            section_names = {
-                "income_statement": "利润表",
-                "balance_sheet": "资产负债表",
-                "cash_flow": "现金流量表",
-            }
-            lines.append(f"=== {section_names.get(section_key, section_key)} (最近{min(len(records), 4)}期) ===")
-            date_cols = config["date"]
-            key_cols = config["key_cols"]
-            for rec in records[:4]:
-                date_val = ""
-                for dc in date_cols:
-                    if dc in rec:
-                        date_val = str(rec[dc])[:10]
-                        break
-                parts = []
-                for kc in key_cols:
-                    if kc in rec and rec[kc] is not None:
-                        val = rec[kc]
-                        if isinstance(val, float):
-                            if abs(val) >= 1e8:
-                                parts.append(f"{kc} {val/1e8:.2f}亿")
-                            elif abs(val) >= 1e4:
-                                parts.append(f"{kc} {val/1e4:.2f}万")
-                            else:
-                                parts.append(f"{kc} {val:.2f}")
-                        else:
-                            parts.append(f"{kc} {val}")
-                if date_val or parts:
-                    if parts:
-                        line = f"{date_val}: " + " | ".join(parts[:5]) if date_val else " | ".join(parts[:5])
-                    else:
-                        line = str(date_val)
-                    lines.append(line)
-        return "\n".join(lines) if lines else ""
 
-    def _format_price_history(self, data: dict, symbol: str) -> str:
-        records = data.get("records", [])
-        if not records:
-            return ""
-        lines = [f"=== {symbol} 股价数据 ==="]
-        recent = records[:30]
-        closes = []
-        highs = []
-        lows = []
-        for r in recent:
-            c = r.get("收盘", r.get("close"))
-            h = r.get("最高", r.get("high"))
-            l = r.get("最低", r.get("low"))
-            if isinstance(c, (int, float)):
-                closes.append(c)
-            if isinstance(h, (int, float)):
-                highs.append(h)
-            if isinstance(l, (int, float)):
-                lows.append(l)
-        if closes and highs and lows:
-            lines.append(f"最近{len(recent)}日: 最高{max(highs):.2f} | 最低{min(lows):.2f} | 最新{closes[-1]:.2f}")
-        for rec in recent[:10]:
-            date_val = rec.get("日期", rec.get("date", ""))
-            close = rec.get("收盘", rec.get("close", ""))
-            open_val = rec.get("开盘", rec.get("open", ""))
-            change = rec.get("涨跌幅", rec.get("change_pct", ""))
-            line_parts = [str(date_val)[:10]]
-            if open_val:
-                line_parts.append(f"开{open_val}")
-            if close:
-                line_parts.append(f"收{close}")
-            if change:
-                line_parts.append(f"涨幅{change}")
-            lines.append(" ".join(str(p) for p in line_parts))
-        return "\n".join(lines)
 
-    _THS_METRIC_CN = {
-        "operating_income_total": "营业总收入",
-        "parent_holder_net_profit": "归属净利润",
-        "index_deduct_holder_net_profit": "扣非净利润",
-        "calculate_operating_income_total_yoy_growth_ratio": "营收同比增长",
-        "calculate_parent_holder_net_profit_yoy_growth_ratio": "净利润同比增长",
-        "deduct_net_profit_yoy_growth_ratio": "扣非净利润同比增长",
-        "basic_eps": "基本每股收益",
-        "calc_per_net_assets": "每股净资产",
-        "per_capital_reserve": "每股资本公积金",
-        "per_undistributed_profits": "每股未分配利润",
-        "index_per_operating_cash_flow_net": "每股经营现金流",
-        "sale_net_interest_ratio": "销售净利率",
-        "sale_gross_margin": "销售毛利率",
-        "index_weighted_avg_roe": "加权ROE",
-        "index_full_diluted_roe": "摊薄ROE",
-        "business_cycle": "营业周期",
-        "inventory_turnover_ratio": "存货周转率",
-        "inventory_turnover_days": "存货周转天数",
-        "receive_accounts_turnover_days": "应收账款周转天数",
-        "current_ratio": "流动比率",
-        "quick_ratio": "速动比率",
-        "conservative_quick_ratio": "保守速动比率",
-        "equity_ratio": "产权比率",
-        "assets_debt_ratio": "资产负债率",
-    }
 
-    def _format_key_metrics(self, data: dict, symbol: str) -> str:
-        periods = data.get("periods", [])
-        if not periods:
-            return ""
-        lines = [f"=== {symbol} 关键财务指标 (最近{min(len(periods), 4)}期) ==="]
-        for rec in periods[:4]:
-            period = rec.get("报告期", rec.get("report_date", rec.get("REPORT_DATE", "")))
-            parts = [str(period)[:10]]
-            for k, v in rec.items():
-                if k in ("报告期", "report_date", "REPORT_DATE"):
-                    continue
-                if v is not None and v is not False:
-                    if isinstance(v, float) and v != v:
-                        continue
-                    cn = self._THS_METRIC_CN.get(k, k)
-                    parts.append(f"{cn}:{v}")
-            lines.append(" | ".join(parts[:8]))
-        return "\n".join(lines)
 
-    def _format_company_info(self, data: dict, symbol: str) -> str:
-        if not data:
-            return ""
-        lines = [f"=== {symbol} 公司信息 ==="]
-        key_fields = ["股票简称", "行业", "总股本", "流通股", "主营业务",
-                       "上市时间", "注册资本", "所属申万行业"]
-        found = set()
-        for k in key_fields:
-            if k in data:
-                lines.append(f"{k}: {data[k]}")
-                found.add(k)
-        for k, v in data.items():
-            if k not in found:
-                lines.append(f"{k}: {v}")
-        return "\n".join(lines)
+
+
+
+
+
+
+
 
     def _extract_stock_symbol(self, topic: str) -> str:
         if not topic:
@@ -2731,32 +2836,41 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
             )
         return ""
 
-    def _infer_stock_actions(self, aspect: str) -> List[str]:
-        aspect_lower = (aspect or "").lower()
-        actions = []
-        if any(kw in aspect_lower for kw in ["financial", "盈利", "利润", "营收", "收入", "研发", "技术", "创新", "偿债", "现金流", "运营效率"]):
-            actions.append("financials")
-        if any(kw in aspect_lower for kw in ["valuation", "估值", "价值", "pe", "pb", "回报", "roe", "roa", "roic", "投资价值"]):
-            actions.append("key_metrics")
-            actions.append("financials")
-        if any(kw in aspect_lower for kw in ["leverage", "杠杆", "负债", "资本结构", "稳健"]):
-            actions.append("financials")
-        if any(kw in aspect_lower for kw in ["industry", "对比", "竞争"]):
-            actions.append("industry_comparison")
-        if any(kw in aspect_lower for kw in ["growth", "增长", "增速", "发展", "成长性"]):
-            actions.append("financials")
-            actions.append("key_metrics")
-        if any(kw in aspect_lower for kw in ["sales", "销售", "渠道", "营收分析"]):
-            actions.append("financials")
-        if any(kw in aspect_lower for kw in ["market share", "市场份额", "市占率"]):
-            actions.append("industry_comparison")
-        if any(kw in aspect_lower for kw in ["company", "公司", "企业"]):
-            actions.append("company_info")
-        if any(kw in aspect_lower for kw in ["price", "股价", "行情", "走势", "市值变动", "market_cap"]):
-            actions.append("price_history")
-        if not actions:
-            actions = ["company_info", "financials"]
-        return list(dict.fromkeys(actions))
+    def _build_action_to_skill_map(self) -> Dict[str, Optional[str]]:
+        """从 manifest.capabilities 反向构建 action→skill 映射。
+
+        ⚠️ web_search 双重语义：作为 action 时映射到 lc_tavily_search（LangChain 搜索），
+        但作为 skill name 时 web_search 是 search_skill 的 alias（MultiSearchSkill）。
+        Task 4.3 将统一此不一致。"""
+        intrinsic = {
+            "llm": None, "analyze": None, "analysis": None,
+            "reasoning": None, "summarize": None, "translate": None,
+            "research": None, "data_collection": None,
+            "calibration": None, "execute": None,
+        }
+        result = dict(intrinsic)
+        if self._skill_registry:
+            for name, manifest in self._skill_registry.all_manifests().items():
+                for cap in manifest.capabilities:
+                    if cap not in result:
+                        result[cap] = name
+        result["search"] = "search_skill"
+        result["news_search"] = "news_search"
+        result["file_operation"] = "file_skill"
+        result["http_request"] = "http_skill"
+        result["generate_docx"] = "docx_skill"
+        result["generate_pptx"] = "pptx_skill"
+        result["web_search"] = "lc_tavily_search"
+        result["tavily_search"] = "lc_tavily_search"
+        result["academic_search"] = "lc_arxiv"
+        result["arxiv_search"] = "lc_arxiv"
+        result["wiki_search"] = "lc_wikipedia"
+        result["wikipedia_search"] = "lc_wikipedia"
+        result["data_analysis"] = "lc_python_repl"
+        result["python_repl"] = "lc_python_repl"
+        return result
+
+
 
     def _generate_structured_fallback_queries(self, topic: str, aspect: str) -> List[str]:
         """Generate targeted search queries when structured data (stock_data) is unavailable."""
@@ -2923,13 +3037,7 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
         """
         import asyncio
         
-        # 优先使用多搜索引擎 WebSearchSkill（支持百度、Bing、360等国内引擎）
-        search_skill = (
-            skill_registry.get("web_search") or 
-            skill_registry.get("multi_search") or 
-            skill_registry.get("baidu_search") or 
-            skill_registry.get("search_skill")
-        )
+        search_skill = skill_registry.get("search_skill")
         if not search_skill:
             logger.warning(f"GenericAgent {self.agent_id}: no search skill available")
             return {}
@@ -3704,11 +3812,7 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
             Dict with 'data_points' and 'sources' lists, or empty dict on failure
         """
         # Get search skill from registry (not from available_skills, since analysis agents don't have it)
-        search_skill = (
-            skill_registry.get("web_search") or
-            skill_registry.get("multi_search") or
-            skill_registry.get("search_skill")
-        )
+        search_skill = skill_registry.get("search_skill")
         if not search_skill:
             logger.info(f"GenericAgent {self.agent_id}: no search skill available for gap filling")
             return {}

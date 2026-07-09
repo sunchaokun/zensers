@@ -104,3 +104,123 @@ class TestSkillBase:
         output = SkillOutput(success=False, data={}, message="失败", error="错误详情")
         assert output.success is False
         assert output.error == "错误详情"
+
+    def test_infer_actions_cumulative_matching(self):
+        """Task 1.3a: infer_actions 应累加匹配所有 rule 的 actions，而非排他返回第一个"""
+        from src.skills.base import Skill
+        from src.skills.discovery import ActionRule, SkillManifest
+        from pathlib import Path
+        from typing import Dict, Any
+
+        class TestSkill(Skill):
+            @property
+            def name(self) -> str:
+                return "test_cumulative"
+            @property
+            def description(self) -> str:
+                return "test"
+            async def execute(self, **kwargs) -> Dict[str, Any]:
+                return {"success": True}
+
+        manifest = SkillManifest(
+            name="test_cumulative", description="test", version="1.0",
+            categories=[], priority="structured_db", keywords=[], aliases=[],
+            capabilities=[], data_types={}, data_source_keywords=[],
+            action_rules=[
+                ActionRule(pattern=".*", aspect_keywords=["盈利", "利润"], actions=["financials"]),
+                ActionRule(pattern=".*", aspect_keywords=["估值", "pe"], actions=["key_metrics", "financials"]),
+                ActionRule(pattern=".*", actions=["company_info", "financials"]),
+            ],
+            action_param_map={}, supports_topic_fallback=False,
+            topic_fallback_pattern=None, is_intrinsic=False,
+            aspect_coverage=[], skill_type="standard",
+            skill_dir=Path("."), has_code=False, instructions="",
+        )
+
+        skill = TestSkill()
+        skill._manifest = manifest
+
+        # aspect="盈利估值分析" 应同时匹配"盈利"和"估值"两个 rule
+        # 累加模式: financials + key_metrics + financials → 去重 → ["financials", "key_metrics"]
+        result = skill.infer_actions("盈利估值分析", "SH600519")
+        assert "financials" in result, f"应包含 financials，实际: {result}"
+        assert "key_metrics" in result, f"应包含 key_metrics（累加匹配），实际: {result}"
+
+    def test_infer_actions_default_fallback_when_no_match(self):
+        """Task 1.3a: 无 aspect_keywords 匹配时，应走兜底 rule（最后一个无 aspect_keywords 的 rule）"""
+        from src.skills.base import Skill
+        from src.skills.discovery import ActionRule, SkillManifest
+        from pathlib import Path
+        from typing import Dict, Any
+
+        class TestSkill(Skill):
+            @property
+            def name(self) -> str:
+                return "test_default"
+            @property
+            def description(self) -> str:
+                return "test"
+            async def execute(self, **kwargs) -> Dict[str, Any]:
+                return {"success": True}
+
+        manifest = SkillManifest(
+            name="test_default", description="test", version="1.0",
+            categories=[], priority="structured_db", keywords=[], aliases=[],
+            capabilities=[], data_types={}, data_source_keywords=[],
+            action_rules=[
+                ActionRule(pattern=".*", aspect_keywords=["盈利"], actions=["financials"]),
+                ActionRule(pattern=".*", actions=["company_info", "financials"]),
+            ],
+            action_param_map={}, supports_topic_fallback=False,
+            topic_fallback_pattern=None, is_intrinsic=False,
+            aspect_coverage=[], skill_type="standard",
+            skill_dir=Path("."), has_code=False, instructions="",
+        )
+
+        skill = TestSkill()
+        skill._manifest = manifest
+
+        # aspect="其他分析" 不匹配任何 aspect_keywords，应走兜底 rule
+        result = skill.infer_actions("其他分析", "SH600519")
+        assert result == ["company_info", "financials"], f"应走兜底 rule，实际: {result}"
+
+    def test_infer_actions_dedup_preserves_order(self):
+        """Task 1.3a: 累加去重应保持首次出现顺序"""
+        from src.skills.base import Skill
+        from src.skills.discovery import ActionRule, SkillManifest
+        from pathlib import Path
+        from typing import Dict, Any
+
+        class TestSkill(Skill):
+            @property
+            def name(self) -> str:
+                return "test_dedup"
+            @property
+            def description(self) -> str:
+                return "test"
+            async def execute(self, **kwargs) -> Dict[str, Any]:
+                return {"success": True}
+
+        manifest = SkillManifest(
+            name="test_dedup", description="test", version="1.0",
+            categories=[], priority="structured_db", keywords=[], aliases=[],
+            capabilities=[], data_types={}, data_source_keywords=[],
+            action_rules=[
+                ActionRule(pattern=".*", aspect_keywords=["增长"], actions=["financials", "key_metrics"]),
+                ActionRule(pattern=".*", aspect_keywords=["估值"], actions=["key_metrics", "financials"]),
+            ],
+            action_param_map={}, supports_topic_fallback=False,
+            topic_fallback_pattern=None, is_intrinsic=False,
+            aspect_coverage=[], skill_type="standard",
+            skill_dir=Path("."), has_code=False, instructions="",
+        )
+
+        skill = TestSkill()
+        skill._manifest = manifest
+
+        # "增长估值" 匹配两个 rule:
+        # rule1: ["financials", "key_metrics"]
+        # rule2: ["key_metrics", "financials"]
+        # 累加去重: ["financials", "key_metrics"] (保持首次出现顺序)
+        result = skill.infer_actions("增长估值分析", "SH600519")
+        assert result == ["financials", "key_metrics"], f"去重应保持首次出现顺序，实际: {result}"

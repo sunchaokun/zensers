@@ -26,6 +26,15 @@ from src.core.i18n import get_language_instruction
 
 logger = logging.getLogger(__name__)
 
+_manifest_strategy: Optional['ManifestStrategyBuilder'] = None
+
+
+def set_manifest_strategy(builder: 'ManifestStrategyBuilder') -> None:
+    global _manifest_strategy
+    if _manifest_strategy is not None and builder is not None:
+        logger.warning("set_manifest_strategy() called with builder already set; replacing")
+    _manifest_strategy = builder
+
 
 class ResearchPhase(Enum):
     """Research phase - follows professional research methodology"""
@@ -79,6 +88,8 @@ def get_skills_for_aspect(aspect: str) -> List[str]:
     Returns:
         Applicable Skills list
     """
+    if _manifest_strategy:
+        return _manifest_strategy.get_skills_for_aspect(aspect)
     # Exact match
     if aspect in ASPECT_SKILL_MAP:
         return ASPECT_SKILL_MAP[aspect]
@@ -142,6 +153,8 @@ DATA_SOURCE_SKILL_MAP = {
 
 
 def _get_data_collection_skills(aspect: str, topic: str = "", intent_result: Any = None) -> List[str]:
+    if _manifest_strategy:
+        return _manifest_strategy.get_data_collection_skills(aspect, topic, intent_result)
     db_skills: List[str] = []
     web_skills: List[str] = []
 

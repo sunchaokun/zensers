@@ -158,6 +158,7 @@ class DynamicAgentFactory(AgentFactory):
     # Updated whenever new aliases are discovered via validation warnings.
     _SKILL_ALIAS_MAP: Dict[str, str] = {
         "search": "search_skill",
+        "web_search": "search_skill",
         "analysis": "data_analysis",
         "docx": "docx_skill",
         "pptx": "pptx_skill",

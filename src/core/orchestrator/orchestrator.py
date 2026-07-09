@@ -265,40 +265,26 @@ class ResearchOrchestrator:
         self._shared_memory = shared_memory or SharedMemory()
 
         # P0-4 fix: SkillRegistry (ensures Agents can access Skills)
-        # If not provided, create a new SkillRegistry and register core Skills
+        # If not provided, create a new SkillRegistry and register via discovery
         if skill_registry is None:
             from src.skills.registry import SkillRegistry
             skill_registry = SkillRegistry()
-            registered = skill_registry.register_core_skills()
             lc_count = skill_registry.auto_discover_langchain_tools()
-
-            # Register professional analysis Skills via factory (lazy loading)
-            try:
-                from src.skills.analysis import MarketAnalysisSkill, DataAnalysisSkill
-                from src.skills.analysis import StockDataSkill, StockAnalysisSkill
-                from src.skills.analysis import PolicyAnalysisSkill, TechTrendSkill, RiskAnalysisSkill
-                for name, cls in [
-                    ("market_analysis", MarketAnalysisSkill),
-                    ("data_analysis", DataAnalysisSkill),
-                    ("stock_data", StockDataSkill),
-                    ("stock_analysis", StockAnalysisSkill),
-                    ("policy_analysis", PolicyAnalysisSkill),
-                    ("tech_trend", TechTrendSkill),
-                    ("risk_analysis", RiskAnalysisSkill),
-                ]:
-                    skill_registry.register_factory(name, cls)
-                logger.info("Orchestrator: registered 7 professional analysis Skills via factory")
-            except Exception as e:
-                logger.warning(f"Orchestrator: failed to register analysis Skills: {e}")
 
             try:
                 skill_registry.init_from_discovery(Path("src/skills"))
                 logger.info("Orchestrator: skill discovery initialized from src/skills/")
+
+                from src.core.decomposition.manifest_strategy import ManifestStrategyBuilder
+                from src.core.decomposition.strategies import set_manifest_strategy
+                builder = ManifestStrategyBuilder(skill_registry.all_manifests())
+                set_manifest_strategy(builder)
+                logger.info("Orchestrator: ManifestStrategyBuilder injected into strategies")
             except Exception as e:
                 logger.warning(f"Orchestrator: skill discovery failed: {e}")
 
             logger.info(
-                f"Orchestrator: auto-registered {registered} core Skills, {lc_count} LangChain Tools")
+                f"Orchestrator: auto-registered Skills via discovery, {lc_count} LangChain Tools")
         self._skill_registry = skill_registry
 
         # Analysis layer (default creation)

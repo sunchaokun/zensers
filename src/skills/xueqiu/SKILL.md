@@ -62,12 +62,23 @@ data_source_keywords:
   - 营收
   - 市值
   - 市场规模
+  - 利润
+  - roe
+  - pe
+  - pb
+  - 增长
+  - 投资
   - 行情
   - 热门
   - 港股
   - 美股
   - 趋势
   - 竞争
+  - financial
+  - valuation
+  - company
+  - market_size
+  - competitive
 action_rules:
   - pattern: "^(SH|SZ|BJ)?\\d{6}$"
     aspect_keywords: [竞争, 热门, 人气, 排行, competitive, hot]

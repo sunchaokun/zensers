@@ -94,15 +94,21 @@ class Skill(ABC):
     def infer_actions(self, aspect: str, symbol: str) -> List[str]:
         manifest = getattr(self, '_manifest', None)
         if manifest and manifest.action_rules:
+            all_actions = []
+            matched = False
             for rule in manifest.action_rules:
                 if not re.match(rule.pattern, symbol):
                     continue
                 if rule.aspect_keywords:
                     aspect_lower = (aspect or "").lower()
                     if any(kw.lower() in aspect_lower for kw in rule.aspect_keywords):
-                        return rule.actions
+                        all_actions.extend(rule.actions)
+                        matched = True
                     continue
-                return rule.actions
+                if not matched:
+                    return rule.actions
+            if matched:
+                return list(dict.fromkeys(all_actions))
         return ["default"]
 
     def resolve_identifier(self, topic: str, aspect: str) -> Optional[str]:

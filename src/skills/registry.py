@@ -182,23 +182,26 @@ class SkillRegistry:
     def auto_discover_langchain_tools(self) -> int:
         """
         Auto-discover and register LangChain Tools
-        
+
         Registers the following commonly used research Tools (if dependencies are available):
         - TavilySearchResults: Web search
         - ArxivQueryRun: Academic search
         - WikipediaQueryRun: Encyclopedia search
         - PythonREPLTool: Data analysis
-        
+
+        Note: Call order independent — skips skills already registered (e.g. by init_from_discovery).
+
         Returns:
             Number of successfully registered Tools
         """
         count = self._adapter.register_research_tools()
-        
-        # Sync adapter Skills to registry
-        # Note: _adapter._skills contains actual Skill objects
+
+        # Sync adapter Skills to registry (skip already-registered)
         for name, skill in self._adapter._skills.items():
             if name not in self._skills:
                 self._skills[name] = skill
+            else:
+                count -= 1
         
         return count
     
@@ -269,81 +272,17 @@ class SkillRegistry:
     
     def register_core_skills(self) -> int:
         """
-        Register core custom Skills (direct registration, no scanning)
-        
-        Registers the following core Skills:
-        - search_skill: Multi-search engine integration (Baidu/Bing/Google/Sogou etc., 17 engines)
-        - news_search: News search
-        - file_skill: File operations
-        - http_skill: HTTP requests
-        - docx_skill: Word document generation
-        
+        Register core custom Skills (deprecated - now handled by init_from_discovery)
+
+        This method is now a no-op for backward compatibility.
+        All Skill registration is handled by init_from_discovery() which
+        reads SKILL.md manifests and registers Skills automatically.
+
         Returns:
-            Number of successfully registered Skills
+            0 (always, since no Skills are registered by this method)
         """
-        count = 0
-        
-        # Import core Skills
-        try:
-            from .search_skill import SearchSkill, NewsSearchSkill
-            from .file_skill import FileSkill
-            from .http_skill import HTTPSkill
-            from .docx_skill import DocxSkill
-            
-            # Register search Skill (multi-search engine integration)
-            # search_skill is the generic search interface, uses the most feature-complete SearchSkill
-            if "search_skill" not in self._skills:
-                self.register(SearchSkill(), name="search_skill")
-                count += 1
-            
-            # Also register web_search as alias (backward compatibility)
-            if "web_search" not in self._skills:
-                self.register(SearchSkill(), name="web_search")
-                count += 1
-            
-            # Register news search Skill
-            if "news_search" not in self._skills:
-                self.register(NewsSearchSkill())
-                count += 1
-            
-            # Register file Skill
-            if "file_skill" not in self._skills:
-                self.register(FileSkill())
-                count += 1
-            
-            # Register HTTP Skill
-            if "http_skill" not in self._skills:
-                self.register(HTTPSkill())
-                count += 1
-            
-            # Register Docx Skill
-            if "docx_skill" not in self._skills:
-                self.register(DocxSkill())
-                count += 1
-            
-            # Register Web Scraper Skill (key component of two-phase search strategy)
-            if "web_scraper" not in self._skills:
-                from .web_scraper_skill import WebScraperSkill
-                self.register(WebScraperSkill(), name="web_scraper")
-                count += 1
-            
-            # Register KnowledgeQuerySkill (global singleton, lazy KM injection)
-            if "knowledge_query" not in self._skills:
-                from .builtin.knowledge_query_skill import KnowledgeQuerySkill, _LazyKM
-                self.register(KnowledgeQuerySkill(knowledge_manager=_LazyKM()))
-                count += 1
-                logger.info("KnowledgeQuerySkill registered (lazy KM)")
-            
-            # Register Annual Report Parser Skill (PDF annual report parsing)
-            if "annual_report_parser" not in self._skills:
-                from .analysis.annual_report_parser import AnnualReportParserSkill
-                self.register(AnnualReportParserSkill(), name="annual_report_parser")
-                count += 1
-            
-        except Exception as e:
-            logger.warning(f"Failed to register core skills: {e}")
-        
-        return count
+        logger.info("register_core_skills() is deprecated, use init_from_discovery() instead")
+        return 0
     
     def load_langchain_skill(self, skill_name: str) -> bool:
         """
@@ -430,31 +369,37 @@ class SkillRegistry:
         query: str,
         auto_load: bool = True,
     ) -> List[str]:
-        """
-        Intelligently discover Skills (fuzzy matching)
-        
-        Intelligently matches the most suitable Skills based on user query keywords.
-        
-        Args:
-            query: User query keywords (e.g. "patent analysis", "data analysis")
-            auto_load: Whether to auto-load matched Skills, default True
-            
-        Returns:
-            List of matched and loaded Skill names
-            
-        Example:
-            >>> registry.discover_skills("patent analysis")
-            ["lc_arxiv"]
-            
-            >>> registry.discover_skills("quantum computing")
-            []
-        """
-        from .skill_keywords import match_skills
-        
-        # Intelligently match Skills
-        matched = match_skills(query)
+        query_lower = query.lower().strip()
+        matched = []
+
+        for name, manifest in self._manifests.items():
+            for kw in manifest.keywords:
+                kw_lower = kw.lower()
+                if query_lower in kw_lower or kw_lower in query_lower:
+                    if name not in matched:
+                        matched.append(name)
+                    break
+
+        if not matched:
+            import difflib
+            all_keywords = {}
+            keyword_to_names = {}
+            for name, manifest in self._manifests.items():
+                for kw in manifest.keywords:
+                    kw_lower = kw.lower()
+                    if kw_lower not in keyword_to_names:
+                        keyword_to_names[kw_lower] = []
+                    keyword_to_names[kw_lower].append(name)
+                    all_keywords[kw_lower] = name
+            close = difflib.get_close_matches(
+                query_lower, list(all_keywords.keys()), n=5, cutoff=0.6
+            )
+            for kw in close:
+                for name in keyword_to_names.get(kw, []):
+                    if name not in matched:
+                        matched.append(name)
+
         loaded = []
-        
         if auto_load:
             for skill_name in matched:
                 if skill_name in self._skills:
@@ -468,10 +413,10 @@ class SkillRegistry:
                         loaded.append(skill_name)
         else:
             loaded = matched
-        
+
         if loaded:
             logger.info(f"Discovered skills for '{query}': {loaded}")
-        
+
         return loaded
     
     def _create_tavily_skill(self):
@@ -589,10 +534,10 @@ class SkillRegistry:
         manifests = discovery.discover_all(skills_path)
 
         for manifest in manifests:
-            self.register_manifest(manifest)
-
             if manifest.skill_type == "langchain":
                 continue
+
+            self.register_manifest(manifest)
 
             if manifest.has_code:
                 skill_cls = discovery.load_skill_class(manifest)
@@ -608,6 +553,28 @@ class SkillRegistry:
                     manifest.name,
                     lambda m=manifest: InstructionSkill(m),
                 )
+
+        for manifest in manifests:
+            if manifest.skill_type == "langchain":
+                continue
+            for alias in manifest.aliases:
+                if alias in self._skills or alias in self._factories:
+                    continue
+                if manifest.name in self._skills:
+                    self._skills[alias] = self._skills[manifest.name]
+                elif manifest.name in self._factories:
+                    original_name = manifest.name
+                    def _alias_factory(_name=original_name):
+                        existing = self._skills.get(_name)
+                        if existing:
+                            return existing
+                        original_factory = self._factories.get(_name)
+                        if original_factory:
+                            instance = original_factory()
+                            self._skills[_name] = instance
+                            return instance
+                        return None
+                    self._factories[alias] = _alias_factory
 
         self._validate_manifests()
 

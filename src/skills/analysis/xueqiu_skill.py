@@ -656,3 +656,106 @@ class XueqiuSkill(Skill):
                    f"涨跌幅 {quote.get('percent')}%, "
                    f"成交量 {quote.get('volume')}, 市值 {quote.get('market_capital')}")
         return {"success": True, "data": {"search": results[0], "quote": quote}, "content": content, "symbol": symbol, "source": "xueqiu"}
+
+    def format_data(self, data: dict, action: str, identifier: str) -> str:
+        if action == "quote":
+            return self._format_quote(data, identifier)
+        elif action == "kline":
+            return self._format_kline(data, identifier)
+        elif action == "hot_stocks":
+            return self._format_hot_stocks(data)
+        elif action == "search_and_quote":
+            return self._format_search_and_quote(data, identifier)
+        elif action == "hot_posts":
+            return self._format_hot_posts(data)
+        elif action == "user_posts":
+            return self._format_user_posts(data)
+        return ""
+
+    def _format_quote(self, data: dict, symbol: str) -> str:
+        if not data or not isinstance(data, dict):
+            return ""
+        lines = [f"=== {data.get('name', symbol)} 实时行情 ==="]
+        fields = [
+            ("current", "当前价"), ("percent", "涨跌幅"), ("change", "涨跌额"),
+            ("high", "最高"), ("low", "最低"), ("open", "开盘价"),
+            ("volume", "成交量"), ("amount", "成交额"), ("market_capital", "市值"),
+            ("pe_ttm", "PE_TTM"), ("turnover_rate", "换手率"),
+        ]
+        for key, label in fields:
+            val = data.get(key)
+            if val is not None:
+                lines.append(f"{label}: {val}")
+        return "\n".join(lines)
+
+    def _format_kline(self, data: dict, symbol: str) -> str:
+        if not data:
+            return ""
+        records = data
+        if isinstance(data, dict):
+            records = data.get("records", data.get("item", []))
+        if not isinstance(records, list):
+            return ""
+        lines = [f"=== {symbol} K线数据 (最近{min(len(records), 10)}条) ==="]
+        for rec in records[:10]:
+            if not isinstance(rec, dict):
+                continue
+            date = rec.get("time", rec.get("date", ""))
+            close = rec.get("close", "")
+            high = rec.get("high", "")
+            low = rec.get("low", "")
+            lines.append(f"{date}: 收{close} 高{high} 低{low}")
+        return "\n".join(lines)
+
+    def _format_hot_stocks(self, data: dict) -> str:
+        records = data
+        if isinstance(data, dict):
+            records = data.get("records", data.get("items", []))
+        if not records or not isinstance(records, list):
+            return ""
+        lines = [f"=== 热门股票 TOP{min(len(records), 10)} ==="]
+        for i, stock in enumerate(records[:10], 1):
+            if isinstance(stock, dict):
+                name = stock.get("name", stock.get("symbol", ""))
+                change = stock.get("percent", stock.get("change", ""))
+                lines.append(f"{i}. {name} 涨跌幅:{change}")
+        return "\n".join(lines)
+
+    def _format_search_and_quote(self, data: dict, symbol: str) -> str:
+        if not data or not isinstance(data, dict):
+            return ""
+        quote = data.get("quote", {})
+        search = data.get("search", {})
+        name = search.get("name", symbol)
+        lines = [f"=== {name}({symbol}) 搜索+行情 ==="]
+        if quote:
+            for key in ["current", "percent", "volume", "market_capital", "turnover_rate"]:
+                if key in quote:
+                    lines.append(f"{key}: {quote[key]}")
+        return "\n".join(lines)
+
+    def _format_hot_posts(self, data: dict) -> str:
+        records = data
+        if isinstance(data, dict):
+            records = data.get("records", data.get("items", []))
+        if not records or not isinstance(records, list):
+            return ""
+        lines = [f"=== 雪球热帖 TOP{min(len(records), 10)} ==="]
+        for i, post in enumerate(records[:10], 1):
+            if isinstance(post, dict):
+                title = post.get("title", post.get("text", ""))[:50]
+                lines.append(f"{i}. {title}")
+        return "\n".join(lines)
+
+    def _format_user_posts(self, data: dict) -> str:
+        records = data
+        if isinstance(data, dict):
+            records = data.get("records", data.get("items", []))
+        if not records or not isinstance(records, list):
+            return ""
+        lines = [f"=== 用户帖子 (最近{min(len(records), 10)}条) ==="]
+        for i, post in enumerate(records[:10], 1):
+            if isinstance(post, dict):
+                title = post.get("title", post.get("text", ""))[:50]
+                lines.append(f"{i}. {title}")
+        return "\n".join(lines)
