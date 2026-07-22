@@ -131,7 +131,7 @@ class ChartGenerator:
         (126/255, 181/255, 166/255),  # sage
         (232/255, 168/255, 124/255),  # peach
         (212/255, 165/255, 116/255),  # tan
-        (201/255, 162/255, 39/255),   # gold variant
+        (107/255, 142/255, 158/255),  # steel teal
     ]
     
     def __init__(self, output_dir: Optional[str] = None):

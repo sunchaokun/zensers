@@ -181,7 +181,8 @@
         /* ============================================
             正文段落
             ============================================ */
-        .section-content p {
+        .section-content p,
+        p.para {
             font-family: 'SimSun', 'Noto Serif CJK SC', serif;
             font-size: 11pt;
             line-height: 1.8;
@@ -194,7 +195,8 @@
         }
 
         /* 段落间间距 */
-        .section-content p + p {
+        .section-content p + p,
+        p.para + p.para {
             margin-top: 0.5em;
         }
 
@@ -333,13 +335,34 @@
         }
 
         /* ============================================
-           图表说明
-           ============================================ */
+            图表说明
+            ============================================ */
         .figure-caption {
             font-size: 10pt;
             color: #888888;
             text-align: center;
             margin-top: 6pt;
+        }
+
+        /* ============================================
+            代码块
+            ============================================ */
+        pre.code-block {
+            background: #F5F3EF;
+            border: 1px solid #E8E4DC;
+            border-radius: 4px;
+            padding: 12pt 16pt;
+            margin: 12pt 0;
+            font-family: 'Consolas', 'Courier New', monospace;
+            font-size: 9pt;
+            line-height: 1.5;
+            overflow-x: auto;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+
+        pre.code-block code {
+            font-family: inherit;
         }
 
         /* ============================================
@@ -374,13 +397,15 @@
      封面页
      ============================================ -->
     <div class="cover-page">
-        <img class="logo" src="{{ logo_path }}" alt="" onerror="this.style.display='none'">
+        {% if logo_path %}
+        <img class="logo" src="{{ logo_path }}" alt="Logo">
+        {% endif %}
         <h1>{{ title }}</h1>
         {% if subtitle %}
         <p class="subtitle">{{ subtitle }}</p>
         {% endif %}
         <div class="meta-separator"></div>
-        <p class="meta">{{ author }}<br>{{ date }}</p>
+        <p class="meta">{% if author %}{{ author }}<br>{% endif %}{{ date }}</p>
         {% if watermark %}
         <div class="watermark">{{ watermark }}</div>
         {% endif %}
@@ -416,6 +441,41 @@
      正文内容
      ============================================ -->
 <article class="document">
+    
+    {% if key_findings %}
+    <div class="key-findings">
+        <h2>{{ labels.findings }}</h2>
+        <ul>
+        {% for finding in key_findings %}
+            <li>{{ finding.content }}</li>
+        {% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+    
+    {% if tables %}
+    {% for table in tables %}
+    <table>
+        <caption class="table-caption">{{ table.caption }}</caption>
+        <thead>
+            <tr>
+                {% for header in table.headers %}
+                <th>{{ header }}</th>
+                {% endfor %}
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in table.rows %}
+            <tr>
+                {% for cell in row %}
+                <td>{{ cell }}</td>
+                {% endfor %}
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% endfor %}
+    {% endif %}
     
     {% for section in sections %}
     <section id="{{ section.id }}">

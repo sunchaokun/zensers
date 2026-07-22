@@ -4,6 +4,47 @@
 
 ---
 
+## [3.5.0] - 2026-07-22
+
+### Report Quality: Content Rendering & Dedup Overhaul
+
+Systematic fix of 12 report quality issues spanning Markdown rendering, template integration, semantic dedup, and entity escaping. 182 tests (0 failures), end-to-end validation scored 100/100.
+
+**P0: Markdown Rendering (Critical)**
+- `_content_to_html()` added: `<ul>` (unordered list `- / *`), `<ol>` (ordered list `1.`), `<blockquote>` (quote `>`), `<h5>/<h6>` (4+ level headings), `<pre class="code-block">` (fenced code blocks)
+- ` ```json ` code blocks: auto-extract `content` field from JSON objects; non-str `content` serialized via `json.dumps()`
+- `_parse_markdown_title()`: `1. **bold**` no longer mis-detected as title; `## **bold title**` stripped of `**` markers
+- `content_cleaner.py` (new): blacklist title detection (`"章节内容"` → empty), JSON code block extraction, debug field removal
+
+**P1: Template Integration**
+- `_prepare_template_variables()`: added `labels: {"toc": "目 录", "findings": "关键发现", "data": "核心数据"}`
+- Double-table prevention: when section.content already contains `<table`, skip `section_tables` generation
+- Semantic dedup: `_dedup_sections()` upgraded from exact-match only to stopword-filtered character Jaccard similarity (threshold 0.35). "行业现存问题与风险" vs "行业问题与痛点" now correctly deduped
+- Chart integration: `_generate_charts_for_html()` enforces ≤2 charts/section, prioritizes planner pipeline charts, adds `insertion_anchor`/`anchor_type` to supplementary charts
+
+**P3: Polish**
+- CSS class conflict resolved: `<p class="section-content">` → `<p class="para">`, template CSS updated to cover both `.section-content p` and `p.para`
+- `_inline_markdown()`: HTML entities (`&lt;`, `&amp;`, `&#60;`) protected from double-escaping; known HTML tags preserved via placeholder mechanism; unknown tags escaped
+- Template: cover page conditional rendering for empty author/logo; `<pre class="code-block">` CSS added
+- PALETTE_12 duplicate color fix (gold variant → steel teal)
+- Template: added `key_findings` and `tables` (data_points) rendering blocks — fixes 2 pre-existing test failures
+
+**Bug Fixes Discovered During Strict Review**
+- `_extract_json_content()`: returned dict instead of str when `content` field was a nested object
+- `_parse_markdown_title()`: parsed title retained `**` bold markers from `## **粗体标题**`
+- `_content_to_html()`: unclosed code blocks no longer silently discard content
+
+**Tests**
+- `test_report_quality_fixes.py`: 28 TDD tests (P0-P3 coverage)
+- `test_strict_edge_cases.py`: 103 boundary/edge case tests (9 categories)
+- `test_content_orchestrator.py`: 51 tests including previously-failing `test_key_findings_in_html` and `test_data_points_in_html` (now fixed)
+- Total: **182 passed, 0 failed**
+
+**End-to-End Validation**
+- Generated report from real research data (一线城市儿童乐园市场研究): 11 sections, 8 `<ul>` + 9 `<ol>` + 2 `<blockquote>` + 11 `<table>` + 2 key findings. Quality score: **100/100**
+
+---
+
 ## [3.4.0] - 2026-07-09
 
 ### Fix: Chat History Duplication & Conversation Interruption

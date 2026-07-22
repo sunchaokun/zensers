@@ -1290,12 +1290,26 @@ class DocumentGenerationAgent(FixedAgent):
     # ==================== 图表系统修复：HTML 路径自动配图 ====================
 
     def _generate_charts_for_html(self, research_result: Dict[str, Any]) -> Dict[str, Any]:
-        """为 HTML 报告生成图表：三通道策略"""
+        """为 HTML 报告生成图表：优先复用管线1结果，不足时补充，总数≤2"""
         if not research_result.get("sections"):
             return research_result
 
+        MAX_CHARTS_PER_SECTION = 2
+
         self._html_charts_from_datapoints(research_result)
         self._html_charts_from_content(research_result)
+
+        for section in research_result.get("sections", []):
+            charts = section.get("charts", [])
+            if len(charts) <= MAX_CHARTS_PER_SECTION:
+                continue
+            planner_charts = [c for c in charts if c.get("insertion_anchor") or c.get("anchor_type")]
+            other_charts = [c for c in charts if c not in planner_charts]
+            if len(planner_charts) >= MAX_CHARTS_PER_SECTION:
+                section["charts"] = planner_charts[:MAX_CHARTS_PER_SECTION]
+            else:
+                needed = MAX_CHARTS_PER_SECTION - len(planner_charts)
+                section["charts"] = planner_charts + other_charts[:needed]
 
         return research_result
 
@@ -1400,6 +1414,8 @@ class DocumentGenerationAgent(FixedAgent):
                         "path": result.image_path,
                         "caption": f"{section.get('title', '')} - 关键数据",
                         "section_title": section.get("title", ""),
+                        "insertion_anchor": "",
+                        "anchor_type": "section_end",
                     })
                     section["charts"] = existing
                     logger.info(f"Generated data_points chart: {result.image_path}")
@@ -1441,6 +1457,8 @@ class DocumentGenerationAgent(FixedAgent):
                             "path": chart_path,
                             "caption": suggestion.caption or title,
                             "section_title": title,
+                            "insertion_anchor": "",
+                            "anchor_type": "section_end",
                         })
                         section["charts"] = existing
                         logger.info(f"Generated content chart: {chart_path}")

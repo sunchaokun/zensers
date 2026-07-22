@@ -245,26 +245,31 @@ class ContentOrchestrator:
         sections_data = []
         for i, section in enumerate(sections):
             # P0-3 fix: Get tables data for this section from research_result
+            # Skip if content already contains a table (avoid double rendering)
             section_tables = []
             raw_sections = research_result.get("sections", [])
             if i < len(raw_sections):
                 raw_section = raw_sections[i] if isinstance(raw_sections[i], dict) else {}
-                # Prefer section's own tables
-                if raw_section.get("tables"):
-                    section_tables = raw_section["tables"]
-                # If section has data_points, convert to tables format
-                elif raw_section.get("data_points"):
-                    rows = [
-                        [dp.get("metric", ""), dp.get("value", ""), dp.get("unit", "")]
-                        for dp in raw_section["data_points"]
-                    ]
-                    non_empty_rows = [r for r in rows if any(cell.strip() for cell in r)]
-                    if non_empty_rows:
-                        section_tables = [{
-                            "caption": raw_section.get("title", "Data Table"),
-                            "headers": ["Metric", "Value", "Unit"],
-                            "rows": non_empty_rows,
-                        }]
+                # Check if the converted content already has a <table>
+                content_html_preview = self._content_to_html(section.content) if section.content else ""
+                content_has_table = "<table" in content_html_preview
+                if not content_has_table:
+                    # Prefer section's own tables
+                    if raw_section.get("tables"):
+                        section_tables = raw_section["tables"]
+                    # If section has data_points, convert to tables format
+                    elif raw_section.get("data_points"):
+                        rows = [
+                            [dp.get("metric", ""), dp.get("value", ""), dp.get("unit", "")]
+                            for dp in raw_section["data_points"]
+                        ]
+                        non_empty_rows = [r for r in rows if any(cell.strip() for cell in r)]
+                        if non_empty_rows:
+                            section_tables = [{
+                                "caption": raw_section.get("title", "Data Table"),
+                                "headers": ["Metric", "Value", "Unit"],
+                                "rows": non_empty_rows,
+                            }]
             
             section_dict = {
                 "id": section.id,
@@ -404,6 +409,7 @@ class ContentOrchestrator:
             "date": research_result.get("date", datetime.now().strftime("%Y-%m-%d")),
             "logo_path": research_result.get("logo_path", ""),
             "watermark": research_result.get("watermark", ""),
+            "labels": {"toc": "目 录", "findings": "关键发现", "data": "核心数据"},
             
             "sections": sections_data,
             "key_findings": findings_data,
@@ -701,6 +707,9 @@ class ContentOrchestrator:
             num_match = re.match(r'^\d+[\.、，．]\s*(.*)$', stripped)
             if num_match:
                 raw_title = num_match.group(1).strip()
+                # Lines like "1. **bold text**" are ordered list items, not titles
+                if raw_title.startswith('**') or raw_title.startswith('*'):
+                    break
                 extracted_title = raw_title if raw_title else stripped
                 body_start = i + 1
                 logger.debug(f"[Title Parse] Numeric numbered title: '{extracted_title}'")
@@ -711,6 +720,7 @@ class ContentOrchestrator:
         
         # Construct body: if no title parsed, return original content
         if extracted_title:
+            extracted_title = re.sub(r'^\*{1,2}(.+?)\*{1,2}$', r'\1', extracted_title)
             body = "\n".join(lines[body_start:]).strip()
             return {"title": extracted_title, "body": body}
         else:
@@ -748,6 +758,15 @@ class ContentOrchestrator:
             
             # **Phase 1 Fix**: Parse title in content, separate title and body
             raw_content = data.get("content", "")
+            
+            # Content cleaner: fix blacklist titles and extract JSON content
+            try:
+                from src.content.content_cleaner import clean_section
+                data = clean_section(data)
+                raw_content = data.get("content", raw_content)
+            except ImportError:
+                pass
+            
             parsed = ContentOrchestrator._parse_markdown_title(raw_content)
             
             # Title priority: API provided title > title parsed from content
@@ -880,9 +899,33 @@ class ContentOrchestrator:
         
         return '\n'.join(html_parts)
 
+    _STOP_CHARS = frozenset("的与和及及其在中从对等了着过被把让向往以")
+
     @staticmethod
-    def _dedup_sections(sections: List[ContentSection]) -> List[ContentSection]:
-        """相同 title 的章节按优先级保留最佳版本
+    def _char_jaccard(a: str, b: str) -> float:
+        """标题相似度：提取核心词后计算字符级Jaccard
+
+        去掉停用字后，"行业现存问题与风险" → "行业现存问题风险"
+        "行业问题与痛点" → "行业问题痛点"，Jaccard更高
+        """
+        if not a or not b:
+            return 0.0
+        stop = ContentOrchestrator._STOP_CHARS
+        sa = set(c for c in a if c not in stop)
+        sb = set(c for c in b if c not in stop)
+        if not sa or not sb:
+            return 0.0
+        inter = len(sa & sb)
+        union = len(sa | sb)
+        return inter / union if union else 0.0
+
+    @staticmethod
+    def _dedup_sections(sections: List[ContentSection], threshold: float = 0.35) -> List[ContentSection]:
+        """相同或语义相近 title 的章节按优先级保留最佳版本
+
+        去重策略：
+        1. 精确标题匹配 → 直接去重
+        2. 字符级Jaccard相似度 > threshold → 语义去重
 
         优先级规则（从高到低）：
         1. 内容非空的版本优先于空版本
@@ -894,25 +937,38 @@ class ContentOrchestrator:
         result: List[ContentSection] = []
 
         def _priority(s: ContentSection) -> tuple:
-            """计算章节优先级得分（越高越优先）"""
             content = s.content or ""
             has_content = 1 if content.strip() else 0
-            # 不以"**xxx**"或"##"开头的内容更可能是有实质分析的文本
             not_structural = 1 if not re.match(r'^\s*(\*\*|#)', content) else 0
-            length = min(len(content) / 1000, 10)  # 内容长度得分，上限10
+            length = min(len(content) / 1000, 10)
             is_synthesis = 1 if s.type == SectionType.CONCLUSION else 0
             return (has_content, not_structural, length, is_synthesis)
 
+        def _find_similar(title: str) -> Optional[str]:
+            for existing_title in seen:
+                if ContentOrchestrator._char_jaccard(title, existing_title) > threshold:
+                    return existing_title
+            return None
+
         for s in sections:
+            matched_key = None
             if s.title in seen:
-                existing = seen[s.title]
+                matched_key = s.title
+            else:
+                matched_key = _find_similar(s.title)
+
+            if matched_key is not None:
+                existing = seen[matched_key]
                 if _priority(s) > _priority(existing):
                     seen[s.title] = s
-                    # Replace in result list as well
+                    if matched_key != s.title:
+                        del seen[matched_key]
                     for idx, rs in enumerate(result):
-                        if rs.title == s.title:
+                        if rs.title == matched_key:
                             result[idx] = s
                             break
+                    else:
+                        result.append(s)
             else:
                 seen[s.title] = s
                 result.append(s)
@@ -1058,17 +1114,74 @@ class ContentOrchestrator:
                 i += 1
                 continue
             
-            # Heading
-            hm = re.match(r'^(#{1,3})\s+(.+)$', stripped)
+            # Fenced code block: ``` ... ```
+            if stripped.startswith('```'):
+                lang = stripped[3:].strip()
+                code_lines = []
+                i += 1
+                while i < len(lines):
+                    if lines[i].strip().startswith('```'):
+                        i += 1
+                        break
+                    code_lines.append(lines[i])
+                    i += 1
+                if lang == 'json':
+                    try:
+                        import json as _json
+                        data = _json.loads('\n'.join(code_lines))
+                        if isinstance(data, dict) and 'content' in data:
+                            result.append(ContentOrchestrator._content_to_html(data['content']))
+                            continue
+                    except Exception:
+                        pass
+                result.append(f'<pre class="code-block"><code>{html.escape(chr(10).join(code_lines))}</code></pre>')
+                continue
+            
+            # Unordered list: - item / * item
+            if stripped.startswith('- ') or stripped.startswith('* '):
+                list_items = []
+                while i < len(lines):
+                    line = lines[i].strip()
+                    if line.startswith('- ') or line.startswith('* '):
+                        item_text = line[2:].strip()
+                        list_items.append(f'<li>{ContentOrchestrator._inline_markdown(item_text)}</li>')
+                        i += 1
+                    else:
+                        break
+                result.append(f'<ul>{chr(10).join(list_items)}</ul>')
+                continue
+            
+            # Blockquote: > text
+            if stripped.startswith('> '):
+                quote_lines = []
+                while i < len(lines):
+                    line = lines[i].strip()
+                    if line.startswith('> '):
+                        quote_lines.append(line[2:])
+                        i += 1
+                    else:
+                        break
+                quote_text = ContentOrchestrator._inline_markdown(' '.join(quote_lines))
+                result.append(f'<blockquote class="quote-block">{quote_text}</blockquote>')
+                continue
+            
+            # Heading: # / ## / ### / #### / ##### / ######
+            hm = re.match(r'^(#{1,6})\s+(.+)$', stripped)
             if hm:
                 level = len(hm.group(1))
-                # Remove Chinese number prefix: "## I. Competitive Landscape" → "Competitive Landscape"
                 raw = hm.group(2)
                 cleaned = re.sub(r'^[（(]?[一二三四五六七八九十百千]+[）).、：，．]\s*', '', raw)
                 text = ContentOrchestrator._inline_markdown(cleaned)
                 
-                tag = f'h{min(level + 1, 4)}'
-                result.append(f'<{tag} class="subsection-title">{text}</{tag}>')
+                tag = f'h{min(level + 1, 6)}'
+                class_map = {
+                    2: 'section-title',
+                    3: 'subsection-title',
+                    4: 'sub-subsection-title',
+                }
+                css_class = class_map.get(min(level + 1, 4), '')
+                class_attr = f' class="{css_class}"' if css_class else ''
+                result.append(f'<{tag}{class_attr}>{text}</{tag}>')
                 i += 1
                 continue
             
@@ -1087,6 +1200,22 @@ class ContentOrchestrator:
                 result.append(f'<h3 class="subsection-title">{text}</h3>')
                 i += 1
                 continue
+            
+            # Ordered list: 1. item / 1、item (but NOT mixed/chinese headings above)
+            ol_match = re.match(r'^(\d+)[\.、]\s+(.+)$', stripped)
+            if ol_match:
+                list_items = []
+                while i < len(lines):
+                    line = lines[i].strip()
+                    ol_m = re.match(r'^(\d+)[\.、]\s+(.+)$', line)
+                    if ol_m and not re.match(r'^\d+[\.、，．]\s*[（(]?[一二三四五六七八九十百千]+', line):
+                        list_items.append(f'<li>{ContentOrchestrator._inline_markdown(ol_m.group(2))}</li>')
+                        i += 1
+                    else:
+                        break
+                if list_items:
+                    result.append(f'<ol>{chr(10).join(list_items)}</ol>')
+                    continue
             
             # Standalone <img> tag → <figure>
             img_match = re.match(r'^\s*(<img\s[^>]*/?>)\s*$', stripped)
@@ -1111,7 +1240,7 @@ class ContentOrchestrator:
                     result.append(html_table)
                 else:
                     for tl in table_lines:
-                        result.append(f'<p class="section-content">{tl}</p>')
+                        result.append(f'<p class="para">{tl}</p>')
                 continue
             
             # HTML table block detection: <table>...</table>
@@ -1148,7 +1277,7 @@ class ContentOrchestrator:
                 continue
             
             # Normal paragraph
-            result.append(f'<p class="section-content">{ContentOrchestrator._inline_markdown(stripped)}</p>')
+            result.append(f'<p class="para">{ContentOrchestrator._inline_markdown(stripped)}</p>')
             i += 1
         
         return '\n'.join(result)
@@ -1238,7 +1367,17 @@ class ContentOrchestrator:
             r'<(?:img\s[^>]*/?>|table\b[^>]*>|/table>|thead\b[^>]*>|/thead>|tbody\b[^>]*>|/tbody>|tr\b[^>]*>|/tr>|th\b[^>]*>|/th>|td\b[^>]*>|/td>|figure\b[^>]*>|/figure>|figcaption\b[^>]*>|/figcaption>|ul\b[^>]*>|/ul>|ol\b[^>]*>|/ol>|li\b[^>]*>|/li>|blockquote\b[^>]*>|/blockquote>|pre\b[^>]*>|/pre>|code\b[^>]*>|/code>|br\s*/?>|hr\s*/?>|strong\b[^>]*>|/strong>|em\b[^>]*>|/em>|sub\b[^>]*>|/sub>|sup\b[^>]*>|/sup>|span\b[^>]*>|/span>|div\b[^>]*>|/div>|caption\b[^>]*>|/caption>|colgroup\b[^>]*>|/colgroup>|col\b[^>]*/?>)',
             protect_tag, text, flags=re.IGNORECASE
         )
+        # Protect existing HTML entities from double-escaping
+        entity_placeholders = {}
+        def protect_entity(m):
+            idx = len(entity_placeholders)
+            placeholder = f'__HTMLENTITY_{idx}__'
+            entity_placeholders[placeholder] = m.group(0)
+            return placeholder
+        text = re.sub(r'&[a-zA-Z]+;|&#\d+;', protect_entity, text)
         text = html.escape(text)
+        for placeholder, entity in entity_placeholders.items():
+            text = text.replace(placeholder, entity)
         for placeholder, tag in tag_placeholders.items():
             text = text.replace(placeholder, tag)
         text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
