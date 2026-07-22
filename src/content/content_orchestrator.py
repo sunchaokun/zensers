@@ -767,6 +767,11 @@ class ContentOrchestrator:
             except ImportError:
                 pass
             
+            # Skip sections where refinement was refused (empty draft, no data)
+            if data.get("_refusal"):
+                logger.info(f"[Section Parse] Skipping refusal/empty-draft section: '{data.get('title', '')}' (id={data.get('id', 'unknown')})")
+                continue
+            
             parsed = ContentOrchestrator._parse_markdown_title(raw_content)
             
             # Title priority: API provided title > title parsed from content

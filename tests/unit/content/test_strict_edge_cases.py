@@ -924,5 +924,62 @@ class TestDiscoveredBugs:
         assert all(isinstance(s, ContentSection) for s in sections)
 
 
+# =====================================================================
+# 10. 精修拒绝/空初稿内容过滤测试
+# =====================================================================
+
+class TestRefusalContentFiltering:
+    """精修Agent拒绝空初稿时，错误信息不应出现在最终报告中"""
+
+    def test_refusal_content_detected_by_cleaner(self):
+        """clean_section 应检测拒绝内容并清空"""
+        from src.content.content_cleaner import clean_section
+        data = {
+            "title": "增长速度",
+            "content": "当前初稿为空，无法执行精修润色。分析研究员提交的初稿内容为空（total_sources: 0），未包含任何实质性论述或数据。"
+        }
+        result = clean_section(data)
+        assert result.get("_refusal") is True
+        assert result["content"] == ""
+
+    def test_refusal_section_skipped_in_parse(self):
+        """_parse_sections 应跳过拒绝内容的章节"""
+        orchestrator = ContentOrchestrator()
+        sections_data = [
+            {"id": "s1", "title": "有效章节", "content": "正常内容", "order": 0},
+            {"id": "s2", "title": "增长速度", "content": "当前初稿为空，无法执行精修润色。禁止从头重写或编造数据。请补充完整初稿后，再提交精修。", "order": 1},
+            {"id": "s3", "title": "另一有效", "content": "正常内容2", "order": 2},
+        ]
+        sections = orchestrator._parse_sections(sections_data)
+        assert len(sections) == 2
+        titles = [s.title for s in sections]
+        assert "增长速度" not in titles
+
+    def test_english_refusal_detected(self):
+        """英文拒绝内容也应被检测"""
+        from src.content.content_cleaner import _is_refusal_content
+        assert _is_refusal_content("Draft is empty, cannot refine. No substantive content found.")
+        assert _is_refusal_content("The draft is empty so we cannot perform refinement.")
+
+    def test_normal_content_not_flagged(self):
+        """正常内容不应被误判为拒绝"""
+        from src.content.content_cleaner import _is_refusal_content
+        assert not _is_refusal_content("中国老年消费市场呈现双轨并行格局")
+        assert not _is_refusal_content("根据国家统计局数据，60岁以上人口超过18%")
+
+    def test_refusal_does_not_affect_other_sections(self):
+        """拒绝章节不影响前后正常章节"""
+        orchestrator = ContentOrchestrator()
+        sections_data = [
+            {"id": "s1", "title": "市场概述", "content": "这是正常内容", "order": 0},
+            {"id": "s2", "title": "空数据章节", "content": "初稿为空，无法执行精修润色。total_sources: 0", "order": 1},
+            {"id": "s3", "title": "总结", "content": "这是总结内容", "order": 2},
+        ]
+        sections = orchestrator._parse_sections(sections_data)
+        assert len(sections) == 2
+        assert sections[0].title == "市场概述"
+        assert sections[1].title == "总结"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
