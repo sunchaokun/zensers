@@ -518,6 +518,21 @@ export function ChatPanel() {
     }
   };
 
+  const handleResume = async () => {
+    if (!taskId) return;
+    try {
+      const result = await api.resumeResearch(taskId);
+      if (result.status === 'resumed') {
+        useResearchStore.getState().setStatus('running');
+        if (!sessionId) {
+          useResearchStore.getState().setSessionId(taskId);
+        }
+      }
+    } catch (e) {
+      console.error('Failed to resume research:', e);
+    }
+  };
+
   const handleCancel = async () => {
     if (taskId && status === 'running') {
       try { await api.pauseResearch(taskId); } catch {}
@@ -561,6 +576,33 @@ export function ChatPanel() {
 
   // Render step content (framework interaction steps 1-5)
   const renderStepContent = () => {
+    if (status === 'paused' && taskId) {
+      return (
+        <div className="space-y-3 p-4 bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-800 rounded-xl">
+          <p className="text-sm font-medium text-amber-800 dark:text-amber-200">
+            研究已暂停
+          </p>
+          <p className="text-xs text-amber-600 dark:text-amber-400">
+            研究任务已暂停，已采集的数据已缓存。您可以恢复研究或取消。
+          </p>
+          <div className="flex gap-2">
+            <button
+              onClick={handleResume}
+              className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm font-medium hover:bg-primary/90"
+            >
+              恢复研究
+            </button>
+            <button
+              onClick={handleCancel}
+              className="px-4 py-2 bg-secondary text-secondary-foreground rounded-lg text-sm font-medium hover:bg-secondary/90"
+            >
+              取消
+            </button>
+          </div>
+        </div>
+      );
+    }
+
     if (isProcessing) {
       return (
         <div className="flex items-center justify-center py-8">
@@ -708,7 +750,7 @@ export function ChatPanel() {
     try { await selectSections(selectedIds); } catch (error) { console.error('Failed to select sections:', error); }
   };
 
-  const handleFrameworkSectionConfirm = async (selectedIds: string[]) => {
+  const handleFrameworkSectionConfirm = async (selectedIds: string[], outputFormat?: string) => {
     if (!framework) return;
     const sectionMap = new Map(framework.sections.map((s, i) => [`section-${i}`, s]));
     const selectedLabels = selectedIds
@@ -716,9 +758,11 @@ export function ChatPanel() {
       .filter((label): label is string => label !== undefined);
     if (selectedLabels.length === 0) return;
     const isZh = /[\u4e00-\u9fff]/.test(framework.topic);
+    const fmt = outputFormat || 'docx';
+    const sectionsJson = JSON.stringify(selectedLabels);
     const exampleText = isZh
-      ? `确认开始研究，包含章节：${selectedLabels.join('、')}`
-      : `Confirm and start research with sections: ${selectedLabels.join(', ')}`;
+      ? `确认开始研究，包含章节：${selectedLabels.join('、')}\n__SELECTED_SECTIONS__:${sectionsJson}\n__OUTPUT_FORMAT__:${fmt}`
+      : `Confirm and start research with sections: ${selectedLabels.join(', ')}\n__SELECTED_SECTIONS__:${sectionsJson}\n__OUTPUT_FORMAT__:${fmt}`;
     try { await handleOptionSelect('confirm_start', exampleText); } catch (error) { console.error('Failed to confirm framework:', error); }
   };
 
@@ -784,6 +828,31 @@ export function ChatPanel() {
             {renderStepContent()}
           </div>
         )}
+
+        {status === 'paused' && taskId && (
+          <div className="space-y-3 p-4 bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-800 rounded-xl mt-2">
+            <p className="text-sm font-medium text-amber-800 dark:text-amber-200">
+              研究已暂停
+            </p>
+            <p className="text-xs text-amber-600 dark:text-amber-400">
+              研究任务已暂停，已采集的数据已缓存。您可以恢复研究或取消。
+            </p>
+            <div className="flex gap-2">
+              <button
+                onClick={handleResume}
+                className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm font-medium hover:bg-primary/90"
+              >
+                恢复研究
+              </button>
+              <button
+                onClick={handleCancel}
+                className="px-4 py-2 bg-secondary text-secondary-foreground rounded-lg text-sm font-medium hover:bg-secondary/90"
+              >
+                取消
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Scroll to bottom */}
@@ -809,6 +878,7 @@ export function ChatPanel() {
           isNetworkBusy={isNetworkBusy}
           isWaitingForReply={isWaitingForReply}
           isRunning={status === 'running'}
+          isPaused={status === 'paused'}
           pendingInput={pendingInputText}
           placeholder="Describe research needs or /template &lt;name&gt;"
         />

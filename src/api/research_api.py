@@ -57,32 +57,102 @@ from src.core.session_manager import SessionManager
 logger = logging.getLogger(__name__)
 session_manager = SessionManager()
 
-class ConversationToolSet:
-    """ConversationToolSet"""
+STREAM_TIMEOUT = 120
 
-    TOOL_DEFINITIONS = [
+class ConversationToolSet:
+    """ConversationToolSet - auto-registers tools from SkillRegistry manifests"""
+
+    _BASE_TOOL_DEFINITIONS = [
         {"name": "get_current_datetime", "description": "Get current date and time", "parameters": {"type": "object", "properties": {}, "required": []}},
         {"name": "web_search", "description": "Search the internet for real-time information", "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "Search query keywords"}, "max_results": {"type": "integer", "description": "Maximum number of results to return", "default": 5}, "recency_days": {"type": "integer", "description": "How recent the results should be in days (e.g. 7 for past week, 30 for past month)", "default": 30}}, "required": ["query"]}},
         {"name": "news_search", "description": "Search latest news", "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "News search query keywords"}, "max_results": {"type": "integer", "description": "Maximum number of news results to return", "default": 5}, "recency_days": {"type": "integer", "description": "How recent the news should be in days (e.g. 7 for past week, 30 for past month)", "default": 30}}, "required": ["query"]}},
         {"name": "scrape_url", "description": "Scrape main content from a given URL", "parameters": {"type": "object", "properties": {"url": {"type": "string", "description": "The URL to scrape"}, "max_chars": {"type": "integer", "description": "Maximum characters to extract", "default": 5000}}, "required": ["url"]}},
     ]
 
-    TOOL_TIMEOUTS = {"get_current_datetime": 5, "web_search": 30, "news_search": 30, "scrape_url": 20}
+    _BASE_TOOL_TIMEOUTS = {"get_current_datetime": 5, "web_search": 30, "news_search": 30, "scrape_url": 20}
 
-    def __init__(self):
+    def __init__(self, skill_registry=None):
         self._search_skill = None
         self._news_skill = None
         self._scraper_skill = None
-        return
+        self._skill_registry = skill_registry
+        self._skill_instances = {}
+        self._dynamic_tool_defs = []
+        self._dynamic_timeouts = {}
+        if skill_registry:
+            self._register_skills_from_manifests()
+        self.TOOL_DEFINITIONS = self._BASE_TOOL_DEFINITIONS + self._dynamic_tool_defs
+        self.TOOL_TIMEOUTS = {**self._BASE_TOOL_TIMEOUTS, **self._dynamic_timeouts}
+
+    _CHAT_ELIGIBLE_PRIORITIES = {'structured_db'}
+    _CHAT_ELIGIBLE_CATEGORIES = {'data-collection', 'financial-analysis'}
+    _CHAT_SKIP_NAMES = {'search_skill', 'news_search', 'web_scraper', 'llm', 'lc_python_repl', 'lc_wikipedia', 'lc_arxiv', 'lc_tavily_search'}
+
+    def _register_skills_from_manifests(self):
+        for name, manifest in self._skill_registry.all_manifests().items():
+            if manifest.skill_type == "langchain":
+                continue
+            if name in self._CHAT_SKIP_NAMES:
+                continue
+            if not manifest.capabilities:
+                continue
+            eligible = (manifest.priority in self._CHAT_ELIGIBLE_PRIORITIES
+                        or any(c in self._CHAT_ELIGIBLE_CATEGORIES for c in manifest.categories))
+            if not eligible:
+                continue
+            action_param_map = manifest.action_param_map or {}
+            properties = {"action": {"type": "string", "description": f"Action to perform: {', '.join(manifest.capabilities)}", "enum": manifest.capabilities}}
+            required = ["action"]
+            all_params = set()
+            param_action_count = {}
+            for action, param_map in action_param_map.items():
+                for param_name in (param_map or {}).values():
+                    all_params.add(param_name)
+                    param_action_count[param_name] = param_action_count.get(param_name, 0) + 1
+            for param_name in all_params:
+                if param_name not in properties:
+                    properties[param_name] = {"type": "string", "description": f"Parameter for skill actions"}
+                    if param_action_count[param_name] == len(action_param_map):
+                        required.append(param_name)
+            self._dynamic_tool_defs.append({
+                "name": name,
+                "description": manifest.description,
+                "parameters": {"type": "object", "properties": properties, "required": required},
+            })
+            self._dynamic_timeouts[name] = 30
+
+    def _get_handler(self, tool_name):
+        base_map = {'get_current_datetime': self.get_current_datetime, 'web_search': self.web_search, 'news_search': self.news_search, 'scrape_url': self.scrape_url}
+        if tool_name in base_map:
+            return base_map[tool_name]
+        if self._skill_registry and tool_name not in ('get_current_datetime', 'web_search', 'news_search', 'scrape_url'):
+            def _skill_handler(**kwargs):
+                return self._execute_skill_tool(tool_name, **kwargs)
+            return _skill_handler
+        return None
+
+    async def _execute_skill_tool(self, skill_name, **kwargs):
+        try:
+            skill = self._skill_instances.get(skill_name)
+            if not skill:
+                skill = self._skill_registry.get(skill_name)
+                if not skill:
+                    return {'success': False, 'error': f"Skill not found: {skill_name}"}
+                self._skill_instances[skill_name] = skill
+            result = await skill.execute(**kwargs)
+            if result.get('success'):
+                return {'success': True, 'data': result}
+            return {'success': False, 'error': result.get('error', result.get('message', 'Skill execution failed'))}
+        except Exception as e:
+            logger.warning(f"Skill tool {skill_name} failed: {e}")
+            return {'success': False, 'error': str(e)}
 
     def get_current_datetime(self):
-        """Get current date and time"""
         now = datetime.now()
         weekdays = ('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday')
         return {'success': True, 'data': {'iso_format': now.isoformat(), 'date': now.strftime('%Y-%m-%d'), 'weekday': weekdays[now.weekday()], 'time': now.strftime('%H:%M'), 'year': now.year, 'month': now.month, 'day': now.day, 'hour': now.hour, 'minute': now.minute}}
 
     async def web_search(self, query, max_results=5, recency_days=30):
-        """Search the internet for real-time information"""
         try:
             if not self._search_skill:
                 from src.skills.search_skill import MultiSearchSkill
@@ -107,7 +177,6 @@ class ConversationToolSet:
             return {'success': False, 'error': str(e)}
 
     async def news_search(self, query, max_results=5, recency_days=30):
-        """Search latest news"""
         try:
             if not self._news_skill:
                 from src.skills.search_skill import NewsSearchSkill
@@ -132,7 +201,6 @@ class ConversationToolSet:
             return {'success': False, 'error': str(e)}
 
     def scrape_url(self, url, max_chars):
-        """Scrape main content from a given URL"""
         try:
             if not self._scraper_skill:
                 from src.skills.web_scraper_skill import WebScraperSkill
@@ -144,10 +212,6 @@ class ConversationToolSet:
         except Exception as e:
             logger.warning(f"scrape_url failed: {e}")
             return {'success': False, 'error': str(e)}
-
-    def _get_handler(self, tool_name):
-        tool_map = {'get_current_datetime': self.get_current_datetime, 'web_search': self.web_search, 'news_search': self.news_search, 'scrape_url': self.scrape_url}
-        return tool_map.get(tool_name)
 
     async def execute_tool(self, tool_name, arguments):
         """Execute the specified tool and return result (with single timeout protection)"""
@@ -273,7 +337,8 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
             self._preview_generator = preview_generator
         else:
             self._preview_generator = PreviewGenerator(cache_dir=str(PreviewStorage.NEW_DIR))
-        self._tool_set = ConversationToolSet()
+        skill_registry = getattr(self._orchestrator, '_skill_registry', None)
+        self._tool_set = ConversationToolSet(skill_registry=skill_registry)
         self._revision_locks = {}
         self._revision_task = None
         self._executor_tasks = {}
@@ -468,6 +533,26 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
             session.pop('research_result', None)
             return await self._handle_chat_mode(session_id, user_input)
 
+        if research_result and research_result.get('status') in ('failed', 'error') and not has_executor_task:
+            logger.warning(f"Research failed/error with dead executor for {session_id}, falling back to chat")
+            from src.core.progress_streamer import ProgressStreamer, push_chat_response
+            ProgressStreamer.fail_task(session_id, research_result.get('error', 'Research failed'))
+            try:
+                push_chat_response(session_id, {
+                    "message": f"**Research Failed** ❌\n\n{research_result.get('error', 'Unknown error')}",
+                    "action": "continue_chat",
+                    "topic": session.get('research_context', {}).get('topic', ''),
+                    "directions": [],
+                    "suggestions": [
+                        {"id": "retry", "label": "Retry", "example": "Retry the research"},
+                    ],
+                })
+            except Exception:
+                pass
+            session['mode'] = 'chat'
+            session['current_step'] = 0
+            return await self._handle_chat_mode(session_id, user_input)
+
         if cm.is_paused(session_id):
             try:
                 conv_result = await asyncio.wait_for(self._llm_converse(session_id, user_input), timeout=60)
@@ -660,6 +745,54 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
             session['language'] = current_lang
             set_global_language(Language(current_lang))
 
+        context = session.get('research_context', {})
+        framework = context.get('framework')
+        _confirm_keywords = ('确认开始研究', '确认框架', '开始研究', 'confirm and start research', 'confirm_start')
+        _user_lower = user_input.lower()
+        if framework and any(kw in _user_lower for kw in _confirm_keywords):
+            logger.info(f"[{session_id}] Framework confirm intent detected, starting execution directly")
+            selected_sections = None
+            marker = '__SELECTED_SECTIONS__:'
+            if marker in user_input:
+                try:
+                    json_part = user_input[user_input.index(marker) + len(marker):]
+                    selected_sections = json.loads(json_part)
+                except Exception:
+                    selected_sections = None
+            sections_tree = framework.get('sections_tree')
+            if selected_sections:
+                all_sections = framework.get('sections', [])
+                if sections_tree:
+                    filtered_tree = []
+                    parent_names_for_subs = set()
+                    for node in sections_tree:
+                        node_name = node.get('name', '')
+                        if node_name in selected_sections:
+                            filtered_tree.append(node)
+                            continue
+                        matching_subs = []
+                        for sub in node.get('sub_sections', []):
+                            if sub.get('name', '') in selected_sections:
+                                matching_subs.append(sub)
+                        if matching_subs:
+                            node_copy = dict(node)
+                            node_copy['sub_sections'] = matching_subs
+                            filtered_tree.append(node_copy)
+                            parent_names_for_subs.add(node_name)
+                    if filtered_tree:
+                        framework['sections_tree'] = filtered_tree
+                    filtered = [s for s in all_sections if s in selected_sections or s in parent_names_for_subs]
+                else:
+                    filtered = [s for s in all_sections if s in selected_sections]
+                if filtered:
+                    framework['sections'] = filtered
+                context['framework'] = framework
+                session['research_context'] = context
+            self._sync_state_machine_to_framework(session, session_id)
+            conv_machine = self._get_or_create_conv_machine(session)
+            conv_machine.force_set_state(ConversationState.EXECUTING)
+            return await self._start_execution(session_id)
+
         intent_state = self._get_or_create_intent_state(session)
         conv_machine = self._get_or_create_conv_machine(session)
         cancel_flag = self._loop_cancel_flags.get(session_id, 0) + 1
@@ -693,7 +826,7 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
             msg = conv_result.get('message', '')
             if msg:
                 history = session.get('conversation_history', [])
-                history.append({'role': 'assistant', 'content': msg, 'timestamp': datetime.now().isoformat()})
+                history.append({'role': 'assistant', 'content': msg, 'timestamp': datetime.now().isoformat(), '_type': 'processing_ack'})
                 session['conversation_history'] = history
             return {'session_id': session_id, 'step': 0, 'mode': 'chat', 'status': 'processing', 'message': conv_result.get('message', 'Querying information, please wait...'), 'suggestions': [], 'next_step': 'tool_executing'}
 
@@ -912,7 +1045,17 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
         """R-FIX-7b: 构建研究运行上下文，供LLM判断用户意图。"""
         mode = session.get('mode', 'chat')
         if mode != 'research':
-            return ''
+            if session_id:
+                from src.core.orchestrator.execution.coordinator.cancel_manager import get_cancel_manager as _gcm
+                _cm_local = _gcm()
+                if _cm_local.is_paused(session_id):
+                    research_result = session.get('research_result')
+                    if not research_result or research_result.get('status') in ('completed', 'completed_with_warnings', 'failed', 'cancelled', 'error'):
+                        return ''
+                else:
+                    return ''
+            else:
+                return ''
         research_context = session.get('research_context')
         if not research_context:
             return ''
@@ -971,18 +1114,32 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
             completed_hint += f"\nData points collected: {data_point_count}"
         pending = session.get('_pending_section_injects', [])
         inject_hint = f" (Pending injects: {len(pending)})" if pending else ''
+        from src.core.orchestrator.execution.coordinator.cancel_manager import get_cancel_manager as _gcm2
+        _cm_rrc = _gcm2()
+        is_paused = session_id and _cm_rrc.is_paused(session_id)
+        status_label = "PAUSED" if is_paused else "RUNNING"
+        status_hint = (
+            "Research is PAUSED. Agents are waiting for resume.\n"
+            "Rules for changes during pause:\n"
+            "- 继续/继续任务/continue/resume → `resume_research` (DEFAULT for ambiguous messages)\n"
+            "- User EXPLICITLY says 修改/调整/修订 → `modify_research`\n"
+            "- User EXPLICITLY says 重新规划/重新开始/换个方向 → `enter_framework`\n"
+            "- Completely new, unrelated question → `continue_chat`\n"
+            if is_paused else
+            "Research is actively running. Agents are working on the above sections.\n"
+            "Rules for changes during research:\n"
+            "- New section, supplement, cancellation → `inject_requirement` (lightweight, no pause)\n"
+            "- User EXPLICITLY says 修改/调整/修订 → `modify_research` (pause + re-plan)\n"
+            "- User EXPLICITLY says 重新规划/重新开始/换个方向 → `enter_framework`\n"
+            "- Simple messages (继续/好的/ok/等) → `continue_chat`\n"
+        )
         return (
-            f"\n## Research Status: RUNNING ({progress_pct:.0%})\n"
+            f"\n## Research Status: {status_label} ({progress_pct:.0%})\n"
             f"Topic: {topic}\n"
             f"Framework sections: {sections_str}{inject_hint}\n"
             f"Current phase: {current_phase_desc}\n"
             f"{completed_hint}\n"
-            f"Research is actively running. Agents are working on the above sections.\n"
-            f"Rules for changes during research:\n"
-            f"- New section, supplement, cancellation → `inject_requirement` (lightweight, no pause)\n"
-            f"- User EXPLICITLY says 修改/调整/修订 → `modify_research` (pause + re-plan)\n"
-            f"- User EXPLICITLY says 重新规划/重新开始/换个方向 → `enter_framework`\n"
-            f"- Simple messages (继续/好的/ok/等) → `continue_chat`\n"
+            f"{status_hint}"
         )
 
     async def _llm_converse(self, session_id, user_input, conversation_state=None, temperature=None, _json_retry=False):
@@ -1015,11 +1172,11 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
         tool_defs = self._tool_set.TOOL_DEFINITIONS
         tools_section = ''
         if tool_defs:
-            tools_section = '\n## Tool Calling Capability\nWhen you need real-time information (date/time, web search, news, web content), you can add a `tool_call` field in the JSON to request tool invocation.\nAvailable tools:\n'
+            tools_section = '\n## Tool Calling Capability\nYou can add a `tool_call` field in the JSON to request tool invocation.\nAvailable tools:\n'
             for t in tool_defs:
                 params_str = str(t['parameters']) if t['parameters'] else 'No parameters'
                 tools_section += f"- **{t['name']}**: {t['description']} | Parameters: {params_str}\n"
-            tools_section += '\nUsage: add `"tool_call": {"name": "tool_name", "arguments": {...}}` to the output JSON\nAfter tool call you will receive the result, please generate the final response based on it.\nIf no tool is needed, set tool_call to null.\n'
+            tools_section += '\n## TOOL SELECTION PRIORITY (CRITICAL)\nWhen the user asks about stock prices, financial data, company fundamentals, or market quotes:\n1. **ALWAYS prefer structured data tools** (xueqiu, stock_data) over web_search — they return precise, real-time data\n2. Use `xueqiu` for: stock quotes, hot stocks, kline, search by name (action=quote/search/search_and_quote)\n3. Use `stock_data` for: financials, key metrics, company info, price history (action=financials/key_metrics/company_info)\n4. Only fall back to web_search if structured tools fail or lack the needed data\n\nUsage: add `"tool_call": {"name": "tool_name", "arguments": {...}}` to the output JSON\nAfter tool call you will receive the result, please generate the final response based on it.\nIf no tool is needed, set tool_call to null.\n'
         _now = datetime.now()
         current_date = _now.strftime('%Y-%m-%d')
         current_time = _now.strftime('%H:%M:%S')
@@ -1030,11 +1187,23 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
         if _cm5.is_paused(session_id) and session.get('research_result'):
             report = session['research_result'].get('report', {})
             section_count = len(report.get('sections', []))
-            paused_context = f"\n## Paused Research Context\nThe previous research on '{context.get('topic', '')}' was interrupted.\nCollected data is cached ({section_count} sections available).\nThe user may want to:\n- Resume → resume_research\n- Modify framework → modify_research\n- Regenerate from cache → regenerate_report\n- New question → continue_chat\n"
-        if session.get('_paused_research_context'):
-            rr = session.get('research_result', {})
-            sc = len(rr.get('report', {}).get('sections', [])) if rr else 0
-            paused_context = f"\n## Paused Research Context\nResearch on '{context.get('topic', '')}' is paused.\nCached: {sc} sections.\n- Resume → resume_research\n- Modify → modify_research\n- Regenerate → regenerate_report\n- Chat → continue_chat\n"
+            topic = context.get('topic', '')
+            task_progress = session.get('task_progress', {})
+            progress_pct = task_progress.get('progress', 0)
+            paused_context = f"""
+## Paused Research Context
+Research on '{topic}' is PAUSED (progress: {progress_pct:.0%}, {section_count} sections cached).
+The research was interrupted but data is preserved.
+
+ACTION PRIORITY (CRITICAL):
+1. If the user's message implies continuing/resuming the paused research
+   (e.g., 继续/继续任务/继续研究/continue/resume/go on/keep going), you MUST use action="resume_research".
+2. If the user explicitly asks to modify the framework → action="modify_research"
+3. If the user explicitly asks to regenerate the report → action="regenerate_report"
+4. If the user asks a completely new, unrelated question → action="continue_chat"
+
+IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_research, NOT continue_chat.
+"""
         sections_context = ''
         post_research_hint = ''
         if session.get('research_result'):
@@ -1091,21 +1260,28 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
                 if SessionStreamer and iteration == 0:
                     full_content = ""
                     try:
-                        async for token in call_llm_stream(
-                            prompt=user_prompt, system_prompt=system_prompt,
-                            model=_model, max_tokens=_max_tokens, temperature=_temperature,
-                            api_key=_api_key, base_url=_base_url,
-                        ):
-                            full_content += token
-                    except Exception as stream_err:
-                        logger.warning(f"Stream failed (iteration {iteration}), degrading: {stream_err}")
+                        async def _collect_stream():
+                            nonlocal full_content
+                            async for token in call_llm_stream(
+                                prompt=user_prompt, system_prompt=system_prompt,
+                                model=_model, max_tokens=_max_tokens, temperature=_temperature,
+                                api_key=_api_key, base_url=_base_url,
+                            ):
+                                full_content += token
+
+                        await asyncio.wait_for(_collect_stream(), timeout=STREAM_TIMEOUT)
+                    except (asyncio.TimeoutError, Exception) as stream_err:
+                        if isinstance(stream_err, asyncio.TimeoutError):
+                            logger.warning(f"Stream timed out (iteration {iteration}), degrading to non-stream")
+                        else:
+                            logger.warning(f"Stream failed (iteration {iteration}), degrading: {stream_err}")
                         result = await asyncio.wait_for(
                             call_llm(prompt=user_prompt, system_prompt=system_prompt,
                                      model=_model, max_tokens=_max_tokens, temperature=_temperature,
                                      api_key=_api_key, base_url=_base_url),
                             timeout=60)
                         if not result.get('success'):
-                            raise ValueError(f"LLM call failed: {result.get('error', 'Unknown error')}")
+                            raise ValueError(f"LLM call failed: {result.get('message') or result.get('error', 'Unknown error')}")
                         full_content = result.get('content', '')
                 else:
                     result = await asyncio.wait_for(
@@ -1114,7 +1290,7 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
                                  api_key=_api_key, base_url=_base_url),
                         timeout=60)
                     if not result.get('success'):
-                        raise ValueError(f"LLM call failed: {result.get('error', 'Unknown error')}")
+                        raise ValueError(f"LLM call failed: {result.get('message') or result.get('error', 'Unknown error')}")
                     full_content = result.get('content', '')
             except asyncio.TimeoutError:
                 logger.warning(f"LLM call timed out (iteration {iteration}), using accumulated results")
@@ -1163,7 +1339,12 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
                 from src.core.session_streamer import SessionStreamer
             except ImportError:
                 SessionStreamer = None
-            tool_display_names = {'web_search': 'Web Search Agent', 'news_search': 'News Search Agent', 'scrape_url': 'Content Scraper Agent', 'get_current_datetime': 'Date/Time Agent'}
+            tool_display_names = {'web_search': 'Web Search Agent', 'news_search': 'News Search Agent', 'scrape_url': 'Content Scraper Agent', 'get_current_datetime': 'Date/Time Agent', 'xueqiu': 'Xueqiu Stock Data', 'stock_data': 'Stock Financial Data', 'annual_report_parser': 'Annual Report Parser'}
+            if tool_name not in tool_display_names:
+                for td in self._tool_set.TOOL_DEFINITIONS:
+                    if td.get('name') == tool_name:
+                        tool_display_names[tool_name] = td.get('description', f'Agent ({tool_name})').split('.')[0].strip()
+                        break
             agent_name = tool_display_names.get(tool_name, f"Agent ({tool_name})")
             query_display = tool_args.get('query', tool_args.get('url', ''))
             if SessionStreamer:
@@ -1388,7 +1569,12 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
             tool_name = tool_call.get('name', '')
             tool_args = tool_call.get('arguments', {})
             logger.info(f"[BG] Tool execution (iteration {iteration + 1}): {tool_name}({tool_args})")
-            tool_display_names = {'web_search': 'Web Search Agent', 'news_search': 'News Search Agent', 'scrape_url': 'Content Scraper Agent', 'get_current_datetime': 'Date/Time Agent'}
+            tool_display_names = {'web_search': 'Web Search Agent', 'news_search': 'News Search Agent', 'scrape_url': 'Content Scraper Agent', 'get_current_datetime': 'Date/Time Agent', 'xueqiu': 'Xueqiu Stock Data', 'stock_data': 'Stock Financial Data', 'annual_report_parser': 'Annual Report Parser'}
+            if tool_name not in tool_display_names:
+                for td in self._tool_set.TOOL_DEFINITIONS:
+                    if td.get('name') == tool_name:
+                        tool_display_names[tool_name] = td.get('description', f'Agent ({tool_name})').split('.')[0].strip()
+                        break
             agent_name = tool_display_names.get(tool_name, f"Agent ({tool_name})")
             query_display = tool_args.get('query', tool_args.get('url', ''))
             if SessionStreamer:
@@ -1442,9 +1628,6 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
                     response_data['step'] = 0
             session['research_context'] = ctx
             self._update_intent_state_after_async(session)
-            history = session.get('conversation_history', [])
-            history.append({'role': 'assistant', 'content': response_data['message'], 'timestamp': datetime.now().isoformat()})
-            session['conversation_history'] = history
 
         if tool_history:
             tool_names = [t['name'] for t in tool_history]
@@ -1547,6 +1730,64 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
         if not framework:
             logger.warning(f"[{session_id}] framework is None in _handle_framework_mode, regenerating")
             return await self._enter_framework_mode(session_id, user_input)
+
+        _confirm_keywords = ('确认开始研究', '确认框架', 'confirm and start research', 'confirm_start')
+        _user_lower = user_input.lower()
+        if any(kw in _user_lower for kw in _confirm_keywords):
+            if not topic or not framework.get('sections'):
+                return self._framework_response(session_id, self._l('研究框架尚未完整定义，请先完成框架设置。', 'The research framework is not yet complete. Please finish setting it up first.', lang))
+            logger.info(f"[{session_id}] Framework confirm intent detected in framework mode, starting execution directly")
+            selected_sections = None
+            marker = '__SELECTED_SECTIONS__:'
+            format_marker = '__OUTPUT_FORMAT__:'
+            output_format = 'docx'
+            if marker in user_input:
+                try:
+                    json_part = user_input[user_input.index(marker) + len(marker):]
+                    if format_marker in json_part:
+                        fmt_and_json = json_part.split(format_marker, 1)
+                        json_part = fmt_and_json[0].strip()
+                        output_format = fmt_and_json[1].strip() if len(fmt_and_json) > 1 else 'docx'
+                    selected_sections = json.loads(json_part)
+                except Exception:
+                    selected_sections = None
+            if output_format not in ('docx', 'pptx', 'pdf', 'html'):
+                output_format = 'docx'
+            session['output_format'] = output_format
+            logger.info(f"[{session_id}] Output format set to: {output_format}")
+            if selected_sections:
+                sections_tree = framework.get('sections_tree')
+                all_sections = framework.get('sections', [])
+                if sections_tree:
+                    filtered_tree = []
+                    parent_names_for_subs = set()
+                    for node in sections_tree:
+                        node_name = node.get('name', '')
+                        if node_name in selected_sections:
+                            filtered_tree.append(node)
+                            continue
+                        matching_subs = []
+                        for sub in node.get('sub_sections', []):
+                            if sub.get('name', '') in selected_sections:
+                                matching_subs.append(sub)
+                        if matching_subs:
+                            node_copy = dict(node)
+                            node_copy['sub_sections'] = matching_subs
+                            filtered_tree.append(node_copy)
+                            parent_names_for_subs.add(node_name)
+                    if filtered_tree:
+                        framework['sections_tree'] = filtered_tree
+                    filtered = [s for s in all_sections if s in selected_sections or s in parent_names_for_subs]
+                else:
+                    filtered = [s for s in all_sections if s in selected_sections]
+                if filtered:
+                    framework['sections'] = filtered
+                context['framework'] = framework
+                session['research_context'] = context
+            conv_machine = self._get_or_create_conv_machine(session)
+            conv_machine.force_set_state(ConversationState.EXECUTING)
+            return await self._start_execution(session_id)
+
         conv_result = await self._llm_framework_modify(session_id, user_input)
         action = conv_result.get('action', 'modify')
         if action == 'cancel':
@@ -1695,7 +1936,12 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
         self._executor_tasks[session_id] = task
         task.add_done_callback(lambda _: self._executor_tasks.pop(session_id, None))
         ProgressStreamer.set_disconnect_callback(session_id, self._on_sse_disconnect)
-        return {'session_id': session_id, 'task_id': session_id, 'step': 6, 'mode': 'research', 'status': 'running', 'message': self._l(f"研究任务已启动！\n\n**研究主题**: {topic}\n\n正在执行研究，请耐心等待...", f"Research task has been started!\n\n**Research Topic**: {topic}\n\nExecuting research, please wait...", session.get('language', 'zh')), 'final_plan': final_plan, 'next_step': 'execute'}
+        lang = session.get('language', 'zh')
+        exec_msg = self._l(f"研究任务已启动！\n\n**研究主题**: {topic}\n\n正在执行研究，请耐心等待...", f"Research task has been started!\n\n**Research Topic**: {topic}\n\nExecuting research, please wait...", lang)
+        history = session.get('conversation_history', [])
+        history.append({'role': 'assistant', 'content': exec_msg, 'timestamp': datetime.now().isoformat()})
+        session['conversation_history'] = history
+        return {'session_id': session_id, 'task_id': session_id, 'step': 6, 'mode': 'research', 'status': 'running', 'message': exec_msg, 'final_plan': final_plan, 'next_step': 'execute'}
 
     async def _start_execution_with_routing(self, session_id, routing_result):
         """Start execution using pre-computed IntelligentRoutingResult (BP1 fix)"""
@@ -2791,7 +3037,7 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
         if not session:
             return
         research_result = session.get('research_result', {})
-        _terminal = ('completed', 'failed', 'cancelled', 'error')
+        _terminal = ('completed', 'completed_with_warnings', 'failed', 'cancelled', 'error')
         if research_result.get('status') in _terminal:
             logger.info(f"SSE disconnected for {task_id}, research {research_result.get('status')} - not pausing")
             return
@@ -2799,9 +3045,50 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
         async def _delayed_pause():
             await asyncio.sleep(30)
             s2 = session_manager.get(task_id)
-            if s2 and s2.get('research_result', {}).get('status') not in _terminal:
-                from src.core.orchestrator.execution.coordinator.cancel_manager import get_cancel_manager
-                get_cancel_manager().pause(task_id)
+            if not s2:
+                return
+            rs2 = s2.get('research_result', {})
+            if rs2.get('status') in _terminal:
+                return
+            exec_task = self._executor_tasks.get(task_id)
+            if exec_task is None or exec_task.done():
+                logger.warning(f"SSE disconnected for {task_id}, executor task dead but status not terminal — marking failed")
+                rs2['status'] = 'failed'
+                rs2['error'] = 'Executor task died without setting terminal status'
+                try:
+                    from src.core.progress_streamer import ProgressStreamer
+                    ProgressStreamer.fail_task(task_id, 'Executor task died unexpectedly')
+                except Exception as e:
+                    logger.warning(f"Failed to notify ProgressStreamer of dead executor: {e}")
+                try:
+                    from src.core.task_persistence import TaskPersistenceManager
+                    tp = TaskPersistenceManager()
+                    task = tp.load_task(task_id)
+                    if task:
+                        task.fail('Executor task died unexpectedly')
+                        tp.save_task(task)
+                except Exception as e:
+                    logger.warning(f"Failed to persist fail state: {e}")
+                return
+            from src.core.orchestrator.execution.coordinator.cancel_manager import get_cancel_manager
+            get_cancel_manager().pause(task_id)
+
+            try:
+                from src.core.progress_streamer import ProgressStreamer
+                ProgressStreamer.pause_task(task_id, 'Research paused due to SSE disconnect')
+            except Exception:
+                pass
+
+            try:
+                from src.core.session_streamer import SessionStreamer
+                SessionStreamer.push_agent_message(task_id, {
+                    'agent_id': 'system',
+                    'agent_name': 'System',
+                    'action': 'paused',
+                    'content': f"Research paused due to SSE disconnect. Progress: {s2.get('task_progress', {}).get('progress', 0):.0%}. Say '继续' to resume.",
+                })
+            except Exception:
+                pass
         task = safe_create_task(_delayed_pause(), name=f"delayed_pause_{task_id}")
         self._background_tasks[f"_sse_disconnect_{task_id}"] = task
         task.add_done_callback(lambda _: self._background_tasks.pop(f"_sse_disconnect_{task_id}", None))

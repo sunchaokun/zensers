@@ -13,7 +13,7 @@ interface SectionSelectorProps {
   description?: string;
   sections: SelectOption[];
   frameworkTree?: FrameworkSection[];
-  onConfirm: (selectedIds: string[]) => void;
+  onConfirm: (selectedIds: string[], outputFormat?: string) => void;
   disabled?: boolean;
 }
 
@@ -31,6 +31,7 @@ export function SectionSelector({
   const [expandedSections, setExpandedSections] = useState<Set<string>>(() =>
     frameworkTree ? new Set(frameworkTree.map((s) => s.name)) : new Set()
   );
+  const [outputFormat, setOutputFormat] = useState<string>('docx');
 
   useEffect(() => {
     setSelectedIds(sections.filter((s) => s.required || s.selected).map((s) => s.id));
@@ -55,7 +56,7 @@ export function SectionSelector({
   const handleConfirm = () => {
     const requiredIds = sections.filter((s) => s.required === true).map((s) => s.id);
     const finalIds = [...requiredIds, ...selectedIds.filter(id => !requiredIds.includes(id))];
-    onConfirm(finalIds);
+    onConfirm(finalIds, outputFormat);
   };
 
   const hasTree = frameworkTree && frameworkTree.length > 0;
@@ -206,9 +207,33 @@ export function SectionSelector({
       </div>
 
       <div className="mt-4 flex items-center justify-between px-1">
-        <p className="text-xs text-muted-foreground">
-          Selected {selectedIds.length} / {sections.length} sections
-        </p>
+        <div className="flex items-center gap-3">
+          <p className="text-xs text-muted-foreground">
+            Selected {selectedIds.length} / {sections.length} sections
+          </p>
+          <div className="flex items-center gap-1 bg-muted rounded-lg p-0.5">
+            {[
+              { value: 'docx', label: 'Word' },
+              { value: 'pptx', label: 'PPT' },
+              { value: 'pdf', label: 'PDF' },
+            ].map((fmt) => (
+              <button
+                key={fmt.value}
+                type="button"
+                onClick={() => setOutputFormat(fmt.value)}
+                disabled={disabled}
+                className={cn(
+                  'px-3 py-1 rounded-md text-xs font-medium transition-colors',
+                  outputFormat === fmt.value
+                    ? 'bg-card text-foreground shadow-sm'
+                    : 'text-muted-foreground hover:text-foreground'
+                )}
+              >
+                {fmt.label}
+              </button>
+            ))}
+          </div>
+        </div>
         <button
           type="button"
           onClick={handleConfirm}
