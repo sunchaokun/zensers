@@ -199,22 +199,30 @@ export function ChatPanel() {
 
       if (mode === 'framework') {
         useResearchStore.getState().setStep(0, data.suggestions || []);
-        api.getResearchDetail(data.session_id).then((detail) => {
-          if (detail.framework) {
-            useResearchStore.getState().setFramework(detail.framework);
-          }
-        }).catch(() => {});
+        if ((data as any).framework) {
+          useResearchStore.getState().setFramework((data as any).framework);
+        } else {
+          api.getResearchDetail(data.session_id).then((detail) => {
+            if (detail.framework) {
+              useResearchStore.getState().setFramework(detail.framework);
+            }
+          }).catch(() => {});
+        }
       } else if (mode === 'research' && (data as any).step === 6) {
         useResearchStore.getState().setTaskId(data.session_id);
         useResearchStore.getState().setStatus('running');
         useResearchStore.getState().setStep(6, undefined);
       } else if (action === 'enter_framework') {
         useResearchStore.getState().setStep(0, data.suggestions || []);
-        api.getResearchDetail(data.session_id).then((detail) => {
-          if (detail.framework) {
-            useResearchStore.getState().setFramework(detail.framework);
-          }
-        }).catch(() => {});
+        if ((data as any).framework) {
+          useResearchStore.getState().setFramework((data as any).framework);
+        } else {
+          api.getResearchDetail(data.session_id).then((detail) => {
+            if (detail.framework) {
+              useResearchStore.getState().setFramework(detail.framework);
+            }
+          }).catch(() => {});
+        }
       } else if (action === 'start_execution' || action === 'start_research') {
         useResearchStore.getState().setStatus('running');
         useResearchStore.getState().setStep(6, undefined);
@@ -381,11 +389,14 @@ export function ChatPanel() {
     if (sessionMessages) {
       serverOffsetRef.current = sessionMessages.length;
       setHasMoreMessages(sessionMessages.length > 0);
+    } else {
+      serverOffsetRef.current = 0;
+      setHasMoreMessages(true);
     }
-  }, [activeSessionId]);
+  }, [activeSessionId, messages]);
 
   const { containerRef, handleScroll, scrollToBottom, isAtBottom } = useChatScroll(
-    [messages],
+    [messages.length],
     loadOlderMessages,
   );
 

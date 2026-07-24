@@ -79,7 +79,9 @@ export async function restoreSession(id: string): Promise<void> {
   try {
     const detail: any = await api.getResearchDetail(id);
 
-    const msgs: ChatMessage[] = (detail.messages || []).map((m: any) => ({
+    const msgs: ChatMessage[] = (detail.messages || [])
+      .filter((m: any) => m._type !== 'processing_ack')
+      .map((m: any) => ({
       id: m.id || nanoid(),
       role: (m.role === 'user' || m.role === 'assistant' || m.role === 'agent'
         ? m.role

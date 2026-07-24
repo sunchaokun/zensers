@@ -343,7 +343,7 @@ class Settings:
             # Direct properties
             self.llm.provider = llm.get('provider', self.llm.provider)
             self.llm.api_key = llm.get('api_key', self.llm.api_key)
-            self.llm.base_url = llm.get('base_url', self.llm.base_url)
+            self.llm.base_url = (llm.get('base_url', self.llm.base_url) or '').strip()
             self.llm.model = llm.get('model', self.llm.model)
             self.llm.cheap_model = llm.get('cheap_model', self.llm.cheap_model)
             self.llm.embedding_model = llm.get('embedding_model', self.llm.embedding_model)

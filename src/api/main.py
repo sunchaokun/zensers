@@ -626,7 +626,7 @@ def list_all_sessions(limit: int = 20, offset: int = 0):
                     "task_id": sid, "title": topic or session.get("user_input", "Unnamed Research"),
                     "topic": topic, "query": session.get("user_input", ""),
                     "status": state, "created_at": created_at, "completed_at": None,
-                    "output_format": session.get("output_type"), "generated_formats": [],
+                    "output_format": session.get("output_format") or session.get("output_type"), "generated_formats": [],
                 })
             except Exception as e:
                 logger.warning(f"Failed to process session {sid}: {e}")
@@ -711,7 +711,7 @@ async def get_research_detail(task_id: str):
         "status": state,
         "created_at": created_at,
         "completed_at": None,
-        "output_format": session.get("output_type"),
+        "output_format": session.get("output_format") or session.get("output_type"),
         "preview_url": preview_url,
         "download_url": download_url,
         "result": research_result,  # Include full research result
@@ -723,17 +723,20 @@ async def get_research_detail(task_id: str):
     history = session.get("display_history") or session.get("conversation_history", [])
     for i, msg in enumerate(history):
         if isinstance(msg, dict) and ("role" in msg or "type" in msg) and "content" in msg:
-            messages.append({
-                "id": msg.get("id") or str(uuid.uuid4())[:8],
+            entry = {
+                "id": msg.get("id") or f"msg-{i}",
                 "role": msg.get("role", msg.get("type", "unknown")),
                 "content": msg["content"],
                 "timestamp": msg.get("timestamp", created_at or ""),
-            })
+            }
+            if msg.get("_type"):
+                entry["_type"] = msg["_type"]
+            messages.append(entry)
 
     return {**meta, "messages": messages, "config": {
         "output_type": meta.get("output_type", "report"),
         "template": "consulting", "sections": [],
-    }}
+    }, "framework": research_context.get("framework")}
 
 
 @app.get("/api/v1/research/{task_id}/messages")
@@ -764,12 +767,15 @@ async def get_research_messages(
     messages = []
     for i, msg in enumerate(page):
         if isinstance(msg, dict) and ("role" in msg or "type" in msg) and "content" in msg:
-            messages.append({
-                "id": msg.get("id") or str(uuid.uuid4())[:8],
+            entry = {
+                "id": msg.get("id") or f"msg-{offset + i}",
                 "role": msg.get("role", msg.get("type", "unknown")),
                 "content": msg["content"],
                 "timestamp": msg.get("timestamp", created_at or ""),
-            })
+            }
+            if msg.get("_type"):
+                entry["_type"] = msg["_type"]
+            messages.append(entry)
     
     return {
         "messages": messages,
@@ -1189,6 +1195,45 @@ async def root():
 
 _scheduled_dream_task = None
 
+
+def _repair_ghost_sessions():
+    """Detect and repair ghost sessions on startup.
+
+    A ghost session is one where mode=research but the executor task is dead
+    (server restarted) and research_result.status is not terminal.
+    These sessions would otherwise appear stuck in 'running' or 'paused' forever.
+    """
+    sm = _session_manager
+    _terminal = ('completed', 'completed_with_warnings', 'failed', 'cancelled', 'error')
+    repaired = 0
+
+    for sid in sm.keys():
+        try:
+            session = sm.get(sid)
+            if not session:
+                continue
+            if session.get('mode') != 'research':
+                continue
+            rr = session.get('research_result')
+            if not rr:
+                session['mode'] = 'chat'
+                session['current_step'] = 0
+                repaired += 1
+                logger.info(f"Ghost session repaired (no research_result): {sid}")
+                continue
+            if rr.get('status') not in _terminal:
+                rr['status'] = 'failed'
+                rr['error'] = 'Server restarted while research was in progress'
+                session['mode'] = 'chat'
+                session['current_step'] = 0
+                repaired += 1
+                logger.info(f"Ghost session repaired (status={rr.get('status')}): {sid}")
+        except Exception as e:
+            logger.warning(f"Failed to repair session {sid}: {e}")
+
+    if repaired:
+        logger.info(f"Ghost session repair: {repaired} sessions fixed on startup")
+
 @app.on_event("startup")
 async def startup_event():
     logger.info("Zensers API started")
@@ -1200,6 +1245,8 @@ async def startup_event():
     from src.core.llm_client import init_llm_infrastructure
     init_llm_infrastructure(settings.llm_profiles)
     logger.info("LLM infrastructure initialized with %d profiles", len(settings.llm_profiles.profiles))
+
+    _repair_ghost_sessions()
 
     global _scheduled_dream_task, _dream_scheduler, _dream_cfg
 

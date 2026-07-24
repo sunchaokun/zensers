@@ -50,7 +50,7 @@ async def call_llm_stream(
     max_tokens = max_tokens or settings.llm.max_tokens
     temperature = temperature or settings.llm.temperature
     api_key = api_key or settings.llm.api_key
-    base_url = base_url or settings.llm.base_url
+    base_url = (base_url or settings.llm.base_url or '').strip()
 
     if not prompt or not prompt.strip():
         return
@@ -119,7 +119,7 @@ async def call_llm(
             p_max_tokens = max_tokens or profile.max_tokens
             p_temperature = temperature or profile.temperature
             p_api_key = api_key or profile.api_key
-            p_base_url = base_url or profile.base_url
+            p_base_url = (base_url or profile.base_url or '').strip()
             if profile.cost_limit_per_call > 0:
                 estimated_cost = (p_max_tokens / 1000) * 0.01
                 if estimated_cost > profile.cost_limit_per_call:
@@ -163,7 +163,7 @@ async def call_llm(
     max_tokens = max_tokens or settings.llm.max_tokens
     temperature = temperature or settings.llm.temperature
     api_key = api_key or settings.llm.api_key
-    base_url = base_url or settings.llm.base_url
+    base_url = (base_url or settings.llm.base_url or '').strip()
 
     if not prompt or not prompt.strip():
         return {"success": False, "message": "prompt cannot be empty", "error": "empty_prompt"}
@@ -330,7 +330,7 @@ async def call_llm_vision(
     max_tokens = max_tokens or settings.llm.max_tokens
     temperature = temperature or settings.llm.temperature
     api_key = api_key or settings.llm.api_key
-    base_url = base_url or settings.llm.base_url
+    base_url = (base_url or settings.llm.base_url or '').strip()
 
     if not prompt or not prompt.strip():
         return {"success": False, "message": "prompt cannot be empty", "error": "empty_prompt"}

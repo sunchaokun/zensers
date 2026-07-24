@@ -86,14 +86,10 @@ class TestFrameworkModifyFailureReturnsModify:
                 'language': 'zh',
                 'llm_config': {},
             }
-            with patch('src.skills.llm_skill.LLMSkill') as mock_skill_cls:
-                mock_skill = MagicMock()
-                mock_skill.execute = AsyncMock(side_effect=Exception("LLM down"))
-                mock_skill_cls.return_value = mock_skill
-                with patch('src.api.research_api.asyncio') as mock_asyncio:
-                    mock_asyncio.wait_for = AsyncMock(side_effect=Exception("LLM down"))
-                    result = await api._llm_framework_modify('ses_001', 'confirm_start')
-                    assert result['action'] == 'modify'
+            with patch('src.api.research_api.asyncio') as mock_asyncio:
+                mock_asyncio.wait_for = AsyncMock(side_effect=Exception("LLM down"))
+                result = await api._llm_framework_modify('ses_001', '我想加一个章节')
+                assert result['action'] == 'modify'
 
     @pytest.mark.asyncio
     async def test_llm_returns_unsuccessful_returns_modify(self):
@@ -108,14 +104,10 @@ class TestFrameworkModifyFailureReturnsModify:
                 'language': 'zh',
                 'llm_config': {},
             }
-            with patch('src.skills.llm_skill.LLMSkill') as mock_skill_cls:
-                mock_skill = MagicMock()
-                mock_skill.execute = AsyncMock(return_value={'success': False, 'error': 'timeout'})
-                mock_skill_cls.return_value = mock_skill
-                with patch('src.api.research_api.asyncio') as mock_asyncio:
-                    mock_asyncio.wait_for = AsyncMock(return_value={'success': False, 'error': 'timeout'})
-                    result = await api._llm_framework_modify('ses_001', 'confirm_start')
-                    assert result['action'] == 'modify'
+            with patch('src.api.research_api.asyncio') as mock_asyncio:
+                mock_asyncio.wait_for = AsyncMock(return_value={'success': False, 'error': 'timeout'})
+                result = await api._llm_framework_modify('ses_001', '我想加一个章节')
+                assert result['action'] == 'modify'
 
     @pytest.mark.asyncio
     async def test_llm_returns_no_json_returns_modify(self):
@@ -130,14 +122,10 @@ class TestFrameworkModifyFailureReturnsModify:
                 'language': 'zh',
                 'llm_config': {},
             }
-            with patch('src.skills.llm_skill.LLMSkill') as mock_skill_cls:
-                mock_skill = MagicMock()
-                mock_skill.execute = AsyncMock(return_value={'success': True, 'content': 'plain text no json'})
-                mock_skill_cls.return_value = mock_skill
-                with patch('src.api.research_api.asyncio') as mock_asyncio:
-                    mock_asyncio.wait_for = AsyncMock(return_value={'success': True, 'content': 'plain text no json'})
-                    result = await api._llm_framework_modify('ses_001', 'confirm_start')
-                    assert result['action'] == 'modify'
+            with patch('src.api.research_api.asyncio') as mock_asyncio:
+                mock_asyncio.wait_for = AsyncMock(return_value={'success': True, 'content': 'plain text no json'})
+                result = await api._llm_framework_modify('ses_001', '我想加一个章节')
+                assert result['action'] == 'modify'
 
 
 class TestHandleFrameworkModeModifyReturnsFrameworkResponse:
@@ -148,9 +136,10 @@ class TestHandleFrameworkModeModifyReturnsFrameworkResponse:
         return api
 
     @pytest.mark.asyncio
-    async def test_modify_action_returns_framework_response(self):
-        """action='modify' → _framework_response → mode='framework' + framework 数据"""
+    async def test_confirm_start_now_triggers_execution(self):
+        """Bug12/13 fix: 'confirm_start' now triggers execution directly, not LLM modify"""
         api = self._make_api()
+        api._executor_tasks = {}
         with patch('src.api.research_api.session_manager') as sm:
             session = {
                 'research_context': {
@@ -163,21 +152,20 @@ class TestHandleFrameworkModeModifyReturnsFrameworkResponse:
                 'conversation_history': [],
             }
             sm.get.return_value = session
-            with patch.object(api, '_llm_framework_modify', new_callable=AsyncMock) as mock_modify:
-                mock_modify.return_value = {
-                    'action': 'modify',
-                    'message': '请告诉我你想如何修改框架',
-                    'new_sections': None,
-                }
-                with patch.object(api, '_framework_response') as mock_fw_resp:
-                    mock_fw_resp.return_value = {
-                        'session_id': 'ses_001', 'step': 5, 'mode': 'framework',
-                        'message': '请告诉我你想如何修改框架',
-                        'framework': session['research_context']['framework'],
+            with patch.object(api, '_get_or_create_conv_machine') as mock_conv:
+                mock_machine = MagicMock()
+                mock_conv.return_value = mock_machine
+                with patch.object(api, '_start_execution', new_callable=AsyncMock) as mock_exec:
+                    mock_exec.return_value = {
+                        'session_id': 'ses_001', 'task_id': 'ses_001',
+                        'step': 6, 'mode': 'research', 'status': 'running',
+                        'message': '研究任务已启动',
                     }
                     result = await api._handle_framework_mode('ses_001', 'confirm_start')
-                    assert result['mode'] == 'framework', \
-                        "Bug 验证：action='modify' 返回 mode='framework'，前端会再次显示框架选择器"
+                    assert result['mode'] == 'research', \
+                        "Fix verification: 'confirm_start' now triggers execution (mode='research'), not LLM modify (mode='framework')"
+                    assert result['status'] == 'running'
+                    mock_exec.assert_called_once_with('ses_001')
 
 
 class TestSuggestionIdShouldNotOverrideNonEmptyText:

@@ -30,6 +30,8 @@ interface ChatInputProps {
   isWaitingForReply?: boolean;
   /** Show stop button without blocking send (e.g. during research) */
   isRunning?: boolean;
+  /** Research is paused — adjust placeholder text */
+  isPaused?: boolean;
   /** Pre-filled input from quality panel issue action */
   pendingInput?: string;
 }
@@ -47,6 +49,7 @@ export function ChatInput({
   isNetworkBusy = false,
   isWaitingForReply = false,
   isRunning = false,
+  isPaused = false,
   pendingInput,
 }: ChatInputProps) {
   const [text, setText] = useState('');
@@ -280,7 +283,7 @@ export function ChatInput({
             onKeyDown={handleKeyDown}
             onFocus={() => setIsFocused(true)}
             onBlur={() => setIsFocused(false)}
-            placeholder={isLoading ? 'Processing...' : isWaitingForReply ? 'Searching... please wait for results' : isRunning ? 'Type query or click ■ to pause' : placeholder}
+            placeholder={isPaused ? 'Type "继续" to resume research, or ask a new question' : isLoading ? 'Processing...' : isWaitingForReply ? 'Searching... please wait for results' : isRunning ? 'Type query or click ■ to pause' : placeholder}
             disabled={disabled}
             className="min-h-[80px] max-h-[180px] resize-none border-0 focus-visible:ring-0 p-4 pr-14 text-sm leading-relaxed"
             rows={3}

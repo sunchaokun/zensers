@@ -103,6 +103,7 @@ class SessionHistoryCompressor:
             # Compress conversation_history (for LLM context only)
             dict.__setitem__(session, "conversation_history", result["history"])
             dict.__setitem__(session, "_compressed", True)
+            dict.__setitem__(session, "_display_synced_len", len(result["history"]))
             logger.info(
                 f"History compressed: {session_id} "
                 f"({len(history)} -> {len(result['history'])} steps, "

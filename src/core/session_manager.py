@@ -61,7 +61,19 @@ class PersistentSessionDict(dict):
         # Use dict.__setitem__ to avoid re-triggering __setitem__ → infinite save loop
         if key == "conversation_history":
             if isinstance(value, list):
-                dict.__setitem__(self, "display_history", [dict(m) if isinstance(m, dict) else m for m in value])
+                existing_display = dict.get(self, "display_history")
+                if not existing_display:
+                    dict.__setitem__(self, "display_history", [dict(m) if isinstance(m, dict) else m for m in value])
+                    dict.__setitem__(self, "_display_synced_len", len(value))
+                else:
+                    synced_len = dict.get(self, "_display_synced_len", 0)
+                    if synced_len > len(value):
+                        synced_len = len(value)
+                    if len(value) > synced_len:
+                        new_msgs = value[synced_len:]
+                        extended = list(existing_display) + [dict(m) if isinstance(m, dict) else m for m in new_msgs]
+                        dict.__setitem__(self, "display_history", extended)
+                        dict.__setitem__(self, "_display_synced_len", len(value))
             else:
                 dict.__setitem__(self, "display_history", [])
         self._manager._save_to_disk(self._session_id)

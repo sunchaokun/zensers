@@ -169,7 +169,7 @@ class ResearchExecutor:
                                     "section_requirements": section_reqs,
                                 },
                                 output_type=framework.get("output_type", "industry_report"),
-                                output_format="html",
+                                output_format=session.get('output_format', 'docx'),
                                 custom_aspects=inject_aspects,
                                 skip_phases=routing_result.skip_phases or None,
                             ),
@@ -346,6 +346,7 @@ class ResearchExecutor:
                 "aspects": framework.get("sections", None),
                 "sections_tree": plan.get("sections_tree"),
                 "section_details": _section_details,
+                "output_format": session.get("output_format", plan.get("output_format", "docx")),
             }
             # 从 session 读取动态参数（由 quick_start 存入）
             param_keys = ("region", "time_range", "depth", "company_name",
@@ -395,7 +396,7 @@ class ResearchExecutor:
                         interaction_mode=False,
                         output_type=output_type,
                         custom_aspects=framework.get("sections", None),
-                        output_format="html",
+                        output_format=session.get('output_format', 'docx'),
                         skip_phases=skip_phases or None,
                     ),
                     timeout=orchestrator_timeout,
@@ -540,10 +541,11 @@ class ResearchExecutor:
                 return result
 
             else:
+                _detail = orchestrator_result.summary or orchestrator_result.status
                 result = {
                     "task_id": session_id,
                     "status": orchestrator_result.status,
-                    "error": f"Research failed with status: {orchestrator_result.status}",
+                    "error": f"Research failed: {_detail}",
                     "summary": orchestrator_result.summary,
                 }
 

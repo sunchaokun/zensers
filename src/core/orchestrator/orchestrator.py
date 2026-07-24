@@ -1311,23 +1311,6 @@ class ResearchOrchestrator:
                 quality_score_val = quality_result.get("quality_score", 0)
                 quality_issues_list = quality_result.get("issues", [])[:10]
 
-            return ResearchResult(
-                task_id=task_id,
-                status=result_status,
-                topic=requirement.topic,
-                agents_used=[a.agent_id for a in agents] if agents else [],
-                stages_completed=5,
-                summary=f"Research completed. Quality score: {quality_score_val:.1f}" + (" (warnings)" if not quality_passed else ""),
-                output_path=output_path,
-                document_path=output_path,
-                created_at=start_time,
-                completed_at=datetime.now(),
-                intent_analysis=intent_analysis,
-                report=aggregated.to_dict() if hasattr(aggregated, 'to_dict') else {},
-                quality_score=quality_score_val,
-                quality_issues=quality_issues_list,
-            )
-
             # === Preview and revision loop (interaction mode) ===
             # Use Phase 8 PreviewRevisionWorkflow instead of inline loop
             revision_count = 0  # Initialize revision count
@@ -1757,6 +1740,8 @@ class ResearchOrchestrator:
                     logger.info(
                         f"[{task_id}] Built requirement with CLI parameters: aspects={custom_aspects}, output_type={output_type}")
                 else:
+                    if isinstance(user_input, dict) and output_format:
+                        user_input = dict(user_input, output_format=output_format)
                     requirement = self._parse_requirement(user_input)
 
             logger.info(f"[{task_id}] Research topic: {requirement.topic}")
@@ -2560,26 +2545,12 @@ class ResearchOrchestrator:
                 except Exception as e:
                     logger.warning(f"[{task_id}] Failed to record wisdom: {e}")
 
-            return ResearchResult(
-                task_id=task_id,
-                status=result_status,
-                topic=requirement.topic,
-                agents_used=[a.agent_id for a in agents] if agents else [],
-                stages_completed=5,
-                summary=f"Research completed. Quality score: {quality_score_val:.1f}" + (" (warnings)" if not quality_passed else ""),
-                output_path=output_path,
-                document_path=output_path,
-                created_at=start_time,
-                completed_at=datetime.now(),
-                intent_analysis=routing_result.to_dict() if hasattr(routing_result, 'to_dict') else {},
-                report=aggregated_dict if isinstance(aggregated_dict, dict) else {},
-                quality_score=quality_score_val,
-                quality_issues=quality_issues_list,
-            )
-
-# Step 2: Wait for user confirmation
+            # Step 2: Wait for user confirmation
             # Key design principle: must go through user confirmation, no auto-confirm
+            # HTML is the intermediate preview layer; after confirmation, generate
+            # the final document in the user-specified format (docx/pptx/pdf).
             user_confirmed = False
+            final_document_generated = False
 
             if interaction_mode and interaction_callback:
                 logger.info(f"[{task_id}] Waiting for user to confirm HTML preview...")
@@ -2611,11 +2582,32 @@ class ResearchOrchestrator:
                     logger.warning(f"[{task_id}] Interaction callback failed: {e}")
                     output_path = preview_path
             else:
-                logger.info(f"[{task_id}] Non-interactive mode, HTML preview only, waiting for user to explicitly confirm")
-                logger.info(f"[{task_id}] User can confirm and generate final document via:")
-                logger.info(f"[{task_id}]   - session confirm {task_id}")
-                logger.info(f"[{task_id}]   - session generate-doc {task_id}")
-                output_path = preview_path
+                # Non-interactive mode: auto-generate final document after HTML preview
+                if output_format in ("docx", "pptx", "pdf"):
+                    logger.info(
+                        f"[{task_id}] Non-interactive mode, auto-generating final {output_format} document after HTML preview")
+                    doc_task_input = {
+                        "action": "produce_document",
+                        "research_result": research_result_data,
+                        "output_format": output_format,
+                        "output_dir": str(output_dir_path),
+                        "task_id": task_id,
+                    }
+                    doc_result = await self._document_agent.execute(doc_task_input)
+                    if doc_result.get("success", False):
+                        final_path = doc_result.get("document_path") or doc_result.get("output_path", "")
+                        if final_path and Path(final_path).exists():
+                            output_path = final_path
+                            final_document_generated = True
+                            logger.info(f"[{task_id}] Final {output_format} document generated: {output_path}")
+                        else:
+                            logger.warning(f"[{task_id}] Final document path invalid, using HTML preview")
+                    else:
+                        logger.warning(f"[{task_id}] Final document generation failed: {doc_result.get('error')}, using HTML preview")
+                else:
+                    logger.info(f"[{task_id}] Non-interactive mode, HTML preview only")
+                    logger.info(f"[{task_id}] User can generate final document via: session generate-doc {task_id}")
+                output_path = output_path if final_document_generated else preview_path
 
             if user_confirmed and output_format != "html":
                 logger.info(f"[{task_id}] User confirmed, generating final {output_format} document")
@@ -2633,13 +2625,15 @@ class ResearchOrchestrator:
                 if doc_result.get("success", False):
                     output_path = doc_result.get(
                         "document_path") or doc_result.get("output_path", "")
+                    final_document_generated = True
                     logger.info(f"[{task_id}] Final document generated: {output_path}")
                 else:
                     logger.warning(
                         f"[{task_id}] Final document generation failed: {doc_result.get('error')}, using HTML preview")
                     output_path = preview_path
-            else:
-                output_path = preview_path
+
+            if not final_document_generated:
+                output_path = output_path or preview_path
 
             # Update task state
             self._task_persistence.update_task_state(

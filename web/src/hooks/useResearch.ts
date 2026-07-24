@@ -438,12 +438,91 @@ export function useResearch() {
    * Unified send message entry - for RuntimeProvider
    */
   const sendMessage = useCallback(async (text: string) => {
-    if (!sessionId) {
+    const currentSessionId = useResearchStore.getState().sessionId;
+    const { status: rsStatus, taskId: rsTaskId } = useResearchStore.getState();
+
+    if (!currentSessionId) {
+      if (rsTaskId) {
+        try {
+          const resumeResult = await api.resumeResearch(rsTaskId);
+          if (resumeResult.status === 'resumed') {
+            useResearchStore.getState().setStatus('running');
+            useResearchStore.getState().setSessionId(rsTaskId);
+          }
+        } catch (e) {
+          console.error('Failed to resume by taskId:', e);
+        }
+        const recoveredSessionId = useResearchStore.getState().sessionId || rsTaskId;
+        if (recoveredSessionId) {
+          try {
+            setIsNetworkBusy(true);
+            const data = await api.sendChatMessage(recoveredSessionId, text, {
+              provider: llm.provider,
+              model: llm.model,
+              apiKey: llm.apiKey,
+              apiEndpoint: llm.apiEndpoint,
+              temperature: llm.temperature,
+              maxTokens: llm.maxTokens,
+              topP: llm.topP,
+              frequencyPenalty: llm.frequencyPenalty,
+              presencePenalty: llm.presencePenalty,
+            });
+            if ((data as any).status === 'processing') {
+              setStep(0, undefined);
+              setIsNetworkBusy(false);
+              setIsWaitingForReply(true);
+              return data;
+            }
+            const mode = data.mode || 'chat';
+            if (mode === 'framework') {
+              setStep(0, data.suggestions || data.options);
+              if (data.framework) {
+                setFrameworkAction(data.framework);
+              }
+            } else if (mode === 'research' && data.step === 6) {
+              useResearchStore.getState().setTaskId(data.session_id);
+              setStatus('running');
+              setStep(6, undefined);
+              setFrameworkAction(null);
+            } else {
+              setStep(0, data.suggestions || data.options);
+            }
+            if (data.session_id && data.session_id !== recoveredSessionId) {
+              useResearchStore.getState().setSessionId(data.session_id);
+            }
+            addMessage({
+              id: nanoid(),
+              role: 'assistant',
+              content: data.message,
+              ...(data.thinking_content ? { thinkingContent: data.thinking_content } : {}),
+              timestamp: (data as any).timestamp || new Date().toISOString(),
+            });
+            return data;
+          } catch (e) {
+            setError(e as ApiError);
+          } finally {
+            setIsNetworkBusy(false);
+          }
+        }
+      }
+      return startResearch(text);
+    }
+
+    if (rsStatus === 'paused' && rsTaskId) {
+      try {
+        await api.resumeResearch(rsTaskId);
+        useResearchStore.getState().setStatus('running');
+      } catch (e) {
+        console.error('Failed to resume research:', e);
+      }
+    }
+
+    if (!currentSessionId) {
       return startResearch(text);
     }
 
     // Locally created empty session (via "+" tab), no backend counterpart yet
-    const cache = useSessionStore.getState().sessions[sessionId];
+    const cache = useSessionStore.getState().sessions[currentSessionId];
     const isLocalOnly = cache && !cache.taskId;
     if (isLocalOnly) {
       return startResearch(text);
@@ -455,7 +534,7 @@ export function useResearch() {
       // Chat mode: send message
       try {
         setIsNetworkBusy(true);
-        const data = await api.sendChatMessage(sessionId, text, {
+        const data = await api.sendChatMessage(currentSessionId, text, {
           provider: llm.provider,
           model: llm.model,
           apiKey: llm.apiKey,
@@ -494,7 +573,7 @@ export function useResearch() {
         }
         
         // D-1 fix: sync sessionId from backend response (handles auto-create path)
-        if (data.session_id && data.session_id !== sessionId) {
+        if (data.session_id && data.session_id !== currentSessionId) {
           setSessionId(data.session_id);
         }
         

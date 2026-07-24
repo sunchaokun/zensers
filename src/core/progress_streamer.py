@@ -442,6 +442,9 @@ class ProgressStreamer:
     def pause_task(cls, task_id: str, message: str = "Task paused") -> None:
         """Send PAUSED event. Frontend shows paused state + resume button."""
         task = cls.get_or_create_task(task_id)
+        if task.status in ("error", "completed", "cancelled"):
+            logger.warning(f"Ignoring pause for task {task_id} in terminal state: {task.status}")
+            return
         task.status = "paused"
         cls._notify_subscribers(task_id, SSEEventType.PAUSED, {
             "task_id": task_id,
@@ -523,6 +526,15 @@ class ProgressStreamer:
                         "output_path": task.result.get("output_path") if task.result else None,
                         "sections": task.result.get("sections") if task.result else [],
                         "statistics": task.result.get("statistics") if task.result else {},
+                        "timestamp": datetime.now().isoformat(),
+                    }
+                ))
+            elif task.status == "paused":
+                self._queue.put_nowait(SSEMessage(
+                    event=SSEEventType.PAUSED.value,
+                    data={
+                        "task_id": self.task_id,
+                        "message": task.error or "Task paused",
                         "timestamp": datetime.now().isoformat(),
                     }
                 ))

@@ -194,3 +194,28 @@ class TestSingletonClient:
             c2 = _get_client()
             assert c1 is not c2
             _reset_client()
+
+
+class TestCallLlmErrorDetailPropagation:
+    @pytest.mark.asyncio
+    async def test_primary_failure_includes_detail_in_message(self):
+        """Error response should include actual API error in 'message' field"""
+        with patch("src.core.llm_client.settings", _mock_settings()):
+            with patch("src.core.llm_client._call_llm_api", new_callable=AsyncMock) as mock_api:
+                mock_api.side_effect = Exception("402 Payment Required")
+                from src.core.llm_client import call_llm
+                result = await call_llm(prompt="test")
+                assert result["success"] is False
+                assert "402 Payment Required" in result["message"]
+
+    @pytest.mark.asyncio
+    async def test_both_primary_and_fallback_failure_includes_both_details(self):
+        """When both primary and fallback fail, message should include both errors"""
+        with patch("src.core.llm_client.settings", _mock_settings()):
+            with patch("src.core.llm_client._call_llm_api", new_callable=AsyncMock) as mock_api:
+                mock_api.side_effect = Exception("402 Payment Required")
+                from src.core.llm_client import call_llm
+                result = await call_llm(prompt="test")
+                assert result["success"] is False
+                assert "Primary:" in result["message"]
+                assert "Fallback:" in result["message"]

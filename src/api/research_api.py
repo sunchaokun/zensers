@@ -747,18 +747,27 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
 
         context = session.get('research_context', {})
         framework = context.get('framework')
-        _confirm_keywords = ('确认开始研究', '确认框架', '开始研究', 'confirm and start research', 'confirm_start')
+        _confirm_keywords = ('确认开始研究', '确认框架', '开始研究', '可以', '好的', '没问题', '开始吧', 'ok', '确认', 'confirm and start research', 'confirm_start')
         _user_lower = user_input.lower()
         if framework and any(kw in _user_lower for kw in _confirm_keywords):
             logger.info(f"[{session_id}] Framework confirm intent detected, starting execution directly")
             selected_sections = None
             marker = '__SELECTED_SECTIONS__:'
+            format_marker = '__OUTPUT_FORMAT__:'
+            output_format = 'docx'
             if marker in user_input:
                 try:
                     json_part = user_input[user_input.index(marker) + len(marker):]
+                    if format_marker in json_part:
+                        fmt_and_json = json_part.split(format_marker, 1)
+                        json_part = fmt_and_json[0].strip()
+                        output_format = fmt_and_json[1].strip() if len(fmt_and_json) > 1 else 'docx'
                     selected_sections = json.loads(json_part)
                 except Exception:
                     selected_sections = None
+            if output_format not in ('docx', 'pptx', 'pdf', 'html'):
+                output_format = 'docx'
+            session['output_format'] = output_format
             sections_tree = framework.get('sections_tree')
             if selected_sections:
                 all_sections = framework.get('sections', [])
@@ -1626,6 +1635,9 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
                 if isinstance(framework_result, dict) and framework_result.get('framework'):
                     response_data['mode'] = 'framework'
                     response_data['step'] = 0
+                    response_data['framework'] = framework_result['framework']
+                    if framework_result.get('next_step'):
+                        response_data['next_step'] = framework_result['next_step']
             session['research_context'] = ctx
             self._update_intent_state_after_async(session)
 
@@ -1684,7 +1696,7 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
                         tree_lines.append(f"      {i}.{j}.{k} {pt}")
             tree_str = '\nCurrent multi-level structure:\n' + '\n'.join(tree_lines)
         user_lang = 'Chinese' if lang == 'zh' else 'English'
-        prompt = f"""You are helping the user refine their research framework.\n\nCurrent research topic: {topic}\nCurrent framework sections:\n{sections_str}{tree_str}\n\nUser's request: {user_input}\n\n## Rules\n\n1. If the user confirms (e.g., '确认', '没问题', 'ok', '好的', '开始吧', 'looks good', 'proceed'), set action="confirm".\n2. If the user wants ANY change, set action="modify" with COMPLETE new section list in `new_sections`.\n3. If the user wants to cancel, set action="cancel".\n4. When action="modify", `new_sections` MUST be a non-empty array.\n5. Remove duplicate or semantically overlapping sections.\n6. When modifying a multi-level framework, also provide `new_framework_tree` reflecting the updated structure.\n7. Your `message` MUST be in {user_lang}.\n\nOutput JSON only:\n{{"action": "confirm" | "modify" | "cancel", "message": "...", "new_sections": [...], "new_framework_tree": [{{"name": "...", "sub_sections": [{{"name": "...", "points": [...]}}]}}]}}\n"""
+        prompt = f"""You are helping the user refine their research framework.\n\nCurrent research topic: {topic}\nCurrent framework sections:\n{sections_str}{tree_str}\n\nUser's request: {user_input}\n\n## Rules\n\n1. If the user confirms (e.g., '确认', '可以', '没问题', 'ok', '好的', '开始吧', 'looks good', 'proceed'), set action="confirm".\n2. If the user wants ANY change, set action="modify" with COMPLETE new section list in `new_sections`.\n3. If the user wants to cancel, set action="cancel".\n4. When action="modify", `new_sections` MUST be a non-empty array.\n5. Remove duplicate or semantically overlapping sections.\n6. When modifying a multi-level framework, also provide `new_framework_tree` reflecting the updated structure.\n7. Your `message` MUST be in {user_lang}.\n\nOutput JSON only:\n{{"action": "confirm" | "modify" | "cancel", "message": "...", "new_sections": [...], "new_framework_tree": [{{"name": "...", "sub_sections": [{{"name": "...", "points": [...]}}]}}]}}\n"""
         try:
             from src.core.llm_client import call_llm
             from src.config.llm_profiles import RoutingHint
@@ -1697,9 +1709,13 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
                     max_tokens=llm_config.get('max_tokens') or None,
                     routing_hint=RoutingHint(action="framework_modify"),
                 ),
-                timeout=30,
+                timeout=60,
             )
-        except Exception:
+        except asyncio.TimeoutError:
+            logger.warning(f"[{session_id}] _llm_framework_modify LLM call timed out (60s)")
+            return {'action': 'modify', 'message': "抱歉，处理超时了，请重新告诉我您想如何调整框架。", 'new_sections': None}
+        except Exception as e:
+            logger.warning(f"[{session_id}] _llm_framework_modify LLM call failed: {e}")
             return {'action': 'modify', 'message': "I understand you'd like to adjust the framework. Please tell me what changes you'd like to make.", 'new_sections': None}
         if not result.get('success'):
             return {'action': 'modify', 'message': "I understand you'd like to adjust the framework. Please tell me what changes you'd like to make.", 'new_sections': None}
@@ -1731,7 +1747,7 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
             logger.warning(f"[{session_id}] framework is None in _handle_framework_mode, regenerating")
             return await self._enter_framework_mode(session_id, user_input)
 
-        _confirm_keywords = ('确认开始研究', '确认框架', 'confirm and start research', 'confirm_start')
+        _confirm_keywords = ('确认开始研究', '确认框架', '开始研究', '可以', '好的', '没问题', '开始吧', 'ok', '确认', 'confirm and start research', 'confirm_start')
         _user_lower = user_input.lower()
         if any(kw in _user_lower for kw in _confirm_keywords):
             if not topic or not framework.get('sections'):
@@ -1826,7 +1842,11 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
                             preserved_tree.append({'name': new_sec, 'sub_sections': []})
                     new_framework['sections_tree'] = preserved_tree
         else:
-            new_framework = self._generate_research_framework(context)
+            existing_framework = context.get('framework')
+            if existing_framework and existing_framework.get('sections'):
+                new_framework = existing_framework
+            else:
+                new_framework = self._generate_research_framework(context)
         context['framework'] = new_framework
         session['research_context'] = context
         return self._framework_response(session_id, conv_result.get('message', self._l(f"已根据你的意见调整研究框架：\n\n**研究主题**: {topic}\n\n**研究框架**:\n{self._format_framework(new_framework)}", f"Updated the research framework based on your feedback:\n\n**Research Topic**: {topic}\n\n**Research Framework**:\n{self._format_framework(new_framework)}", lang)))
@@ -1921,7 +1941,7 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
         session['current_step'] = 6
         sd_from_tree = self._build_section_details_from_tree(sections_tree) if sections_tree else []
         sd_from_session = session.get('section_details', [])
-        final_plan = {'topic': topic, 'output_type': framework.get('output_type', 'industry_report'), 'aspects': sections, 'sections_tree': sections_tree, 'section_details': sd_from_tree or self._build_section_details_from_template(sd_from_session), 'region': context.get('details', {}).get('region', 'China'), 'time_range': context.get('details', {}).get('time_range', 'Last 3 years'), 'framework': framework.get('depth', 'standard'), 'language': session.get('language', 'zh')}
+        final_plan = {'topic': topic, 'output_type': framework.get('output_type', 'industry_report'), 'aspects': sections, 'sections_tree': sections_tree, 'section_details': sd_from_tree or self._build_section_details_from_template(sd_from_session), 'region': context.get('details', {}).get('region', 'China'), 'time_range': context.get('details', {}).get('time_range', 'Last 3 years'), 'framework': framework.get('depth', 'standard'), 'language': session.get('language', 'zh'), 'output_format': session.get('output_format', 'docx')}
         logger.info(f"Display plan generated: {len(sections)} sections")
         session['final_plan'] = final_plan
         from src.core.orchestrator.execution.coordinator.cancel_manager import get_cancel_manager
@@ -1952,7 +1972,7 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
         session['current_step'] = 6
         user_request = routing_result.user_request
         topic = routing_result.requirement.get('topic', user_request)
-        final_plan = {'topic': topic, 'output_type': routing_result.requirement.get('output_type', 'industry_report'), 'aspects': routing_result.requirement.get('aspects', []), 'region': routing_result.requirement.get('region', 'China'), 'time_range': routing_result.requirement.get('time_range', 'Last 3 years'), 'framework': 'standard', 'language': session.get('language', 'zh'), '_routing_result': routing_result.to_dict()}
+        final_plan = {'topic': topic, 'output_type': routing_result.requirement.get('output_type', 'industry_report'), 'aspects': routing_result.requirement.get('aspects', []), 'region': routing_result.requirement.get('region', 'China'), 'time_range': routing_result.requirement.get('time_range', 'Last 3 years'), 'framework': 'standard', 'language': session.get('language', 'zh'), '_routing_result': routing_result.to_dict(), 'output_format': session.get('output_format', 'docx')}
         session['final_plan'] = final_plan
         from src.api.research_executor import get_executor
         from src.core.progress_streamer import ProgressStreamer
@@ -2845,7 +2865,7 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
                 logger.info(f"Preview generated from cache: {preview_path}")
             else:
                 raise ValueError(f"Preview generation failed: {preview_result}")
-            doc_input = {'action': 'produce_document', 'research_result': research_result_data, 'output_format': 'docx', 'output_dir': str(output_dir), 'task_id': session_id}
+            doc_input = {'action': 'produce_document', 'research_result': research_result_data, 'output_format': session.get('output_format', 'docx'), 'output_dir': str(output_dir), 'task_id': session_id}
             doc_result = await self._orchestrator._document_agent.execute(doc_input)
             doc_path = doc_result.get('document_path', '') if isinstance(doc_result, dict) else ''
             result = {'status': 'completed', 'report': research_result_data, 'document_path': preview_path}

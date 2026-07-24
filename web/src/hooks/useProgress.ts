@@ -161,8 +161,11 @@ export function useProgress(taskId: string | null, options?: UseProgressOptions)
     if (isConnected) return; // SSE is alive, no need to poll
 
     const store = useResearchStore.getState();
-    // Poll for running AND paused tasks (paused may turn back to running on resume)
-    if (store.status !== 'running' && store.status !== 'paused') return;
+    const shouldPoll = store.status === 'running'
+      || store.status === 'paused'
+      || (store.status === 'idle' && !!taskId);
+
+    if (!shouldPoll) return;
 
     const doPoll = async (tid: string) => {
       try {
