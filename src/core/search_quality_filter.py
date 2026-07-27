@@ -491,24 +491,31 @@ class SearchQualityFilter:
         """
         Assess content depth
 
+        Search results are snippet-level (typically 30-80 chars), not full
+        articles. A short snippet does NOT indicate shallow content — it
+        is the expected format from search engines.
+
         Returns:
             Depth score 0-100
         """
         body = result.get("body", "") or result.get("snippet", "")
 
         if not body:
-            return 20.0
+            return 30.0
 
-        # Based on content length
         length = len(body)
-        if length < 100:
-            return 20.0
-        elif length < 300:
-            return 40.0
-        elif length < 500:
+        if length < 30:
+            return 30.0
+        elif length < 60:
+            return 50.0
+        elif length < 100:
             return 60.0
-        elif length < 1000:
+        elif length < 300:
             return 80.0
+        elif length < 500:
+            return 90.0
+        elif length < 1000:
+            return 100.0
         else:
             return 100.0
 

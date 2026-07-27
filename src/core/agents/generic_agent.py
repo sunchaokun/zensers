@@ -2605,9 +2605,13 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
 
         chinese_m = re.search(r'[\u4e00-\u9fff]+', topic)
         if chinese_m:
-            resolved = self._resolve_company_to_code(chinese_m.group(0))
-            if resolved:
-                return [resolved]
+            embedded_codes = self._resolve_embedded_companies(topic)
+            if embedded_codes:
+                return embedded_codes
+            if self._is_likely_company_name(chinese_m.group(0), topic):
+                resolved = self._resolve_company_to_code(chinese_m.group(0))
+                if resolved:
+                    return [resolved]
 
         if skill_registry:
             manifest = skill_registry.get_manifest(skill_name)
@@ -2797,7 +2801,187 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
             return True
         return _is_listed_company_topic(full_topic)
 
+    _AKSHARE_RESOLVE_CACHE: Dict[str, str] = {}
+
     def _resolve_company_to_code(self, company_name: str) -> str:
+        cached = self._AKSHARE_RESOLVE_CACHE.get(company_name)
+        if cached is not None:
+            return cached
+
+        code = self._resolve_via_entity_resolver(company_name)
+        if code:
+            self._AKSHARE_RESOLVE_CACHE[company_name] = code
+            return code
+
+        code = self._resolve_via_akshare(company_name)
+        if code:
+            self._AKSHARE_RESOLVE_CACHE[company_name] = code
+            return code
+
+        self._AKSHARE_RESOLVE_CACHE[company_name] = ""
+        return ""
+
+    _EMBEDDED_COMPANY_CACHE: Dict[str, List[str]] = {}
+
+    def _resolve_embedded_companies(self, topic: str) -> List[str]:
+        cached = self._EMBEDDED_COMPANY_CACHE.get(topic)
+        if cached is not None:
+            return cached
+
+        codes = []
+
+        code_map = self._get_stock_name_table()
+        if code_map:
+            seen = set()
+            for company_name, code in code_map.items():
+                if len(company_name) < 3:
+                    continue
+                if company_name in topic and code not in seen:
+                    codes.append(code)
+                    seen.add(code)
+
+        industry_codes = self._resolve_industry_constituents(topic)
+        if industry_codes:
+            seen = set(codes)
+            for c in industry_codes:
+                if c not in seen:
+                    codes.append(c)
+                    seen.add(c)
+
+        if codes:
+            logger.info(
+                f"GenericAgent {self.agent_id}: found {len(codes)} listed companies "
+                f"in topic '{topic[:40]}'"
+            )
+        self._EMBEDDED_COMPANY_CACHE[topic] = codes
+        return codes
+
+    _STOCK_TABLE_CACHE: Optional[Dict[str, str]] = None
+
+    @classmethod
+    def _get_stock_name_table(cls) -> Dict[str, str]:
+        if cls._STOCK_TABLE_CACHE is not None:
+            return cls._STOCK_TABLE_CACHE
+        try:
+            from src.core.entity_resolver import get_entity_resolver
+            resolver = get_entity_resolver()
+            if not resolver._table_loaded:
+                resolver._try_load_disk_cache()
+            cls._STOCK_TABLE_CACHE = dict(resolver._stock_name_table) if resolver._stock_name_table else {}
+        except Exception:
+            cls._STOCK_TABLE_CACHE = {}
+        return cls._STOCK_TABLE_CACHE
+
+    _INDUSTRY_BOARD_CACHE: Optional[Dict[str, str]] = None
+    _INDUSTRY_CONSTITUENT_CACHE: Dict[str, List[str]] = {}
+
+    def _resolve_industry_constituents(self, topic: str) -> List[str]:
+        try:
+            import akshare as ak
+        except ImportError:
+            return []
+
+        board_map = self._get_industry_board_map()
+        if not board_map:
+            return []
+
+        matched_boards = []
+        for board_name in board_map:
+            if board_name in topic or any(kw in topic for kw in board_name.split()):
+                matched_boards.append(board_name)
+        if not matched_boards:
+            return []
+
+        all_codes = []
+        seen = set()
+        code_map = self._get_stock_name_table()
+
+        for board_name in matched_boards[:3]:
+            cached = self._INDUSTRY_CONSTITUENT_CACHE.get(board_name)
+            if cached is not None:
+                for c in cached:
+                    if c not in seen:
+                        all_codes.append(c)
+                        seen.add(c)
+                continue
+
+            try:
+                cons_df = ak.stock_board_industry_cons_em(symbol=board_name)
+                if cons_df is None or cons_df.empty:
+                    self._INDUSTRY_CONSTITUENT_CACHE[board_name] = []
+                    continue
+                code_col = None
+                for col in cons_df.columns:
+                    if "代码" in str(col) or "code" in str(col).lower() or "symbol" in str(col).lower():
+                        code_col = col
+                        break
+                if not code_col:
+                    self._INDUSTRY_CONSTITUENT_CACHE[board_name] = []
+                    continue
+                board_codes = []
+                for _, row in cons_df.iterrows():
+                    c = str(row[code_col]).strip()
+                    if c and len(c) == 6 and c not in seen:
+                        board_codes.append(c)
+                        all_codes.append(c)
+                        seen.add(c)
+                self._INDUSTRY_CONSTITUENT_CACHE[board_name] = board_codes
+                logger.info(
+                    f"GenericAgent {self.agent_id}: industry board '{board_name}' "
+                    f"→ {len(board_codes)} constituent stock codes"
+                )
+            except Exception as e:
+                logger.debug(f"GenericAgent {self.agent_id}: industry constituents failed for '{board_name}': {e}")
+                self._INDUSTRY_CONSTITUENT_CACHE[board_name] = []
+
+        return all_codes
+
+    @classmethod
+    def _get_industry_board_map(cls) -> Dict[str, str]:
+        if cls._INDUSTRY_BOARD_CACHE is not None:
+            return cls._INDUSTRY_BOARD_CACHE
+        try:
+            import akshare as ak
+            df = ak.stock_board_industry_name_em()
+            name_col = None
+            code_col = None
+            for col in df.columns:
+                col_str = str(col)
+                if "名称" in col_str or "板块" in col_str:
+                    name_col = col
+                if "代码" in col_str:
+                    code_col = col
+            if name_col and code_col:
+                cls._INDUSTRY_BOARD_CACHE = {
+                    str(row[name_col]): str(row[code_col])
+                    for _, row in df.iterrows()
+                }
+                logger.info(f"GenericAgent: loaded {len(cls._INDUSTRY_BOARD_CACHE)} industry boards from akshare")
+                return cls._INDUSTRY_BOARD_CACHE
+        except Exception as e:
+            logger.debug(f"GenericAgent: failed to load industry board map: {e}")
+        cls._INDUSTRY_BOARD_CACHE = {}
+        return cls._INDUSTRY_BOARD_CACHE
+
+    def _resolve_via_entity_resolver(self, company_name: str) -> str:
+        try:
+            from src.core.entity_resolver import get_entity_resolver
+            resolver = get_entity_resolver()
+            if not resolver._table_loaded:
+                resolver._try_load_disk_cache()
+            if resolver._stock_name_table:
+                code = resolver._stock_name_table.get(company_name)
+                if code:
+                    logger.info(
+                        f"GenericAgent {self.agent_id}: resolved '{company_name}' "
+                        f"via EntityResolver disk cache → '{code}'"
+                    )
+                    return code
+        except Exception as e:
+            logger.debug(f"GenericAgent {self.agent_id}: EntityResolver fallback failed: {e}")
+        return ""
+
+    def _resolve_via_akshare(self, company_name: str) -> str:
         try:
             import akshare as ak
             df = ak.stock_zh_a_spot_em()

@@ -151,14 +151,14 @@ async def download_document(task_id: str, format: str = None):
         if format and format in EXTENSIONS:
             docs = sorted(legacy_dir.glob(EXTENSIONS[format]))
         else:
-            docs = sorted(legacy_dir.glob("*.docx"))
+            docs = sorted(legacy_dir.glob("*.pptx")) + sorted(legacy_dir.glob("*.docx"))
         
         logger.info(f"[DOWNLOAD] Found {len(docs)} files in legacy location")
         if docs:
             file_path = docs[-1]
             file_size = file_path.stat().st_size if file_path.exists() else 0
             ext = file_path.suffix.lower().lstrip(".")
-            mt = MEDIA_TYPES.get(ext, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+            mt = MEDIA_TYPES.get(ext, "application/octet-stream")
             logger.info(f"[DOWNLOAD] Serving {ext} from legacy: {file_path.name}, size={file_size} bytes")
             logger.info(f"[DOWNLOAD] ========== Download SUCCESS ({ext} from legacy) ==========")
             return _FastAPIFileResponse(
@@ -698,10 +698,11 @@ async def get_research_detail(task_id: str):
     task_dir = Path("data/reports") / task_id
     if not task_dir.exists():
         task_dir = Path("data") / task_id  # Fallback to legacy location
+    session_output_format = session.get("output_format") or session.get("output_type") or "docx"
     if task_dir.exists():
-        docs = sorted(task_dir.glob("*.docx")) + sorted(task_dir.glob("*.html"))
+        docs = sorted(task_dir.glob("*.pptx")) + sorted(task_dir.glob("*.docx")) + sorted(task_dir.glob("*.html"))
         if docs:
-            download_url = f"/api/v1/download/{task_id}"
+            download_url = f"/api/v1/download/{task_id}?format={session_output_format}"
 
     meta = {
         "task_id": task_id,
@@ -1240,6 +1241,9 @@ async def startup_event():
 
     from src.core.orchestrator.execution.task_utils import register_global_exception_handler
     register_global_exception_handler()
+
+    from src.core.akshare_transport import patch_akshare_requests
+    patch_akshare_requests()
 
     from src.config.settings import settings
     from src.core.llm_client import init_llm_infrastructure
