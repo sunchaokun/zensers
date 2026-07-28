@@ -749,6 +749,9 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
         framework = context.get('framework')
         _confirm_keywords = ('确认开始研究', '确认框架', '开始研究', '可以', '好的', '没问题', '开始吧', 'ok', '确认', 'confirm and start research', 'confirm_start')
         _user_lower = user_input.lower()
+        if not framework and any(kw in _user_lower for kw in _confirm_keywords) and context.get('topic') and context.get('directions'):
+            logger.info(f"[{session_id}] Confirm keyword detected but framework is None, re-entering framework mode")
+            return await self._enter_framework_mode(session_id, user_input)
         if framework and any(kw in _user_lower for kw in _confirm_keywords):
             logger.info(f"[{session_id}] Framework confirm intent detected, starting execution directly")
             selected_sections = None
@@ -800,6 +803,7 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
             self._sync_state_machine_to_framework(session, session_id)
             conv_machine = self._get_or_create_conv_machine(session)
             conv_machine.force_set_state(ConversationState.EXECUTING)
+            session_manager.force_save(session_id)
             return await self._start_execution(session_id)
 
         intent_state = self._get_or_create_intent_state(session)
@@ -1802,6 +1806,7 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
                 session['research_context'] = context
             conv_machine = self._get_or_create_conv_machine(session)
             conv_machine.force_set_state(ConversationState.EXECUTING)
+            session_manager.force_save(session_id)
             return await self._start_execution(session_id)
 
         conv_result = await self._llm_framework_modify(session_id, user_input)
@@ -1849,6 +1854,7 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
                 new_framework = self._generate_research_framework(context)
         context['framework'] = new_framework
         session['research_context'] = context
+        session_manager.force_save(session_id)
         return self._framework_response(session_id, conv_result.get('message', self._l(f"已根据你的意见调整研究框架：\n\n**研究主题**: {topic}\n\n**研究框架**:\n{self._format_framework(new_framework)}", f"Updated the research framework based on your feedback:\n\n**Research Topic**: {topic}\n\n**Research Framework**:\n{self._format_framework(new_framework)}", lang)))
 
     async def _enter_framework_mode(self, session_id, user_input):
@@ -1871,6 +1877,7 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
             logger.info(f"Framework already exists for {session_id}, returning existing")
             session['mode'] = 'framework'
             self._sync_state_machine_to_framework(session, session_id)
+            session_manager.force_save(session_id)
             return self._framework_response(session_id, self._l(f"研究框架已经准备好了：\n\n**研究主题**: {context.get('topic')}\n\n**研究框架**:\n{self._format_framework(existing_fw)}\n\n请确认是否满足需求。", f"The research framework is ready:\n\n**Research Topic**: {context.get('topic')}\n\n**Research Framework**:\n{self._format_framework(existing_fw)}\n\nPlease confirm if this meets your needs.", lang))
         suggested = context.get('_suggested_sections', [])
         directions = context.get('directions', [])
@@ -1905,6 +1912,7 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
         session['research_context'] = context
         session['mode'] = 'framework'
         self._sync_state_machine_to_framework(session, session_id)
+        session_manager.force_save(session_id)
         return self._framework_response(session_id, self._l(f"根据我们的讨论，我整理了以下研究框架：\n\n**研究主题**: {context.get('topic')}\n\n**研究框架**:\n{self._format_framework(framework)}\n\n请确认这个框架是否满足你的需求，或提出修改建议。", f"Based on our discussion, I have organized the following research framework:\n\n**Research Topic**: {context.get('topic')}\n\n**Research Framework**:\n{self._format_framework(framework)}\n\nPlease confirm if this framework meets your needs, or suggest modifications.", lang))
 
     async def _start_execution(self, session_id):
@@ -1961,6 +1969,7 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
         history = session.get('conversation_history', [])
         history.append({'role': 'assistant', 'content': exec_msg, 'timestamp': datetime.now().isoformat()})
         session['conversation_history'] = history
+        session_manager.force_save(session_id)
         return {'session_id': session_id, 'task_id': session_id, 'step': 6, 'mode': 'research', 'status': 'running', 'message': exec_msg, 'final_plan': final_plan, 'next_step': 'execute'}
 
     async def _start_execution_with_routing(self, session_id, routing_result):
@@ -2853,27 +2862,46 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
         return {'task_id': task_id, 'status': 'resumed', 'message': f"Research resumed from snapshot. {len(pending_sections)} sections remaining."}
 
     async def _generate_documents_from_cache(self, session_id, research_result_data, output_dir, session):
-        """Generate preview + document from cached research result, skipping orchestrator."""
+        """Generate preview + document from cached research result, skipping orchestrator.
+
+        Key design: generate ONE HTML in the correct layout (article for docx, slide for pptx),
+        use it for both preview and final document conversion. This avoids generating HTML twice
+        and ensures preview matches the final document.
+        """
         from src.core.progress_streamer import update_progress, complete_task, fail_task
         update_progress(session_id, 0.0)
         try:
-            preview_input = {'action': 'produce_document', 'research_result': research_result_data, 'output_format': 'html', 'output_dir': str(output_dir), 'task_id': session_id}
+            output_format = session.get('output_format', 'docx')
+            html_layout = output_format if output_format in ('pptx', 'docx') else 'docx'
+
+            preview_input = {'action': 'produce_document', 'research_result': research_result_data, 'output_format': 'html', 'output_dir': str(output_dir), 'task_id': session_id, '_html_layout': html_layout}
             preview_result = await self._orchestrator._document_agent.execute(preview_input)
             if isinstance(preview_result, dict) and preview_result.get('document_path'):
                 preview_path = preview_result['document_path']
                 PreviewStorage.copy_file(session_id, Path(preview_path))
-                logger.info(f"Preview generated from cache: {preview_path}")
+                logger.info(f"Preview generated from cache (layout={html_layout}): {preview_path}")
             else:
                 raise ValueError(f"Preview generation failed: {preview_result}")
-            doc_input = {'action': 'produce_document', 'research_result': research_result_data, 'output_format': session.get('output_format', 'docx'), 'output_dir': str(output_dir), 'task_id': session_id}
+
+            if output_format == 'html':
+                result = {'status': 'completed', 'report': research_result_data, 'document_path': preview_path}
+                session['research_result'] = result
+                session['mode'] = 'chat'
+                session['current_step'] = 0
+                complete_task(session_id)
+                logger.info(f"HTML-only document generated from cache: {preview_path}")
+                return preview_path
+
+            doc_input = {'action': 'produce_document', 'research_result': research_result_data, 'output_format': output_format, 'output_dir': str(output_dir), 'task_id': session_id, '_preview_html_path': preview_path}
             doc_result = await self._orchestrator._document_agent.execute(doc_input)
             doc_path = doc_result.get('document_path', '') if isinstance(doc_result, dict) else ''
-            result = {'status': 'completed', 'report': research_result_data, 'document_path': preview_path}
+            final_doc_path = doc_path or preview_path
+            result = {'status': 'completed', 'report': research_result_data, 'document_path': final_doc_path}
             session['research_result'] = result
             session['mode'] = 'chat'
             session['current_step'] = 0
             complete_task(session_id)
-            logger.info(f"Document generated from cache: {'no doc, using preview'}")
+            logger.info(f"Document generated from cache: preview={preview_path}, doc={doc_path or 'none'}")
             return doc_path or ''
         except asyncio.CancelledError:
             logger.info(f"Cache doc generation cancelled: {session_id}")
@@ -3820,6 +3848,8 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
         )
         output_dir = Path('data') / session_id
         output_dir.mkdir(parents=True, exist_ok=True)
+        output_format = session.get('output_format', 'docx')
+        html_layout = output_format if output_format in ('pptx', 'docx') else 'docx'
         try:
             preview_input = {
                 'action': 'produce_document',
@@ -3827,11 +3857,14 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
                 'output_format': 'html',
                 'output_dir': str(output_dir),
                 'task_id': session_id,
+                '_html_layout': html_layout,
             }
             preview_result = await self._orchestrator._document_agent.execute(preview_input)
+            preview_path = None
             if isinstance(preview_result, dict) and preview_result.get('document_path'):
+                preview_path = preview_result['document_path']
                 from src.core.preview_storage import PreviewStorage
-                PreviewStorage.copy_file(session_id, Path(preview_result['document_path']))
+                PreviewStorage.copy_file(session_id, Path(preview_path))
             try:
                 from src.core.session_streamer import SessionStreamer
                 from src.core.preview_storage import PreviewStorage as PS
@@ -3839,8 +3872,23 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
                 SessionStreamer.push_preview_refresh(session_id, preview_url, 'v1')
             except Exception:
                 pass
+            if output_format != 'html' and preview_path:
+                doc_input = {
+                    'action': 'produce_document',
+                    'research_result': research_result_data,
+                    'output_format': output_format,
+                    'output_dir': str(output_dir),
+                    'task_id': session_id,
+                    '_preview_html_path': preview_path,
+                }
+                doc_result = await self._orchestrator._document_agent.execute(doc_input)
+                doc_path = doc_result.get('document_path', '') if isinstance(doc_result, dict) else ''
+                final_doc_path = doc_path or preview_path or ''
+                if final_doc_path:
+                    session['research_result']['document_path'] = final_doc_path
+                    logger.info(f"Post-revision document generated: format={output_format}, path={doc_path or 'none'}")
         except Exception as e:
-            logger.warning(f"Post-revision preview regeneration failed: {e}")
+            logger.warning(f"Post-revision document regeneration failed: {e}")
 
     async def _run_v2_revision_fallback(self, session_id, conv_result, session, adjustment, quality_state_data):
         from src.core.adjustment.report_adapter import SessionReportAdapter

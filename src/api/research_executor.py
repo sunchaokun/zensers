@@ -526,9 +526,20 @@ class ResearchExecutor:
                     from pathlib import Path
                     from src.core.preview_storage import PreviewStorage
                     src_path_str = pre_inject_document_path or pre_inject_output_path or result.get("document_path") or result.get("output_path", "")
-                    if src_path_str:
+                    if src_path_str and Path(src_path_str).exists():
                         src_path = Path(src_path_str)
-                        if src_path.exists():
+                        if src_path.suffix.lower() in ('.pptx', '.docx', '.pdf'):
+                            html_src = src_path.with_suffix('.preview.html')
+                            if not html_src.exists():
+                                html_src = src_path.parent / (src_path.stem.rsplit('_', 1)[0] + '*.html')
+                                html_candidates = sorted(src_path.parent.glob(src_path.stem.rsplit('_', 1)[0] + '*.html'))
+                                html_src = html_candidates[0] if html_candidates else None
+                            if html_src and html_src.exists():
+                                src_path = html_src
+                            else:
+                                logger.warning(f"Preview source is {src_path.suffix}, no HTML fallback found for {session_id}")
+                                src_path = None
+                        if src_path:
                             PreviewStorage.copy_file(session_id, src_path)
                             logger.info(f"Preview copied for {session_id}")
                 except Exception as e:

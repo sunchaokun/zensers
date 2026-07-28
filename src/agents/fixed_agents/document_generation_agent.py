@@ -382,9 +382,10 @@ class DocumentGenerationAgent(FixedAgent):
                 from src.content.content_orchestrator import ContentOrchestrator
                 from src.core.preview_storage import PreviewStorage
                 orchestrator = ContentOrchestrator()
+                html_layout = request._html_layout or 'docx'
                 html_content = orchestrator.transform_to_html(
                     research_result=research_result,
-                    output_format="html",
+                    output_format=html_layout,
                     output_dir=str(PreviewStorage.NEW_DIR),
                 )
                 output_path.write_text(html_content, encoding="utf-8")
@@ -404,40 +405,76 @@ class DocumentGenerationAgent(FixedAgent):
                     message=f"Preview generated: {output_filename}"
                 ).to_dict()
 
-            # DOCX/PDF/PPTX: use DocumentGenerator
-            from ...core.orchestrator.output.document_generator import (
-                DocumentGenerator,
-                DocumentConfig,
-                DocumentFormat as DGFormat,
-            )
+            # DOCX/PDF/PPTX: use DocumentGenerator or direct HTML conversion
+            preview_html_path = request._preview_html_path
+            direct_conversion_ok = False
+            if preview_html_path and Path(preview_html_path).exists():
+                html_content = Path(preview_html_path).read_text(encoding='utf-8')
+                logger.info(f"Reusing preview HTML for {format_value} conversion: {preview_html_path}")
+
+                if format_value == "pptx":
+                    from src.converters.html_to_ppt import HTMLToPPTConverter
+                    converter = HTMLToPPTConverter()
+                    conv_result = converter.convert(html=html_content, output_path=str(output_path))
+                    if conv_result.success:
+                        direct_conversion_ok = True
+                    else:
+                        logger.warning(f"PPTX conversion from preview HTML failed: {conv_result.error}, falling back to DocumentGenerator")
+                        preview_html_path = None
+                elif format_value == "docx":
+                    from src.converters.html_to_word import HTMLToWordConverter
+                    converter = HTMLToWordConverter()
+                    template_html = None
+                    try:
+                        from src.content.content_orchestrator import ContentOrchestrator
+                        co = ContentOrchestrator()
+                        template_html = co.get_template_html()
+                    except Exception:
+                        pass
+                    conv_result = converter.convert(html=html_content, output_path=str(output_path), template_html=template_html)
+                    if conv_result.success:
+                        direct_conversion_ok = True
+                    else:
+                        logger.warning(f"DOCX conversion from preview HTML failed: {conv_result.error}, falling back to DocumentGenerator")
+                        preview_html_path = None
+                else:
+                    preview_html_path = None
+
+            result = None
+            if not direct_conversion_ok:
+                from ...core.orchestrator.output.document_generator import (
+                    DocumentGenerator,
+                    DocumentConfig,
+                    DocumentFormat as DGFormat,
+                )
+                
+                # Map format
+                format_map = {
+                    DocumentFormat.DOCX: DGFormat.DOCX,
+                    DocumentFormat.PDF: DGFormat.PDF,
+                    DocumentFormat.PPTX: DGFormat.PPTX,
+                }
+                dg_format = format_map.get(output_format, DGFormat.DOCX)
+                
+                # Create document config
+                config = DocumentConfig(
+                    format=dg_format,
+                    title=research_result.get("title") or research_result.get("topic") or "Research Report",
+                    author=research_result.get("author", "AI Research Assistant"),
+                    template_path=Path(request.template) if request.template else None,
+                )
+                
+                # Create document generator
+                generator = DocumentGenerator(config)
+                
+                # Add content
+                self._populate_document_content(generator, research_result)
+                
+                # Generate document
+                result = generator.generate(output_path)
             
-            # Map format
-            format_map = {
-                DocumentFormat.DOCX: DGFormat.DOCX,
-                DocumentFormat.PDF: DGFormat.PDF,
-                DocumentFormat.PPTX: DGFormat.PPTX,
-            }
-            dg_format = format_map.get(output_format, DGFormat.DOCX)
-            
-            # Create document config
-            config = DocumentConfig(
-                format=dg_format,
-                title=research_result.get("title") or research_result.get("topic") or "Research Report",
-                author=research_result.get("author", "AI Research Assistant"),
-                template_path=Path(request.template) if request.template else None,
-            )
-            
-            # Create document generator
-            generator = DocumentGenerator(config)
-            
-            # Add content
-            self._populate_document_content(generator, research_result)
-            
-            # Generate document
-            result = generator.generate(output_path)
-            
-            if result.path and result.path.exists():
-                file_size = result.path.stat().st_size
+            if output_path.exists():
+                file_size = output_path.stat().st_size
                 pages_estimate = max(1, len(research_result.get("sections", [])))
                 
                 logger.info(f"Document generated successfully: {output_path}")
@@ -2038,9 +2075,10 @@ class DocumentGenerationAgent(FixedAgent):
             from src.core.preview_storage import PreviewStorage
             
             orchestrator = ContentOrchestrator()
+            html_layout = request._html_layout or 'docx'
             html_content = orchestrator.transform_to_html(
                 research_result=research_result,
-                output_format="html",  # Fix: Use "html" to enable chart rendering (is_html_format=True)
+                output_format=html_layout,
                 output_dir=str(PreviewStorage.NEW_DIR)  # External chart images
             )
             

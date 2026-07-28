@@ -85,7 +85,7 @@ for _sid, _session in list(_session_manager._sessions.items()):
 logger.info(f"ProgressStreamer recovered {_recovered_tasks} task states from disk")
 
 app = FastAPI(title="Zensers API", description="AI Market Research Platform RESTful API",
-              version="1.0.2", openapi_url="/api/v1/openapi.json",
+              version="3.5.2", openapi_url="/api/v1/openapi.json",
               docs_url="/api/v1/docs", redoc_url="/api/v1/redoc")
 
 _cors_origins = os.environ.get("CORS_ORIGINS", "http://localhost:3000,http://localhost:3001,http://127.0.0.1:3000,http://127.0.0.1:3001").split(",")
@@ -586,11 +586,10 @@ def list_all_sessions(limit: int = 20, offset: int = 0):
 
         # Sort by created_at descending (None at end)
         sessions_info.sort(key=lambda x: (x[0] is not None, x[0] or datetime.min), reverse=True)
-        total = len(sessions_info)
-        page = sessions_info[offset:offset + limit]
 
-        results = []
-        for created_at, sid in page:
+        # Process ALL sessions first, then paginate the results
+        all_results = []
+        for created_at, sid in sessions_info:
             try:
                 session = sm.get(sid)
                 if not session:
@@ -602,8 +601,14 @@ def list_all_sessions(limit: int = 20, offset: int = 0):
                 research_context = session.get("research_context", {})
                 topic = (research_context.get("topic") if isinstance(research_context, dict) else None) or session.get("user_input", "")
 
+                rr = session.get("research_result") or {}
+                rr_status = rr.get("status") if isinstance(rr, dict) else None
+                _terminal_rr = ("completed", "completed_with_warnings", "failed", "cancelled", "error")
+
                 state_machine = session.get("state_machine")
-                if state_machine and hasattr(state_machine, "current_state"):
+                if rr_status in _terminal_rr:
+                    state = "completed" if rr_status in ("completed", "completed_with_warnings") else "paused"
+                elif state_machine and hasattr(state_machine, "current_state"):
                     status_map = {
                         "understanding": "paused", "clarifying": "paused",
                         "framework_confirm": "analyzing", "executing": "reporting",
@@ -622,7 +627,7 @@ def list_all_sessions(limit: int = 20, offset: int = 0):
                     else:
                         state = "paused"
 
-                results.append({
+                all_results.append({
                     "task_id": sid, "title": topic or session.get("user_input", "Unnamed Research"),
                     "topic": topic, "query": session.get("user_input", ""),
                     "status": state, "created_at": created_at, "completed_at": None,
@@ -631,7 +636,9 @@ def list_all_sessions(limit: int = 20, offset: int = 0):
             except Exception as e:
                 logger.warning(f"Failed to process session {sid}: {e}")
 
-        return {"sessions": results, "total": total, "has_more": offset + limit < total}
+        valid_total = len(all_results)
+        page_results = all_results[offset:offset + limit]
+        return {"sessions": page_results, "total": valid_total, "has_more": offset + limit < valid_total}
     except Exception as e:
         logger.error(f"list_all_sessions failed: {e}", exc_info=True)
         return {"sessions": [], "total": 0, "has_more": False}
@@ -656,8 +663,14 @@ async def get_research_detail(task_id: str):
     research_context = session.get("research_context", {})
     topic = research_context.get("topic") or session.get("user_input", "")
 
+    rr = session.get("research_result") or {}
+    rr_status = rr.get("status") if isinstance(rr, dict) else None
+    _terminal_rr = ("completed", "completed_with_warnings", "failed", "cancelled", "error")
+
     state_machine = session.get("state_machine")
-    if state_machine and hasattr(state_machine, "current_state"):
+    if rr_status in _terminal_rr:
+        state = "completed" if rr_status in ("completed", "completed_with_warnings") else "paused"
+    elif state_machine and hasattr(state_machine, "current_state"):
         status_map = {
             "understanding": "analyzing", "clarifying": "analyzing",
             "framework_confirm": "analyzing", "executing": "reporting",
@@ -667,7 +680,6 @@ async def get_research_detail(task_id: str):
             "data_supplement": "analyzing",
         }
         state = status_map.get(state_machine.current_state.value, "analyzing")
-        # If state_machine says executing but task already finished, correct to completed
         if state_machine.current_state.value == "executing":
             from src.core.progress_streamer import ProgressStreamer
             ps = ProgressStreamer.get_task_state(task_id)
@@ -720,6 +732,27 @@ async def get_research_detail(task_id: str):
         "needs_regenerate": not preview_url and bool(research_result.get("report", {}).get("sections")),
     }
 
+    # Include persisted phases so frontend can restore agent progress
+    task_phases_data = session.get("task_phases", [])
+    phases = [
+        {"id": p.get("id", ""), "name": p.get("name", ""), "status": p.get("status", "pending"), "progress": p.get("progress", 0)}
+        for p in (task_phases_data if isinstance(task_phases_data, list) else [])
+    ]
+    # For completed tasks, fix stale phase statuses (engine may not have updated all phases)
+    if state == "completed":
+        phases = [
+            {**p, "status": "completed" if p["status"] in ("running", "pending") else p["status"], "progress": 100 if p["status"] in ("running", "completed") else p["progress"]}
+            for p in phases
+        ]
+    task_progress_data = session.get("task_progress", {})
+    raw_progress = task_progress_data.get("progress")
+    if state == "completed":
+        progress_val = 100
+    elif raw_progress is not None:
+        progress_val = raw_progress
+    else:
+        progress_val = 0
+
     messages = []
     history = session.get("display_history") or session.get("conversation_history", [])
     for i, msg in enumerate(history):
@@ -737,7 +770,8 @@ async def get_research_detail(task_id: str):
     return {**meta, "messages": messages, "config": {
         "output_type": meta.get("output_type", "report"),
         "template": "consulting", "sections": [],
-    }, "framework": research_context.get("framework")}
+    }, "framework": research_context.get("framework"),
+     "phases": phases, "progress": progress_val}
 
 
 @app.get("/api/v1/research/{task_id}/messages")
@@ -1227,6 +1261,14 @@ def _repair_ghost_sessions():
                 rr['error'] = 'Server restarted while research was in progress'
                 session['mode'] = 'chat'
                 session['current_step'] = 0
+                # Reset state_machine to avoid stale "executing" status in list APIs
+                sm_state = session.get('state_machine')
+                if sm_state and hasattr(sm_state, 'current_state'):
+                    try:
+                        from src.core.dialogue.state_machine import ConversationState
+                        sm_state.transition(ConversationState.CANCELLED)
+                    except Exception:
+                        pass
                 repaired += 1
                 logger.info(f"Ghost session repaired (status={rr.get('status')}): {sid}")
         except Exception as e:

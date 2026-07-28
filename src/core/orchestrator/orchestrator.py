@@ -1126,12 +1126,14 @@ class ResearchOrchestrator:
 
             # === Step 1: Generate HTML preview first ===
             # Generate preview regardless of interaction mode
+            _html_layout = output_format if output_format in ('pptx', 'docx') else 'docx'
             preview_result = await self._document_agent.execute({
                 "action": "get_preview",
                 "output_format": "html",  # Generate HTML preview first
                 "research_result": research_result_data,
                 "task_id": task_id,
                 "output_dir": str(output_dir_path),
+                "_html_layout": _html_layout,
             })
 
             preview_path = preview_result.get("preview_path")
@@ -1263,6 +1265,7 @@ class ResearchOrchestrator:
                                 "output_format": "html",
                                 "output_dir": str(Path(output_path).parent),
                                 "task_id": task_id,
+                                "_html_layout": _html_layout,
                             }
                             new_result = await self._document_agent.execute(preview_input)
                             if isinstance(new_result, dict):
@@ -1386,6 +1389,7 @@ class ResearchOrchestrator:
                                         "research_result": research_result_data,
                                         "task_id": task_id,
                                         "output_dir": str(output_dir_path),
+                                        "_preview_html_path": preview_path if preview_path and os.path.exists(preview_path) else None,
                                     })
 
                                     if doc_result.get("success", False):
@@ -1498,6 +1502,7 @@ class ResearchOrchestrator:
                         "research_result": research_result_data,
                         "task_id": task_id,
                         "output_dir": str(output_dir_path),
+                        "_preview_html_path": preview_path if preview_path and os.path.exists(preview_path) else None,
                     })
                     if doc_result.get("success"):
                         final_path = doc_result.get("document_path")
@@ -1565,7 +1570,7 @@ class ResearchOrchestrator:
                 topic=requirement.topic,
                 agents_used=[a.agent_id for a in agents],
                 stages_completed=len(results_for_aggregation),
-                output_path=output_path,
+                output_path=preview_path or output_path,
                 summary=self._generate_summary(aggregated, requirement),
                 created_at=start_time,
                 completed_at=datetime.now(),
@@ -2367,12 +2372,14 @@ class ResearchOrchestrator:
 
             # === Critical fix: generate HTML preview first ===
             # Step 1: Generate HTML preview document
+            html_layout = output_format if output_format in ('pptx', 'docx') else 'docx'
             preview_task_input = {
                 "action": "produce_document",
                 "research_result": research_result_data,
                 "output_format": "html",  # Force HTML format as preview
                 "output_dir": str(output_dir_path),
                 "task_id": task_id,
+                "_html_layout": html_layout,
             }
 
             preview_result = await self._document_agent.execute(preview_task_input)
@@ -2465,6 +2472,7 @@ class ResearchOrchestrator:
                                     "output_format": "html",
                                     "output_dir": str(Path(output_path).parent),
                                     "task_id": task_id,
+                                    "_html_layout": html_layout,
                                 }
                                 new_result = await self._document_agent.execute(preview_input)
                                 if isinstance(new_result, dict):
@@ -2592,6 +2600,7 @@ class ResearchOrchestrator:
                         "output_format": output_format,
                         "output_dir": str(output_dir_path),
                         "task_id": task_id,
+                        "_preview_html_path": preview_path if preview_path and os.path.exists(preview_path) else None,
                     }
                     doc_result = await self._document_agent.execute(doc_task_input)
                     if doc_result.get("success", False):
@@ -2618,6 +2627,7 @@ class ResearchOrchestrator:
                     "output_format": output_format,
                     "output_dir": str(output_dir_path),
                     "task_id": task_id,
+                    "_preview_html_path": preview_path if preview_path and os.path.exists(preview_path) else None,
                 }
 
                 doc_result = await self._document_agent.execute(doc_task_input)
@@ -2658,7 +2668,7 @@ class ResearchOrchestrator:
                 topic=requirement.topic,
                 agents_used=[a.agent_id for a in agents],
                 stages_completed=len(routing_result.execution_plan.phases),
-                output_path=output_path,
+                output_path=preview_path or output_path,
                 document_path=output_path,
                 summary=aggregated_dict.get("executive_summary", "Research complete"),
                 created_at=start_time,

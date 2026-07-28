@@ -239,8 +239,14 @@ class SessionManager:
         logger.warning(f"Backup saved: {backup_path}")
         return backup_path
 
-    def _save_to_disk(self, session_id: str) -> None:
-        """Persist single session to disk using atomic write (temp file + rename)."""
+    def _save_to_disk(self, session_id: str, force: bool = False) -> None:
+        """Persist single session to disk using atomic write (temp file + rename).
+        
+        Args:
+            session_id: Session identifier
+            force: If True, bypass debounce and write immediately.
+                   Use after critical state transitions (framework confirm, execution start, etc.)
+        """
         import os as os_mod
         import time as _time
 
@@ -250,17 +256,15 @@ class SessionManager:
 
         now = _time.time()
         last = self._last_write_time.get(session_id, 0)
-        if (now - last) * 1000 < self._debounce_ms:
+        if not force and (now - last) * 1000 < self._debounce_ms:
             return
         self._last_write_time[session_id] = now
         try:
             path = self._get_path(session_id)
-            # Optional: compress history before writing
             if self._history_compressor and session.get("conversation_history"):
                 self._history_compressor.compress_if_needed(session_id, session)
             serialized = _serialize_value(session)
 
-            # Atomic write: write to .tmp first, then rename
             tmp_path = path.with_suffix(".tmp")
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(serialized, f, ensure_ascii=False, indent=2)
@@ -307,6 +311,16 @@ class SessionManager:
         self._history_compressor = compressor
 
     # ==================== Public API ====================
+
+    def force_save(self, session_id: str) -> None:
+        """Force immediate persist of session to disk, bypassing debounce.
+        
+        Use after critical state transitions where data must not be lost:
+        - Framework confirmation (enter_framework_mode)
+        - Execution start (_start_execution)
+        - State machine transitions to FRAMEWORK_CONFIRM/EXECUTING
+        """
+        self._save_to_disk(session_id, force=True)
 
     def _wrap(self, session_id: str, data: dict) -> PersistentSessionDict:
         """Wrap regular dict as auto-persisting dict"""

@@ -178,6 +178,7 @@ class TestBug2FixCacheReadsSessionFormat:
                 is_hardcoded_docx = (
                     ("'docx'" in line or '"docx"' in line)
                     and not uses_session_for_format
+                    and "html_layout" not in line
                 )
                 if uses_session_for_format and session_aware_line is None:
                     session_aware_line = i

@@ -84,6 +84,12 @@ class DocumentGenerationRequest:
     # Session context
     session_context: Optional[Dict[str, Any]] = None
     
+    # Internal: HTML layout hint for preview generation (pptx=slide layout, docx=article layout)
+    _html_layout: Optional[str] = None
+    
+    # Internal: reuse existing preview HTML for final document conversion (avoids double HTML generation)
+    _preview_html_path: Optional[str] = None
+    
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary"""
         return {
@@ -97,7 +103,9 @@ class DocumentGenerationRequest:
             "version_id_2": self.version_id_2,
             "adjustments": self.adjustments,
             "export_path": self.export_path,
-            "session_context": self.session_context
+            "session_context": self.session_context,
+            "_html_layout": self._html_layout,
+            "_preview_html_path": self._preview_html_path,
         }
     
     @classmethod
@@ -148,7 +156,9 @@ class DocumentGenerationRequest:
             version_id_2=data.get("version_id_2"),
             adjustments=data.get("adjustments", []),
             export_path=data.get("export_path"),
-            session_context=data.get("session_context")
+            session_context=data.get("session_context"),
+            _html_layout=data.get("_html_layout"),
+            _preview_html_path=data.get("_preview_html_path")
         )
 
 

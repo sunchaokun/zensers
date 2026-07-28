@@ -4,6 +4,29 @@
 
 ---
 
+## [3.5.2] - 2026-07-28
+
+### Bug Fixes: Session History & Task Status Display
+
+Fixed critical issues where completed research tasks appeared stuck as "running" or disappeared from the history list.
+
+**P0: History List Session Loss (Critical)**
+- `list_all_sessions`: Fixed `NameError: name 'state_machine' is not defined` that caused 24/29 sessions to be silently dropped from the history list
+- `list_all_sessions`: Refactored pagination — process all sessions first, then paginate results, preventing `sm.get()` failures from causing page offset misalignment
+
+**P0: Completed Tasks Showing as "Running" (Critical)**
+- `list_all_sessions` / `get_research_detail`: Status determination now prioritizes `research_result.status` over `state_machine.current_state` — tasks with `research_result.status=completed` correctly return `completed` instead of `reporting`/`running` from stale `state_machine` state
+- `get_research_detail`: Added `phases` and `progress` fields to API response, enabling frontend to correctly restore agent progress for completed tasks
+- `get_research_detail`: For completed tasks, force `progress=100` and fix stale phase statuses (`running` → `completed`)
+
+**P1: Ghost Session Repair**
+- `_repair_ghost_sessions`: Now resets `state_machine` to `CANCELLED` terminal state when repairing ghost sessions, preventing stale `executing` status from persisting across server restarts
+
+**P1: PPT Output Format Fix**
+- Fixed PPT format output broken by early returns in orchestrator that bypassed final document generation
+
+---
+
 ## [3.5.0] - 2026-07-22
 
 ### Report Quality: Content Rendering & Dedup Overhaul
