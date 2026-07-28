@@ -190,6 +190,16 @@ class ProgressStreamer:
             task.error = tp.get("error")
             task.last_chat_response = session.get("last_chat_response")
 
+            # Override status if research_result indicates a terminal state
+            rr = session.get("research_result")
+            if isinstance(rr, dict):
+                rr_status = rr.get("status")
+                _terminal_rr = ("completed", "completed_with_warnings", "failed", "cancelled", "error")
+                if rr_status in _terminal_rr:
+                    task.status = "completed" if rr_status in ("completed", "completed_with_warnings") else "error"
+                    task.progress = 1.0
+                    task.completed_at = task.completed_at or datetime.now()
+
             if tp.get("started_at"):
                 try:
                     task.started_at = datetime.fromisoformat(tp["started_at"])

@@ -66,15 +66,16 @@ interface SessionRegistry {
 export async function restoreSession(id: string): Promise<void> {
   const store = useSessionStore.getState();
 
-  // Cache hit → switch directly, preserve cached state
-  if (store.sessions[id]) {
+  // Cache hit with terminal status → switch directly (no need to re-fetch)
+  const cached = store.sessions[id];
+  if (cached && (cached.status === 'completed' || cached.status === 'error')) {
     store.switchTo(id);
     return;
   }
 
-  // Create placeholder cache, switch immediately (show loading)
+  // For non-terminal or missing cache, always fetch fresh state from backend
   store.switchTo(id);
-  useSessionStore.getState().syncActive({ title: 'Loading...' });
+  useSessionStore.getState().syncActive({ title: cached?.title || 'Loading...' });
 
   try {
     const detail: any = await api.getResearchDetail(id);
@@ -279,13 +280,18 @@ export const useSessionStore = create<SessionRegistry>()(
         ...current,
         ...(persisted as object),
         sessions: Object.fromEntries(
-          Object.entries((persisted as any).sessions || {}).map(([k, v]: [string, any]) => [k, {
-            ...emptyCache(k, v?.title),
-            ...(current.sessions[k] || {}),
-            ...v,
-            qualityState: v?.qualityState ?? null,
-            pendingInput: v?.pendingInput ?? null,
-          }])
+          Object.entries((persisted as any).sessions || {}).map(([k, v]: [string, any]) => {
+            // On page reload, no task can be truly "running" — downgrade to "paused"
+            const fixedStatus = v?.status === 'running' ? 'paused' : v?.status;
+            return [k, {
+              ...emptyCache(k, v?.title),
+              ...(current.sessions[k] || {}),
+              ...v,
+              status: fixedStatus,
+              qualityState: v?.qualityState ?? null,
+              pendingInput: v?.pendingInput ?? null,
+            }];
+          })
         ),
       }),
     }
