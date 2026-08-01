@@ -132,6 +132,66 @@ progress.md
 task_plan.md
 
 # ═══════════════════════════════════════════════════════════════════
+# 临时脚本（调试/检查/诊断/一次性测试，不应入库）
+# ═══════════════════════════════════════════════════════════════════
+scripts/test_*
+scripts/debug_*
+scripts/inspect_*
+scripts/diag_*
+scripts/e2e_*
+scripts/scan_*
+scripts/epistemic_*
+scripts/deep_eval_*
+scripts/edge_case_*
+scripts/_fix_*
+scripts/analyze_*
+scripts/check_v*
+scripts/cn_audit.py
+scripts/cn_check.py
+scripts/cn_to_en*.py
+scripts/compare_reports.py
+scripts/dry_run.py
+scripts/dump_report.py
+scripts/evaluate_*.py
+scripts/find_fences.py
+scripts/full_quality_check.py
+scripts/resize_logo.py
+scripts/save_v4_readable.py
+scripts/show_*.py
+scripts/syntax_check.py
+scripts/validate_simulation_vs_wvs.py
+
+# ═══════════════════════════════════════════════════════════════════
+# 归档文档（历史设计/诊断/修复记录，不应入库）
+# ═══════════════════════════════════════════════════════════════════
+docs/_archive/
+
+# 临时设计/修复/审计文档
+docs/2026-*
+docs/bug_*
+docs/fix_*
+docs/qc_*
+docs/audit-*
+docs/deep-audit-*
+docs/epistemic-*
+docs/*-errata*
+docs/system_log_*
+docs/ui-ux-*
+docs/bugfix-plan-*
+docs/data_quality_closed_loop_proposal.md
+docs/quality_convergence_design.md
+docs/skill_dynamic_loading_proposal.md
+docs/annual_report_analysis_full_pipeline_design.md
+docs/AGENT_EXECUTION_PARALLELISM_ANALYSIS.md
+docs/AGENT_SESSION_MANAGEMENT.md
+docs/VERSION_MANAGEMENT_AND_UPGRADE_DESIGN.md
+docs/RESEARCH_FRAMEWORK_DRIVEN_DESIGN.md
+docs/research-direction.md
+docs/system_architecture_design.md
+docs/report_quality_analysis_and_fix_plan.md
+docs/research_api_systematic_fix_plan.md
+
+# ═══════════════════════════════════════════════════════════════════
 # 构建产物
 # ═══════════════════════════════════════════════════════════════════
 *.tsbuildinfo
