@@ -351,19 +351,26 @@ async def get_research_status(task_id: str):
         sm = SessionManager.get_instance()
         session = sm.get(task_id)
         if session:
-            tp_data = session.get("task_progress", {})
-            if tp_data.get("status") == "running":
-                last_hb = tp_data.get("last_heartbeat_at")
-                is_stale = True
-                if last_hb:
-                    try:
-                        hb_time = _parse_heartbeat(last_hb)
-                        is_stale = (datetime.now() - hb_time).total_seconds() > 300
-                    except (ValueError, TypeError):
-                        pass
-                if is_stale:
-                    response["status"] = "paused"
-                    response["interrupted"] = True
+            # Only apply staleness check if task is genuinely running
+            # (not if research_result already indicates a terminal state)
+            rr = session.get("research_result")
+            rr_status = rr.get("status") if isinstance(rr, dict) else None
+            _terminal_rr = ("completed", "completed_with_warnings", "failed", "cancelled", "error")
+
+            if rr_status not in _terminal_rr:
+                tp_data = session.get("task_progress", {})
+                if tp_data.get("status") == "running":
+                    last_hb = tp_data.get("last_heartbeat_at")
+                    is_stale = True
+                    if last_hb:
+                        try:
+                            hb_time = _parse_heartbeat(last_hb)
+                            is_stale = (datetime.now() - hb_time).total_seconds() > 300
+                        except (ValueError, TypeError):
+                            pass
+                    if is_stale:
+                        response["status"] = "paused"
+                        response["interrupted"] = True
 
             # Persisted agent messages (last 10)
             events = session.get("recent_events", [])

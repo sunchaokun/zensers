@@ -6,6 +6,8 @@ Bug 2: ProgressStreamer._restore_from_session should override status when
        research_result indicates a terminal state (avoids stale "running" in SSE)
 Bug 3: get_research_detail should return phases and progress fields
 Bug 4: _repair_ghost_sessions should reset state_machine to CANCELLED
+Bug 5: /status API heartbeat staleness check should NOT override status
+       when research_result already indicates a terminal state
 """
 
 import pytest
@@ -338,3 +340,61 @@ class TestGhostSessionRepairStateMachine:
             _repair_ghost_sessions()
 
         assert ghost_session["mode"] == "chat"
+
+
+class TestStatusApiHeartbeatOverride:
+    """/status API should not downgrade completed status to paused based on
+    stale heartbeat when research_result already indicates terminal state."""
+
+    def _simulate_status_response(self, progress_status, rr_status):
+        _terminal_rr = ("completed", "completed_with_warnings", "failed", "cancelled", "error")
+
+        response = {"task_id": "test_task", "status": progress_status, "progress": 1.0}
+
+        session = {
+            "task_progress": {"status": "running", "last_heartbeat_at": "2026-07-24T15:36:25.000000"},
+            "research_result": {"status": rr_status} if rr_status else {},
+        }
+
+        rr = session.get("research_result")
+        rr_status_val = rr.get("status") if isinstance(rr, dict) else None
+
+        if rr_status_val not in _terminal_rr:
+            tp_data = session.get("task_progress", {})
+            if tp_data.get("status") == "running":
+                is_stale = True
+                last_hb = tp_data.get("last_heartbeat_at")
+                if last_hb:
+                    from datetime import datetime as dt
+                    try:
+                        hb_time = dt.fromisoformat(last_hb)
+                        is_stale = (dt.now() - hb_time).total_seconds() > 300
+                    except (ValueError, TypeError):
+                        pass
+                if is_stale:
+                    response["status"] = "paused"
+                    response["interrupted"] = True
+
+        return response
+
+    def test_completed_rr_not_overridden_by_stale_heartbeat(self):
+        resp = self._simulate_status_response("completed", "completed")
+        assert resp["status"] == "completed"
+        assert "interrupted" not in resp
+
+    def test_completed_with_warnings_not_overridden(self):
+        resp = self._simulate_status_response("completed", "completed_with_warnings")
+        assert resp["status"] == "completed"
+
+    def test_failed_rr_not_overridden(self):
+        resp = self._simulate_status_response("error", "failed")
+        assert resp["status"] == "error"
+
+    def test_no_rr_allows_heartbeat_override(self):
+        resp = self._simulate_status_response("running", None)
+        assert resp["status"] == "paused"
+        assert resp.get("interrupted") is True
+
+    def test_running_rr_allows_heartbeat_override(self):
+        resp = self._simulate_status_response("running", "running")
+        assert resp["status"] == "paused"
