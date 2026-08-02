@@ -81,9 +81,9 @@ export const useChatStore = create<ChatState>()((set, get) => {
       const current = useChatStore.getState();
       const raw = active?.messages || [];
       if (current.messages !== raw) {
-        const hasHeartbeat = raw.some(m => m.role === 'agent' && m.agent?.action === 'heartbeat');
+        const hasHeartbeat = raw.some((m: any) => m.role === 'agent' && (m.agent?.action === 'heartbeat' || m.action === 'heartbeat'));
         if (hasHeartbeat) {
-          const next = raw.filter(m => !(m.role === 'agent' && m.agent?.action === 'heartbeat'));
+          const next = raw.filter((m: any) => !(m.role === 'agent' && (m.agent?.action === 'heartbeat' || m.action === 'heartbeat')));
           useChatStore.setState({ messages: next });
           useSessionStore.getState().syncActive({ messages: next });
         } else {

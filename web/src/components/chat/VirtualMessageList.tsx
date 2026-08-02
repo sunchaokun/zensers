@@ -39,7 +39,7 @@ export function VirtualMessageList({
   const [stickyHeaderHeight, setStickyHeaderHeight] = useState(0);
 
   const visibleMessages = useMemo(
-    () => messages.filter(m => !(m.role === 'agent' && m.agent?.action === 'heartbeat')),
+    () => messages.filter(m => !(m.role === 'agent' && (m.agent?.action === 'heartbeat' || (m as any).action === 'heartbeat'))),
     [messages]
   );
 

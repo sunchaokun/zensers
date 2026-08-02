@@ -280,7 +280,7 @@ export const useSessionStore = create<SessionRegistry>()(
     }),
     {
       name: 'Zensers-sessions',
-      version: 1,
+      version: 2,
       partialize: (state) => ({
         activeId: (!state.activeId || state.activeId === '__pending__')
           ? null
@@ -301,11 +301,12 @@ export const useSessionStore = create<SessionRegistry>()(
             })
             .slice(-200)
             .map(([k, v]) => [k, {
-              ...v,
-              result: undefined,
-              qualityState: undefined,
-              pendingInput: undefined,
-            }])
+               ...v,
+               messages: (v as any).messages?.filter((m: any) => !(m.role === 'agent' && (m.agent?.action === 'heartbeat' || m.action === 'heartbeat'))) || [],
+               result: undefined,
+               qualityState: undefined,
+               pendingInput: undefined,
+             }])
         ),
       }),
       merge: (persisted, current) => ({
@@ -316,13 +317,14 @@ export const useSessionStore = create<SessionRegistry>()(
             // On page reload, no task can be truly "running" — downgrade to "paused"
             const fixedStatus = v?.status === 'running' ? 'paused' : v?.status;
             return [k, {
-              ...emptyCache(k, v?.title),
-              ...(current.sessions[k] || {}),
-              ...v,
-              status: fixedStatus,
-              qualityState: v?.qualityState ?? null,
-              pendingInput: v?.pendingInput ?? null,
-            }];
+               ...emptyCache(k, v?.title),
+               ...(current.sessions[k] || {}),
+               ...v,
+               messages: v?.messages?.filter((m: any) => !(m.role === 'agent' && (m.agent?.action === 'heartbeat' || m.action === 'heartbeat'))) || [],
+               status: fixedStatus,
+               qualityState: v?.qualityState ?? null,
+               pendingInput: v?.pendingInput ?? null,
+             }];
           })
         ),
       }),
