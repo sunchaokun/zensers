@@ -778,6 +778,11 @@ async def get_research_detail(task_id: str):
         "output_type": meta.get("output_type", "report"),
         "template": "consulting", "sections": [],
     }, "framework": research_context.get("framework"),
+     "suggestions": research_context.get("suggestions", []),
+     "step": session.get("current_step", 0),
+     "output_type": session.get("output_type"),
+     "custom_params": session.get("custom_params"),
+     "selected_sections": session.get("selected_sections"),
      "phases": phases, "progress": progress_val}
 
 

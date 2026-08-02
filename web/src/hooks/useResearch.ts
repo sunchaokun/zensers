@@ -479,11 +479,10 @@ export function useResearch() {
               if (data.framework) {
                 setFrameworkAction(data.framework);
               }
-            } else if (mode === 'research' && data.step === 6) {
-              useResearchStore.getState().setTaskId(data.session_id);
-              setStatus('running');
-              setStep(6, undefined);
-              setFrameworkAction(null);
+        } else if (mode === 'research' && data.step === 6) {
+          setTaskId(data.session_id);
+          setStatus('running');
+          setStep(6, undefined);
             } else {
               setStep(0, data.suggestions || data.options);
             }
@@ -566,7 +565,6 @@ export function useResearch() {
           setTaskId(data.session_id);
           setStatus('running');
           setStep(6, undefined);
-          setFrameworkAction(null);
         } else {
           // Still in chat mode
           setStep(0, data.suggestions || data.options);
@@ -649,7 +647,6 @@ export function useResearch() {
           setTaskId(data.session_id);
           setStatus('running');
           setStep(6, undefined);
-          setFrameworkAction(null);
         } else {
           setStep(0, data.suggestions || data.options);
         }

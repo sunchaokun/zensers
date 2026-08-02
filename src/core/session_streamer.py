@@ -76,7 +76,9 @@ class SessionStreamer:
     _recent_messages: Dict[str, List[SessionMessage]] = {}
     _MAX_REPLAY = 20
     _last_agent_msg_times: Dict[str, float] = {}
-    _AGENT_MSG_THROTTLE_SECONDS = 0.2
+    _AGENT_MSG_THROTTLE_SECONDS = 0.05
+    _pending_agent_msgs: Dict[str, Dict[str, Any]] = {}
+    _persist_lock = __import__('threading').Lock()
 
     def __init__(self, session_id: str):
         self.session_id = session_id
@@ -122,60 +124,66 @@ class SessionStreamer:
 
     @classmethod
     def _persist_event(cls, session_id: str, event_type: str, data: Dict[str, Any]):
-        """持久化 SSE 事件到 SessionManager (最多 100 条, 分类保留)
+        """持久化 SSE 事件到 SessionManager (最多 200 条, 分类保留)
         
         同时将 chat_response 和 agent_message 写入 conversation_history，
         确保刷新页面后消息不丢失。
         """
-        try:
-            from src.core.session_manager import SessionManager
-            sm = SessionManager.get_instance()
-            session = sm.get(session_id)
-            if session is None:
-                return
+        with cls._persist_lock:
+            try:
+                from src.core.session_manager import SessionManager
+                sm = SessionManager.get_instance()
+                session = sm.get(session_id)
+                if session is None:
+                    return
 
-            # Write chat/agent messages to conversation_history for persistence
-            if event_type in ("chat_response", "agent_message"):
-                history = session.get("conversation_history", [])
-                if event_type == "chat_response":
-                    history.append({
-                        "role": "assistant",
-                        "content": data.get("message", ""),
-                        "timestamp": data.get("timestamp", datetime.now().isoformat()),
-                    })
-                elif event_type == "agent_message":
-                    history.append({
-                        "role": "agent",
-                        "content": data.get("content", ""),
-                        "agent_id": data.get("agent_id", ""),
-                        "agent_name": data.get("agent_name", ""),
-                        "action": data.get("action", ""),
-                        "timestamp": data.get("timestamp", datetime.now().isoformat()),
-                    })
-                session["conversation_history"] = history
+                if event_type in ("chat_response", "agent_message"):
+                    history = session.get("conversation_history", [])
+                    if event_type == "chat_response":
+                        history.append({
+                            "role": "assistant",
+                            "content": data.get("message", ""),
+                            "timestamp": data.get("timestamp", datetime.now().isoformat()),
+                        })
+                    elif event_type == "agent_message":
+                        history.append({
+                            "role": "agent",
+                            "content": data.get("content", ""),
+                            "agent_id": data.get("agent_id", ""),
+                            "agent_name": data.get("agent_name", ""),
+                            "action": data.get("action", ""),
+                            "timestamp": data.get("timestamp", datetime.now().isoformat()),
+                        })
+                    session["conversation_history"] = history
 
-            events = session.get("recent_events", [])
-            events.append({
-                "event": event_type,
-                "data": data,
-                "created_at": datetime.now().isoformat(),
-            })
+                events = session.get("recent_events", [])
+                events.append({
+                    "event": event_type,
+                    "data": data,
+                    "created_at": datetime.now().isoformat(),
+                })
 
-            # 最多保留 100 条，优先保留 chat_response
-            _MAX_EVENTS_TOTAL = 100
-            if len(events) > _MAX_EVENTS_TOTAL:
-                chat_msgs = [e for e in events if e.get("event") == "chat_response"]
-                agent_msgs = [e for e in events if e.get("event") == "agent_message"]
-                keep_chat = len(chat_msgs)
-                keep_agent = _MAX_EVENTS_TOTAL - keep_chat
-                if keep_agent < len(agent_msgs):
-                    agent_msgs = agent_msgs[-keep_agent:]
-                events = chat_msgs + agent_msgs
-                events.sort(key=lambda e: e.get("created_at", ""))
+                _MAX_EVENTS_TOTAL = 200
+                _MIN_AGENT_EVENTS = 30
+                if len(events) > _MAX_EVENTS_TOTAL:
+                    chat_msgs = [e for e in events if e.get("event") == "chat_response"]
+                    agent_msgs = [e for e in events if e.get("event") == "agent_message"]
+                    other_msgs = [e for e in events if e.get("event") not in ("chat_response", "agent_message")]
 
-            session["recent_events"] = events
-        except Exception as e:
-            logger.debug(f"Failed to persist event for {session_id}: {e}")
+                    keep_agent = max(_MIN_AGENT_EVENTS, _MAX_EVENTS_TOTAL - len(chat_msgs) - len(other_msgs))
+                    if keep_agent < len(agent_msgs):
+                        agent_msgs = agent_msgs[-keep_agent:]
+
+                    max_chat = _MAX_EVENTS_TOTAL - len(agent_msgs) - len(other_msgs)
+                    if len(chat_msgs) > max_chat:
+                        chat_msgs = chat_msgs[-max_chat:]
+
+                    events = chat_msgs + agent_msgs + other_msgs
+                    events.sort(key=lambda e: e.get("created_at", ""))
+
+                session["recent_events"] = events
+            except Exception as e:
+                logger.debug(f"Failed to persist event for {session_id}: {e}")
 
     @classmethod
     def push_chat_response(cls, session_id: str, response_data: Dict[str, Any]):
@@ -259,6 +267,7 @@ class SessionStreamer:
             _now = time.monotonic()
             _last = cls._last_agent_msg_times.get(session_id, 0.0)
             if _now - _last < cls._AGENT_MSG_THROTTLE_SECONDS:
+                cls._pending_agent_msgs[session_id] = agent_data
                 return
             cls._last_agent_msg_times[session_id] = _now
         _ts = datetime.now().isoformat()
@@ -279,6 +288,26 @@ class SessionStreamer:
             "timestamp": _ts,
         })
         logger.debug(f"Session stream agent_message pushed: {session_id}/{agent_data.get('agent_id', '')}")
+        pending = cls._pending_agent_msgs.pop(session_id, None)
+        if pending:
+            try:
+                loop = asyncio.get_running_loop()
+                loop.call_later(
+                    cls._AGENT_MSG_THROTTLE_SECONDS,
+                    lambda: cls.push_agent_message(session_id, pending)
+                )
+            except RuntimeError:
+                import threading
+                try:
+                    loop = asyncio.get_event_loop()
+                    loop.call_soon_threadsafe(
+                        lambda: loop.call_later(
+                            cls._AGENT_MSG_THROTTLE_SECONDS,
+                            lambda: cls.push_agent_message(session_id, pending)
+                        )
+                    )
+                except Exception:
+                    pass
 
     @classmethod
     def push_clarification(cls, session_id: str, question: str, clarification_id: str):

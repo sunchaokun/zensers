@@ -2383,14 +2383,18 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
         return response
 
     def _framework_response(self, session_id, message, suggestions=None):
-        """Generate framework confirmation response and save assistant message to history"""
         session = session_manager.get(session_id)
         framework_data = None
         if session:
             history = session.get('conversation_history', [])
             history.append({'role': 'assistant', 'content': message, 'timestamp': datetime.now().isoformat()})
             session['conversation_history'] = history
+            session['current_step'] = 5
             framework_data = session.get('research_context', {}).get('framework')
+            if suggestions:
+                research_context = session.get('research_context', {})
+                research_context['suggestions'] = suggestions
+                session['research_context'] = research_context
         if suggestions is None:
             suggestions = []
         return {'session_id': session_id, 'step': 5, 'mode': 'framework', 'message': message, 'instruction': '', 'suggestions': suggestions, 'framework': framework_data, 'next_step': 'confirm_framework'}

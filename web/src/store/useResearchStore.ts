@@ -115,6 +115,8 @@ function stateFromCache(c: SessionCache | undefined): Partial<ResearchState> {
     downloadUrl: c.downloadUrl || null,
     result: c.result || null,
     interrupted: c.interrupted || false,
+    activeTemplateId: c.activeTemplateId || null,
+    researchTopic: c.researchTopic || null,
   };
 }
 
@@ -142,6 +144,12 @@ export const useResearchStore = create<ResearchState>()(
           phases: next.phases,
           statistics: next.statistics,
           summary: next.summary,
+          currentStep: next.currentStep,
+          stepOptions: next.stepOptions,
+          parameterConfig: next.parameterConfig,
+          framework: next.framework,
+          activeTemplateId: next.activeTemplateId,
+          researchTopic: next.researchTopic,
         });
       }
     });
@@ -240,7 +248,7 @@ export const useResearchStore = create<ResearchState>()(
           ...DEFAULT_NEW_FIELDS,
         };
         set(cleared);
-        useSessionStore.getState().syncActive({ framework: null, status: 'idle' as ResearchStatus, currentStep: null, stepOptions: null });
+        useSessionStore.getState().syncActive({ framework: null, status: 'idle' as ResearchStatus, currentStep: null, stepOptions: null, parameterConfig: null, activeTemplateId: null, researchTopic: null });
       },
     };
   }

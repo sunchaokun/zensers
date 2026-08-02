@@ -1,12 +1,13 @@
-// components/chat/SearchIndicator.tsx
-// Shows a top banner when the system is searching/retrieving information
-
 'use client';
 
 import { useResearchStore } from '@/store/useResearchStore';
 import type { SearchState } from '@/store/useResearchStore';
 import { cn } from '@/lib/utils';
-import { Loader2, Search, CheckCircle2, XCircle } from 'lucide-react';
+import { Loader2, Search, CheckCircle2, XCircle, Brain } from 'lucide-react';
+
+interface SearchIndicatorProps {
+  isWaitingForReply?: boolean;
+}
 
 const STATE_CONFIG: Record<SearchState, {
   icon: typeof Loader2;
@@ -39,8 +40,18 @@ const STATE_CONFIG: Record<SearchState, {
   },
 };
 
-export function SearchIndicator() {
+export function SearchIndicator({ isWaitingForReply }: SearchIndicatorProps) {
   const searchState = useResearchStore((s) => s.searchState);
+
+  if (searchState === 'idle' && isWaitingForReply) {
+    return (
+      <div className="flex items-center gap-2 px-4 py-2 border-b bg-purple-50/50 border-purple-200/30">
+        <Brain className="h-4 w-4 animate-pulse text-purple-700" />
+        <span className="text-sm text-purple-700">AI 正在思考...</span>
+      </div>
+    );
+  }
+
   const config = STATE_CONFIG[searchState];
   if (!config) return null;
 

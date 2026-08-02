@@ -11,8 +11,6 @@ import { useSessionStore } from '@/store/useSessionStore';
 import { useResearch } from '@/hooks/useResearch';
 import { useProgress, useSessionStream } from '@/hooks/useProgress';
 import type { ChatResponseData } from '@/types/api';
-import { useChatScroll } from '@/hooks/useChatScroll';
-import { ChatMessage } from './ChatMessage';
 import { ChatInput } from './ChatInput';
 import { OptionSelector } from './OptionSelector';
 import { SectionSelector } from './SectionSelector';
@@ -20,14 +18,15 @@ import { DynamicParameterForm } from './DynamicParameterForm';
 // ProgressPanel removed — agent progress shown via inline agent_message events
 import { SearchIndicator } from './SearchIndicator';
 import { ResearchStatusBar } from './ResearchStatusBar';
+import { VirtualMessageList } from './VirtualMessageList';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
-import { ArrowDown } from 'lucide-react';
+import { ArrowDown, Brain } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { parseTemplateCommand, RESEARCH_TEMPLATES, formatTemplateMessage, formatTemplateList, formatTemplateNotFound, extractTemplateKeyword } from '@/lib/templates';
 
 export function ChatPanel() {
-  const { messages, addMessage, updateMessage } = useChatStore();
+  const { messages, addMessage, updateMessage, appendStreamToken } = useChatStore();
   const {
     currentStep,
     stepOptions,
@@ -62,12 +61,11 @@ export function ChatPanel() {
 
   // Tracks the currently streaming message ID for token-by-token updates
   const streamingMsgIdRef = useRef<string | null>(null);
-  // Guard: set to true after chat_response finalizes streaming. Late chat_token events are ignored.
   const streamingDoneRef = useRef(false);
+  const sessionIdRef = useRef(sessionId);
+  sessionIdRef.current = sessionId;
 
-  // Timer ref to prevent stale setTimeout race (Issue 3 fix: Oracle CRITICAL)
   const searchStateTimerRef = useRef<ReturnType<typeof setTimeout>>();
-  // Timeout guard for isWaitingForReply — auto-clear after 5 min if no chat_response arrives
   const waitingTimeoutRef = useRef<ReturnType<typeof setTimeout>>();
 
   // Persistent session stream (stays alive, unaffected by task complete)
@@ -75,7 +73,7 @@ export function ChatPanel() {
   useSessionStream(sessionId, {
     onChatToken: (data: ChatTokenData) => {
       const storeSessionId = useSessionStore.getState().activeId;
-      const matches = data.session_id === sessionId
+      const matches = data.session_id === sessionIdRef.current
         || data.session_id === taskId
         || data.session_id === storeSessionId;
       if (!matches) return;
@@ -83,37 +81,24 @@ export function ChatPanel() {
 
       if (!streamingMsgIdRef.current) {
         streamingMsgIdRef.current = nanoid();
-        const looksLikeJson = data.token.trimStart().startsWith('{') || data.token.trimStart().startsWith('```');
         addMessage({
           id: streamingMsgIdRef.current,
           role: 'assistant',
-          content: looksLikeJson ? '' : data.token,
+          content: data.token,
           timestamp: new Date().toISOString(),
-          metadata: {
-            status: looksLikeJson ? 'processing' : 'streaming',
-            ...(looksLikeJson ? { _rawContent: data.token } : {}),
-          },
+          metadata: { status: 'streaming' },
         });
       } else {
         const currentMsg = useChatStore.getState().messages.find(m => m.id === streamingMsgIdRef.current);
-        if (currentMsg) {
-          const newContent = currentMsg.metadata?._rawContent
-            ? currentMsg.metadata._rawContent + data.token
-            : currentMsg.content + data.token;
-          const looksLikeJson = newContent.trimStart().startsWith('{') || newContent.trimStart().startsWith('```');
-          updateMessage(streamingMsgIdRef.current, {
-            content: looksLikeJson ? '' : newContent,
-            metadata: {
-              status: looksLikeJson ? 'processing' : 'streaming',
-              ...(looksLikeJson ? { _rawContent: newContent } : {}),
-            },
-          });
+        if (currentMsg?.metadata?.status === 'thinking') {
+          updateMessage(streamingMsgIdRef.current, { metadata: { status: 'streaming' } });
         }
+        appendStreamToken(streamingMsgIdRef.current, data.token, '');
       }
     },
     onChatThinking: (data: ChatThinkingData) => {
       const storeSessionId = useSessionStore.getState().activeId;
-      const matches = data.session_id === sessionId
+      const matches = data.session_id === sessionIdRef.current
         || data.session_id === taskId
         || data.session_id === storeSessionId;
       if (!matches) return;
@@ -127,20 +112,19 @@ export function ChatPanel() {
           content: '',
           thinkingContent: data.token,
           timestamp: new Date().toISOString(),
-          metadata: { status: 'streaming' },
+          metadata: { status: 'thinking' },
         });
       } else {
         const currentMsg = useChatStore.getState().messages.find(m => m.id === streamingMsgIdRef.current);
-        if (currentMsg) {
-          updateMessage(streamingMsgIdRef.current, {
-            thinkingContent: (currentMsg.thinkingContent || '') + data.token,
-          });
+        if (currentMsg?.metadata?.status === 'streaming') {
+          updateMessage(streamingMsgIdRef.current, { metadata: { status: 'thinking' } });
         }
+        appendStreamToken(streamingMsgIdRef.current, '', data.token);
       }
     },
     onChatResponse: (data) => {
       const storeSessionId = useSessionStore.getState().activeId;
-      const matches = data.session_id === sessionId
+      const matches = data.session_id === sessionIdRef.current
         || data.session_id === taskId
         || data.session_id === storeSessionId;
       if (!matches) return;
@@ -154,16 +138,6 @@ export function ChatPanel() {
 
       let finalContent = data.message;
       let finalThinking: string | undefined = data.thinking_content;
-      if (!finalThinking) {
-        const THINK_OPEN = '[';
-        const THINK_CLOSE = ']';
-        const thinkOpen = data.message.indexOf(THINK_OPEN);
-        const thinkClose = data.message.indexOf(THINK_CLOSE, thinkOpen + THINK_OPEN.length);
-        if (thinkOpen !== -1 && thinkClose !== -1) {
-          finalThinking = data.message.substring(thinkOpen + THINK_OPEN.length, thinkClose);
-          finalContent = data.message.substring(0, thinkOpen) + data.message.substring(thinkClose + THINK_CLOSE.length);
-        }
-      }
 
       const trimmed = finalContent.trim();
       if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
@@ -193,6 +167,8 @@ export function ChatPanel() {
         });
         streamingDoneRef.current = true;
       }
+
+      setIsWaitingForReply(false);
 
       const mode = (data as any).mode || 'chat';
       const action = data.action || 'continue_chat';
@@ -247,12 +223,15 @@ export function ChatPanel() {
       const storeSessionId = useSessionStore.getState().activeId;
       if (data.session_id === sessionId || data.session_id === storeSessionId) {
         if (data.action === 'heartbeat') {
-          const msgs = useChatStore.getState().messages;
-          const lastHb = [...msgs].reverse().find(m => m.role === 'agent' && m.agent?.action === 'heartbeat');
-          if (lastHb) {
-            updateMessage(lastHb.id, { content: data.content, timestamp: data.timestamp });
-            return;
+          const progressMatch = data.content.match(/\((\d+)%\s*complete\)/);
+          if (progressMatch) {
+            const pct = parseInt(progressMatch[1], 10) / 100;
+            const rs = useResearchStore.getState();
+            if (rs.status === 'running' && pct > rs.progress) {
+              rs.setProgress(pct);
+            }
           }
+          return;
         }
         const MERGEABLE_IDS = ['web_search', 'news_search', 'scrape_url'];
         if (MERGEABLE_IDS.includes(data.agent_id) && data.action !== 'error') {
@@ -343,9 +322,10 @@ export function ChatPanel() {
         setHasMoreMessages(false);
       } else {
         const currentIds = new Set(useChatStore.getState().messages.map(m => m.id));
-        const olderMsgs: ChatMessageType[] = result.messages
-          .filter((m: any) => !currentIds.has(m.id))
-          .map((m: any) => ({
+          const olderMsgs: ChatMessageType[] = result.messages
+            .filter((m: any) => !currentIds.has(m.id))
+            .filter((m: any) => !(m.role === 'agent' && m.action === 'heartbeat'))
+            .map((m: any) => ({
             id: m.id || nanoid(),
             role: (m.role === 'user' || m.role === 'assistant' || m.role === 'agent'
               ? m.role
@@ -385,6 +365,25 @@ export function ChatPanel() {
   }, [activeSessionId]);
 
   useEffect(() => {
+    const hasHeartbeat = messages.some(m => m.role === 'agent' && m.agent?.action === 'heartbeat');
+    if (hasHeartbeat) {
+      const cleaned = messages.filter(m => !(m.role === 'agent' && m.agent?.action === 'heartbeat'));
+      useChatStore.setState({ messages: cleaned });
+    }
+  }, [activeSessionId]);
+
+  useEffect(() => {
+    if (status === 'running' && !streamingMsgIdRef.current) {
+      const hasAssistant = messages.some(m => m.role === 'assistant' && m.metadata?.status !== 'streaming' && m.metadata?.status !== 'thinking');
+      if (!hasAssistant) {
+        setIsWaitingForReply(true);
+      }
+    } else if (status !== 'running') {
+      setIsWaitingForReply(false);
+    }
+  }, [status, activeSessionId, messages.length]);
+
+  useEffect(() => {
     const sessionMessages = useSessionStore.getState().sessions[activeSessionId ?? '']?.messages;
     if (sessionMessages) {
       serverOffsetRef.current = sessionMessages.length;
@@ -393,12 +392,33 @@ export function ChatPanel() {
       serverOffsetRef.current = 0;
       setHasMoreMessages(true);
     }
-  }, [activeSessionId, messages]);
+  }, [activeSessionId]);
 
-  const { containerRef, handleScroll, scrollToBottom, isAtBottom } = useChatScroll(
-    [messages.length],
-    loadOlderMessages,
-  );
+  const scrollToBottomRef = useRef<(() => void) | null>(null);
+
+  const [showScrollBtn, setShowScrollBtn] = useState(false);
+
+  const handleAtBottomChange = useCallback((showButton: boolean) => {
+    setShowScrollBtn(showButton);
+  }, []);
+
+  const scrollToBottom = useCallback(() => {
+    scrollToBottomRef.current?.();
+  }, []);
+
+  useEffect(() => {
+    const handleBeforeUnload = () => { useChatStore.getState().flushSyncNow(); };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') useChatStore.getState().flushSyncNow();
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    window.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      window.removeEventListener('visibilitychange', handleVisibilityChange);
+      useChatStore.getState().flushSyncNow();
+    };
+  }, []);
 
   // hasActiveResearch removed — ProgressPanel replaced by inline agent messages
   const isChatMode = currentStep === null || currentStep === 0;
@@ -474,19 +494,29 @@ export function ChatPanel() {
       if (sessionId) {
         const data = await sendMessage(text);
         if (data && (data as any).status === 'processing') {
+          const thinkingContent = (data as any).thinking_content;
+          const processingMsg = (data as any).message;
+          if (thinkingContent || processingMsg) {
+            const msgId = nanoid();
+            streamingMsgIdRef.current = msgId;
+            addMessage({
+              id: msgId,
+              role: 'assistant',
+              content: processingMsg || '',
+              ...(thinkingContent ? { thinkingContent } : {}),
+              timestamp: new Date().toISOString(),
+              metadata: { status: thinkingContent ? 'thinking' : 'streaming' },
+            });
+          }
           useResearchStore.getState().setSearchState('searching');
           clearTimeout(waitingTimeoutRef.current);
           waitingTimeoutRef.current = setTimeout(() => {
             setIsWaitingForReply(false);
             useResearchStore.getState().setSearchState('idle');
             if (streamingMsgIdRef.current) {
-              const msg = useChatStore.getState().messages.find(m => m.id === streamingMsgIdRef.current);
-              if (msg?.metadata?._rawContent) {
-                updateMessage(streamingMsgIdRef.current, {
-                  content: msg.metadata._rawContent,
-                  metadata: { status: 'done' },
-                });
-              }
+              updateMessage(streamingMsgIdRef.current, {
+                metadata: { status: 'done' },
+              });
               streamingMsgIdRef.current = null;
               streamingDoneRef.current = true;
             }
@@ -496,19 +526,29 @@ export function ChatPanel() {
       } else {
         const data = await startResearch(text, attachments, selectedModel);
         if (data && (data as any).status === 'processing') {
+          const thinkingContent = (data as any).thinking_content;
+          const processingMsg = (data as any).message;
+          if (thinkingContent || processingMsg) {
+            const msgId = nanoid();
+            streamingMsgIdRef.current = msgId;
+            addMessage({
+              id: msgId,
+              role: 'assistant',
+              content: processingMsg || '',
+              ...(thinkingContent ? { thinkingContent } : {}),
+              timestamp: new Date().toISOString(),
+              metadata: { status: thinkingContent ? 'thinking' : 'streaming' },
+            });
+          }
           useResearchStore.getState().setSearchState('searching');
           clearTimeout(waitingTimeoutRef.current);
           waitingTimeoutRef.current = setTimeout(() => {
             setIsWaitingForReply(false);
             useResearchStore.getState().setSearchState('idle');
             if (streamingMsgIdRef.current) {
-              const msg = useChatStore.getState().messages.find(m => m.id === streamingMsgIdRef.current);
-              if (msg?.metadata?._rawContent) {
-                updateMessage(streamingMsgIdRef.current, {
-                  content: msg.metadata._rawContent,
-                  metadata: { status: 'done' },
-                });
-              }
+              updateMessage(streamingMsgIdRef.current, {
+                metadata: { status: 'done' },
+              });
               streamingMsgIdRef.current = null;
               streamingDoneRef.current = true;
             }
@@ -587,39 +627,12 @@ export function ChatPanel() {
 
   // Render step content (framework interaction steps 1-5)
   const renderStepContent = () => {
-    if (status === 'paused' && taskId) {
-      return (
-        <div className="space-y-3 p-4 bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-800 rounded-xl">
-          <p className="text-sm font-medium text-amber-800 dark:text-amber-200">
-            研究已暂停
-          </p>
-          <p className="text-xs text-amber-600 dark:text-amber-400">
-            研究任务已暂停，已采集的数据已缓存。您可以恢复研究或取消。
-          </p>
-          <div className="flex gap-2">
-            <button
-              onClick={handleResume}
-              className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm font-medium hover:bg-primary/90"
-            >
-              恢复研究
-            </button>
-            <button
-              onClick={handleCancel}
-              className="px-4 py-2 bg-secondary text-secondary-foreground rounded-lg text-sm font-medium hover:bg-secondary/90"
-            >
-              取消
-            </button>
-          </div>
-        </div>
-      );
-    }
-
-    if (isProcessing) {
+    if (isProcessing && !currentStep) {
       return (
         <div className="flex items-center justify-center py-8">
           <div className="flex items-center gap-3">
-            <div className="h-5 w-5 animate-spin rounded-full border-2 border-primary border-t-transparent" />
-            <span className="text-sm text-muted-foreground">Processing...</span>
+            <Brain className="h-5 w-5 animate-pulse text-purple-600" />
+            <span className="text-sm text-purple-700">AI 正在思考...</span>
           </div>
         </div>
       );
@@ -631,7 +644,7 @@ export function ChatPanel() {
       const baseOptions = stepOptions || [];
       const isZh = (topic || framework?.topic) ? /[\u4e00-\u9fff]/.test(topic || framework?.topic || '') : false;
 
-      if (framework && framework.sections && framework.sections.length > 0) {
+      if (framework && framework.sections && framework.sections.length > 0 && status === 'idle') {
         const frameworkOptions: SelectOption[] = framework.sections.map((s, i) => ({
           id: `section-${i}`,
           label: s,
@@ -768,7 +781,7 @@ export function ChatPanel() {
       .map(id => sectionMap.get(id))
       .filter((label): label is string => label !== undefined);
     if (selectedLabels.length === 0) return;
-    const isZh = /[\u4e00-\u9fff]/.test(framework.topic);
+    const isZh = /[\u4e00-\u9fff]/.test(framework.topic || '');
     const fmt = outputFormat || 'docx';
     const sectionsJson = JSON.stringify(selectedLabels);
     const exampleText = isZh
@@ -809,38 +822,37 @@ export function ChatPanel() {
   }, [pendingInputData]);
 
   return (
-    <div className="flex h-full flex-col bg-background">
-      {/* Search/retrieval in-progress indicator (Issue 3) */}
-      <SearchIndicator />
-      <ResearchStatusBar />
+    <div className="relative flex h-full flex-col bg-background">
+      {/* Message list — status bars are sticky headers inside the scroll container */}
+      <VirtualMessageList
+        messages={messages}
+        loadOlderMessages={loadOlderMessages}
+        hasMoreMessages={hasMoreMessages}
+        isLoadingMessages={isLoadingMessages}
+        onAtBottomChange={handleAtBottomChange}
+        scrollToBottomRef={scrollToBottomRef}
+        stickyHeader={
+          <>
+            <SearchIndicator isWaitingForReply={isWaitingForReply} />
+            <ResearchStatusBar />
+          </>
+        }
+      />
 
-      {/* Message list */}
-      <div
-        ref={containerRef}
-        onScroll={handleScroll}
-        className="flex-1 overflow-y-auto preview-scrollbar px-4 py-4 space-y-3"
-      >
-        {messages.length === 0 && (
-          <div className="flex h-full items-center justify-center" />
-        )}
-
-        {isLoadingMessages && (
-          <div className="flex justify-center py-2">
-            <span className="text-xs text-muted-foreground animate-pulse">Loading earlier messages...</span>
+      {/* Step content and paused status rendered below virtual list */}
+      {(() => {
+        const stepContent = currentStep !== null ? renderStepContent() : null;
+        return stepContent ? (
+          <div className="px-4 pb-2">
+            <div className="mt-2">
+              {stepContent}
+            </div>
           </div>
-        )}
+        ) : null;
+      })()}
 
-        {messages.map((msg) => (
-          <ChatMessage key={msg.id} message={msg} />
-        ))}
-
-        {currentStep !== null && (
-          <div className="mt-2">
-            {renderStepContent()}
-          </div>
-        )}
-
-        {status === 'paused' && taskId && (
+      {status === 'paused' && taskId && (
+        <div className="px-4 pb-2">
           <div className="space-y-3 p-4 bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-800 rounded-xl mt-2">
             <p className="text-sm font-medium text-amber-800 dark:text-amber-200">
               研究已暂停
@@ -863,11 +875,11 @@ export function ChatPanel() {
               </button>
             </div>
           </div>
-        )}
-      </div>
+        </div>
+      )}
 
       {/* Scroll to bottom */}
-      {!isAtBottom() && (
+      {showScrollBtn && (
         <div className="absolute bottom-24 left-1/2 -translate-x-1/2 z-10">
           <button
             onClick={scrollToBottom}

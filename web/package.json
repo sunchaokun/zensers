@@ -30,6 +30,7 @@
     "@radix-ui/react-toast": "^1.1.0",
     "@radix-ui/react-tooltip": "^1.0.0",
     "@tailwindcss/typography": "^0.5.20",
+    "@tanstack/react-virtual": "^3.14.9",
     "axios": "^1.6.0",
     "class-variance-authority": "^0.7.0",
     "clsx": "^2.1.0",

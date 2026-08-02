@@ -103,12 +103,23 @@ export async function restoreSession(id: string): Promise<void> {
     const status = detail.status;
 
     if (status === 'completed') {
+      const framework = detail.framework || cached?.framework || null;
+      const stepOptions = detail.suggestions?.length ? detail.suggestions : cached?.stepOptions || null;
+      const currentStep = detail.step ?? cached?.currentStep ?? 6;
+      const parameterConfig = cached?.parameterConfig || null;
+      const activeTemplateId = cached?.activeTemplateId || null;
+      const researchTopic = cached?.researchTopic || null;
       useSessionStore.getState().syncActive({
         title: detail.title || detail.topic || 'Untitled',
         taskId: id,
         messages: msgs,
         status: 'completed',
-        currentStep: 6,
+        currentStep,
+        stepOptions,
+        framework,
+        parameterConfig,
+        activeTemplateId,
+        researchTopic,
         phases: detail.phases || [],
         progress: detail.progress || 100,
         previewUrl: detail.preview_url || null,
@@ -122,18 +133,29 @@ export async function restoreSession(id: string): Promise<void> {
           title: detail.title || detail.topic,
           output_type: detail.output_type || 'report',
           template: 'consulting',
-          sections: [],
-          parameters: {},
+          sections: detail.selected_sections || [],
+          parameters: detail.custom_params || {},
         } : undefined,
       });
     } else if (status === 'running' || status === 'reporting') {
       const interrupted = detail.interrupted;
+      const framework = detail.framework || cached?.framework || null;
+      const stepOptions = detail.suggestions?.length ? detail.suggestions : cached?.stepOptions || null;
+      const currentStep = detail.step ?? cached?.currentStep ?? 6;
+      const parameterConfig = cached?.parameterConfig || null;
+      const activeTemplateId = cached?.activeTemplateId || null;
+      const researchTopic = cached?.researchTopic || null;
       useSessionStore.getState().syncActive({
         title: detail.title || detail.topic || 'Untitled',
         taskId: id,
         messages: msgs,
         status: interrupted ? 'paused' : 'running',
-        currentStep: 6,
+        currentStep,
+        stepOptions,
+        framework,
+        parameterConfig,
+        activeTemplateId,
+        researchTopic,
         phases: detail.phases || [],
         progress: detail.progress || 0,
         agentMessages: detail.agent_messages || [],
@@ -142,13 +164,23 @@ export async function restoreSession(id: string): Promise<void> {
         mode: detail.mode || 'research',
       });
     } else {
-      // paused / analyzing / idle
+      const framework = detail.framework || cached?.framework || null;
+      const stepOptions = detail.suggestions?.length ? detail.suggestions : cached?.stepOptions || null;
+      const currentStep = detail.step ?? cached?.currentStep ?? 0;
+      const parameterConfig = cached?.parameterConfig || null;
+      const activeTemplateId = cached?.activeTemplateId || null;
+      const researchTopic = cached?.researchTopic || null;
       useSessionStore.getState().syncActive({
         title: detail.title || detail.topic || 'Untitled',
         taskId: id,
         messages: msgs,
         status: 'idle',
-        currentStep: 0,
+        currentStep,
+        stepOptions,
+        framework,
+        parameterConfig,
+        activeTemplateId,
+        researchTopic,
         phases: detail.phases || [],
         progress: detail.progress || 0,
         agentMessages: detail.agent_messages || [],

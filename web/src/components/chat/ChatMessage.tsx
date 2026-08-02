@@ -1,12 +1,13 @@
-// components/chat/ChatMessage.tsx
-
 'use client';
 
+import React from 'react';
 import { cn } from '@/lib/utils';
 import type { ChatMessage as ChatMessageType } from '@/types/api';
 import { User, Bot, Search, Brain, FileText, CheckCircle2, Loader2, XCircle } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+
+const REMARK_PLUGINS = [remarkGfm];
 
 interface ChatMessageProps {
   message: ChatMessageType;
@@ -17,7 +18,6 @@ const AGENT_ACTION_CONFIG: Record<string, { icon: typeof Search; color: string; 
   analyzing: { icon: Loader2, color: 'text-purple-600', bg: 'bg-purple-50 border-purple-200' },
   writing:   { icon: FileText, color: 'text-amber-600', bg: 'bg-amber-50 border-amber-200' },
   completed: { icon: CheckCircle2, color: 'text-green-600', bg: 'bg-green-50 border-green-200' },
-  heartbeat: { icon: Loader2, color: 'text-blue-400', bg: 'bg-blue-50/50 border-transparent' },
   error:     { icon: XCircle, color: 'text-red-600', bg: 'bg-red-50 border-red-200' },
   warning:   { icon: XCircle, color: 'text-amber-600', bg: 'bg-amber-50 border-amber-200' },
 };
@@ -32,13 +32,7 @@ function AgentMessage({ message }: { message: ChatMessageType }) {
   const showCount = totalCount > 1;
 
   if (action === 'heartbeat') {
-    return (
-      <div className="flex w-full animate-slide-up">
-        <div className="animate-pulse bg-blue-50/50 text-xs text-blue-500 px-3 py-1 rounded w-full">
-          {message.content}
-        </div>
-      </div>
-    );
+    return null;
   }
 
   let displayText = message.content;
@@ -71,16 +65,14 @@ function AgentMessage({ message }: { message: ChatMessageType }) {
   );
 }
 
-/**
- * Single chat message component - Apple-style design
- */
-export function ChatMessage({ message }: ChatMessageProps) {
-  // Agent messages get their own compact rendering
+export const ChatMessage = React.memo(function ChatMessage({ message }: ChatMessageProps) {
   if (message.role === 'agent') {
     return <AgentMessage message={message} />;
   }
 
   const isUser = message.role === 'user';
+  const isThinking = message.metadata?.status === 'thinking';
+  const isStreamingEmpty = message.metadata?.status === 'streaming' && !message.content;
 
   return (
     <div
@@ -89,7 +81,6 @@ export function ChatMessage({ message }: ChatMessageProps) {
         isUser ? 'flex-row-reverse' : 'flex-row'
       )}
     >
-      {/* Avatar */}
       <div
         className={cn(
           'flex-shrink-0 h-7 w-7 rounded-full flex items-center justify-center',
@@ -105,7 +96,6 @@ export function ChatMessage({ message }: ChatMessageProps) {
         )}
       </div>
 
-      {/* Message bubble */}
       <div
         className={cn(
           'max-w-[80%] px-4 py-2.5 rounded-2xl',
@@ -114,20 +104,37 @@ export function ChatMessage({ message }: ChatMessageProps) {
             : 'bg-secondary text-foreground rounded-tl-md'
         )}
       >
-        {message.thinkingContent && (
+        {isThinking && (
+          <div className="mb-2 rounded-lg bg-muted/50 border border-border/50 px-3 py-2">
+            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <Brain className="h-3 w-3 animate-pulse" />
+              <span>思考中</span>
+              <span className="animate-pulse">...</span>
+            </div>
+            {message.thinkingContent && (
+              <p data-testid="thinking-preview" className="mt-1 text-xs text-muted-foreground/70 leading-relaxed whitespace-pre-wrap line-clamp-3">
+                {message.thinkingContent.slice(-200)}
+              </p>
+            )}
+          </div>
+        )}
+        {!isThinking && message.thinkingContent && (
           <details className="mb-2 rounded-lg bg-muted/50 border border-border/50 px-3 py-2">
             <summary className="text-xs text-muted-foreground cursor-pointer select-none flex items-center gap-1.5">
               <Brain className="h-3 w-3" />
               思考过程
             </summary>
-            <p className="mt-2 text-xs text-muted-foreground leading-relaxed whitespace-pre-wrap">
+            <p className="mt-2 text-xs text-muted-foreground leading-relaxed whitespace-pre-wrap max-h-[300px] overflow-y-auto">
               {message.thinkingContent}
             </p>
           </details>
         )}
         <div className="flex items-start gap-2">
-          {message.metadata?.status === 'processing' && (
-            <span className="h-4 w-4 mt-0.5 animate-spin rounded-full border-2 border-primary border-t-transparent flex-shrink-0" />
+          {isStreamingEmpty && (
+            <div className="flex items-center gap-2">
+              <span className="h-4 w-4 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+              <span className="text-xs text-muted-foreground">生成中...</span>
+            </div>
           )}
           {isUser ? (
             <p className="text-[14px] leading-relaxed whitespace-pre-wrap">
@@ -139,7 +146,7 @@ export function ChatMessage({ message }: ChatMessageProps) {
               prose-ul:my-1 prose-ol:my-1 prose-li:my-0.5
               prose-headings:font-semibold
             ">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+              <ReactMarkdown remarkPlugins={REMARK_PLUGINS}>{message.content}</ReactMarkdown>
             </div>
           )}
         </div>
@@ -157,4 +164,14 @@ export function ChatMessage({ message }: ChatMessageProps) {
       </div>
     </div>
   );
-}
+}, (prev, next) => {
+  const p = prev.message, n = next.message;
+  return p.id === n.id
+    && p.role === n.role
+    && p.content === n.content
+    && p.thinkingContent === n.thinkingContent
+    && p.metadata?.status === n.metadata?.status
+    && p.agent?.action === n.agent?.action
+    && p.agent?.completedCount === n.agent?.completedCount
+    && p.agent?.totalCount === n.agent?.totalCount;
+});
