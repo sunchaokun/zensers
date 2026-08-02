@@ -369,8 +369,9 @@ export function ChatPanel() {
     if (hasHeartbeat) {
       const cleaned = messages.filter(m => !(m.role === 'agent' && m.agent?.action === 'heartbeat'));
       useChatStore.setState({ messages: cleaned });
+      useSessionStore.getState().syncActive({ messages: cleaned });
     }
-  }, [activeSessionId]);
+  }, [messages.length]);
 
   useEffect(() => {
     if (status === 'running' && !streamingMsgIdRef.current) {
