@@ -126,7 +126,7 @@ class ConversationReferenceTracker:
         
         # 回溯对话历史，找到最近提到的章节
         # 只检查最近10条消息
-        for msg in reversed(conversation_history[-10:]):
+        for msg in reversed([m for m in conversation_history[-10:] if m.get('type') != 'context_summary']):
             content = msg.get('content', '')
             role = msg.get('role', '')
             
@@ -257,7 +257,7 @@ class ConversationReferenceTracker:
         """
         section_mentions = {}
         
-        for msg in conversation_history[-max_messages:]:
+        for msg in [m for m in conversation_history[-max_messages:] if m.get('type') != 'context_summary']:
             content = msg.get('content', '')
             mentions = self._extract_section_mentions(content, sections)
             

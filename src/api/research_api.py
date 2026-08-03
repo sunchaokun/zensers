@@ -1163,7 +1163,8 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
         context = session.get('research_context', {})
         history = session.get('conversation_history', [])
         llm_config = session.get('llm_config', {})
-        recent_history = history[-10:] if history else []
+        chat_history = [m for m in history if m.get('type') != 'context_summary']
+        recent_history = chat_history[-10:] if chat_history else []
         try:
             profile = PromptManager.get_instance().load_profile('conversation')
             system_prompt = profile.get_full_prompt()
@@ -2138,8 +2139,9 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
         lang = self._get_lang(session)
         if not history or not topic:
             return []
+        chat_history = [m for m in history if m.get('type') != 'context_summary']
         history_text = ''
-        for msg in history[-8:]:
+        for msg in chat_history[-8:]:
             role = 'User' if msg.get('role') == 'user' else 'Assistant'
             content = msg.get('content', '')
             if content:

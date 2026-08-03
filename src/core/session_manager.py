@@ -57,25 +57,6 @@ class PersistentSessionDict(dict):
                     f"History is append-only."
                 )
         super().__setitem__(key, value)
-        # Sync display_history with conversation_history (never compressed)
-        # Use dict.__setitem__ to avoid re-triggering __setitem__ → infinite save loop
-        if key == "conversation_history":
-            if isinstance(value, list):
-                existing_display = dict.get(self, "display_history")
-                if not existing_display:
-                    dict.__setitem__(self, "display_history", [dict(m) if isinstance(m, dict) else m for m in value])
-                    dict.__setitem__(self, "_display_synced_len", len(value))
-                else:
-                    synced_len = dict.get(self, "_display_synced_len", 0)
-                    if synced_len > len(value):
-                        synced_len = len(value)
-                    if len(value) > synced_len:
-                        new_msgs = value[synced_len:]
-                        extended = list(existing_display) + [dict(m) if isinstance(m, dict) else m for m in new_msgs]
-                        dict.__setitem__(self, "display_history", extended)
-                        dict.__setitem__(self, "_display_synced_len", len(value))
-            else:
-                dict.__setitem__(self, "display_history", [])
         self._manager._save_to_disk(self._session_id)
     
     def update(self, *args, **kwargs):
@@ -96,12 +77,6 @@ class PersistentSessionDict(dict):
                     f"{len(old)} -> {len(new_val)} items."
                 )
         super().update(*args, **kwargs)
-        # Sync display_history — use dict.__setitem__ to avoid re-triggering save
-        if "conversation_history" in merger:
-            if isinstance(merger["conversation_history"], list):
-                dict.__setitem__(self, "display_history", [dict(m) if isinstance(m, dict) else m for m in merger["conversation_history"]])
-            else:
-                dict.__setitem__(self, "display_history", [])
         self._manager._save_to_disk(self._session_id)
     
     def pop(self, key, *args):

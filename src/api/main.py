@@ -782,7 +782,7 @@ async def get_research_detail(task_id: str):
         progress_val = 0
 
     messages = []
-    history = session.get("display_history") or session.get("conversation_history", [])
+    history = session.get("conversation_history", [])
     for i, msg in enumerate(history):
         if isinstance(msg, dict) and ("role" in msg or "type" in msg) and "content" in msg:
             messages.append(_build_message_entry(msg, f"msg-{i}", created_at or ""))
@@ -807,8 +807,7 @@ async def get_research_messages(
 ):
     """Paginated message history for a research session.
     
-    Uses display_history (full, never compressed) when available,
-    falls back to conversation_history.
+    Reads from conversation_history (always complete, never compressed).
     """
     from src.core.session_manager import SessionManager
     sm = SessionManager.get_instance()
@@ -820,7 +819,7 @@ async def get_research_messages(
     offset = max(0, offset)
     limit = max(1, limit)
     
-    source = session.get("display_history") or session.get("conversation_history", [])
+    source = session.get("conversation_history", [])
     total = len(source)
     page = source[offset:offset + limit]
     
