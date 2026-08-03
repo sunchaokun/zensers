@@ -36,10 +36,14 @@ const safeCancelRAF = (id: number): void => {
   }
 };
 
+let _isSyncingFromChatStore = false;
+
 function debouncedSyncActive(messages: ChatMessage[]) {
   if (syncDebounceTimer) clearTimeout(syncDebounceTimer);
   syncDebounceTimer = setTimeout(() => {
+    _isSyncingFromChatStore = true;
     useSessionStore.getState().syncActive({ messages });
+    _isSyncingFromChatStore = false;
     syncDebounceTimer = null;
   }, SYNC_DEBOUNCE_MS);
 }
@@ -50,7 +54,9 @@ function flushSyncNowInternal(messages?: ChatMessage[]) {
     syncDebounceTimer = null;
   }
   if (messages) {
+    _isSyncingFromChatStore = true;
     useSessionStore.getState().syncActive({ messages });
+    _isSyncingFromChatStore = false;
   }
 }
 
@@ -72,23 +78,38 @@ function flushTokenBuffer() {
   debouncedSyncActive(messages);
 }
 
+function filterHeartbeats(msgs: ChatMessage[]): ChatMessage[] {
+  const hasHeartbeat = msgs.some((m: any) => m.role === 'agent' && (m.agent?.action === 'heartbeat' || m.action === 'heartbeat'));
+  if (!hasHeartbeat) return msgs;
+  return msgs.filter((m: any) => !(m.role === 'agent' && (m.agent?.action === 'heartbeat' || m.action === 'heartbeat')));
+}
+
 let _sessionSubUnsub: (() => void) | null = null;
+let _prevActiveId: string | null | undefined = undefined;
+let _prevSessionMessagesRef: ChatMessage[] | undefined = undefined;
 
 export const useChatStore = create<ChatState>()((set, get) => {
   if (!_sessionSubUnsub) {
     _sessionSubUnsub = useSessionStore.subscribe((state) => {
+      if (_prevActiveId === undefined) {
+        _prevActiveId = state.activeId;
+      }
+
       const active = state.activeId ? state.sessions[state.activeId] : undefined;
-      const current = useChatStore.getState();
       const raw = active?.messages || [];
-      if (current.messages !== raw) {
-        const hasHeartbeat = raw.some((m: any) => m.role === 'agent' && (m.agent?.action === 'heartbeat' || m.action === 'heartbeat'));
-        if (hasHeartbeat) {
-          const next = raw.filter((m: any) => !(m.role === 'agent' && (m.agent?.action === 'heartbeat' || m.action === 'heartbeat')));
-          useChatStore.setState({ messages: next });
-          useSessionStore.getState().syncActive({ messages: next });
-        } else {
-          useChatStore.setState({ messages: raw });
-        }
+
+      if (state.activeId !== _prevActiveId) {
+        _prevActiveId = state.activeId;
+        _prevSessionMessagesRef = raw;
+        set({ messages: filterHeartbeats(raw) });
+        return;
+      }
+
+      if (!_isSyncingFromChatStore && raw !== _prevSessionMessagesRef) {
+        _prevSessionMessagesRef = raw;
+        set({ messages: filterHeartbeats(raw) });
+      } else {
+        _prevSessionMessagesRef = raw;
       }
     });
   }

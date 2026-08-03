@@ -2794,14 +2794,24 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
         rr = session.get('research_result')
         if rr and rr.get('status') in ('completed', 'completed_with_warnings'):
             return {'task_id': task_id, 'status': 'completed', 'message': 'Research already completed while paused'}
-        if session.get('status') == 'cancelled' or cm.is_cancelled(task_id):
+        if cm.is_cancelled(task_id):
             return {'task_id': task_id, 'status': 'cancelled', 'message': 'Research was cancelled, cannot resume'}
-        if task_id not in self._executor_tasks or self._executor_tasks[task_id].done():
-            logger.warning(f"Resume called but engine already dead for {task_id}, attempting snapshot recovery")
+        is_engine_dead = task_id not in self._executor_tasks or self._executor_tasks[task_id].done()
+        if session.get('status') == 'cancelled' or is_engine_dead:
             snapshot = await self._load_cancel_snapshot(task_id)
             if snapshot and snapshot.get('pending_sections'):
                 return await self._resume_from_snapshot(task_id, session, snapshot)
-            return {'task_id': task_id, 'status': 'failed', 'message': 'Research engine has stopped, please start a new task'}
+            if session.get('status') == 'cancelled' and not is_engine_dead:
+                return {'task_id': task_id, 'status': 'cancelled', 'message': 'Research was cancelled, cannot resume'}
+            session['status'] = 'paused'
+            state_machine = session.get('state_machine')
+            if state_machine and hasattr(state_machine, 'current_state'):
+                try:
+                    if state_machine.can_transition_to(ConversationState.PAUSED):
+                        state_machine.transition(ConversationState.PAUSED)
+                except Exception:
+                    pass
+            return {'task_id': task_id, 'status': 'paused', 'message': 'Research engine has stopped. You can start a new task or continue chatting.'}
         cm.resume(task_id)
         state_machine = session.get('state_machine')
         if state_machine and state_machine.can_transition_to(ConversationState.EXECUTING):

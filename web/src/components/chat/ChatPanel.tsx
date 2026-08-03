@@ -174,6 +174,7 @@ export function ChatPanel() {
       const action = data.action || 'continue_chat';
 
       if (mode === 'framework') {
+        useResearchStore.getState().setStatus('idle');
         useResearchStore.getState().setStep(0, data.suggestions || []);
         if ((data as any).framework) {
           useResearchStore.getState().setFramework((data as any).framework);
@@ -189,6 +190,7 @@ export function ChatPanel() {
         useResearchStore.getState().setStatus('running');
         useResearchStore.getState().setStep(6, undefined);
       } else if (action === 'enter_framework') {
+        useResearchStore.getState().setStatus('idle');
         useResearchStore.getState().setStep(0, data.suggestions || []);
         if ((data as any).framework) {
           useResearchStore.getState().setFramework((data as any).framework);
@@ -579,6 +581,22 @@ export function ChatPanel() {
         if (!sessionId) {
           useResearchStore.getState().setSessionId(taskId);
         }
+      } else if (result.status === 'paused' || result.status === 'failed') {
+        useResearchStore.getState().setStatus('idle');
+        addMessage({
+          id: nanoid(),
+          role: 'assistant',
+          content: result.message || 'Research engine has stopped. You can start a new task or continue chatting.',
+          timestamp: new Date().toISOString(),
+        });
+      } else if (result.status === 'cancelled') {
+        useResearchStore.getState().clearResearch();
+        addMessage({
+          id: nanoid(),
+          role: 'assistant',
+          content: result.message || 'Research was cancelled.',
+          timestamp: new Date().toISOString(),
+        });
       }
     } catch (e) {
       console.error('Failed to resume research:', e);
@@ -784,11 +802,23 @@ export function ChatPanel() {
     if (selectedLabels.length === 0) return;
     const isZh = /[\u4e00-\u9fff]/.test(framework.topic || '');
     const fmt = outputFormat || 'docx';
+    const fmtLabel = fmt === 'pptx' ? 'PPT' : fmt === 'html' ? 'HTML' : 'Word';
     const sectionsJson = JSON.stringify(selectedLabels);
     const exampleText = isZh
       ? `确认开始研究，包含章节：${selectedLabels.join('、')}\n__SELECTED_SECTIONS__:${sectionsJson}\n__OUTPUT_FORMAT__:${fmt}`
       : `Confirm and start research with sections: ${selectedLabels.join(', ')}\n__SELECTED_SECTIONS__:${sectionsJson}\n__OUTPUT_FORMAT__:${fmt}`;
-    try { await handleOptionSelect('confirm_start', exampleText); } catch (error) { console.error('Failed to confirm framework:', error); }
+    try {
+      await handleOptionSelect('confirm_start', exampleText);
+      const confirmContent = isZh
+        ? `✅ 已确认研究框架\n\n**文档格式**：${fmtLabel}\n\n**研究章节**：\n${selectedLabels.map((s, i) => `${i + 1}. ${s}`).join('\n')}`
+        : `✅ Research Framework Confirmed\n\n**Format**: ${fmtLabel}\n\n**Sections**:\n${selectedLabels.map((s, i) => `${i + 1}. ${s}`).join('\n')}`;
+      addMessage({
+        id: nanoid(),
+        role: 'assistant',
+        content: confirmContent,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (error) { console.error('Failed to confirm framework:', error); }
   };
 
   const handleParameterSubmit = async (params: Record<string, any>) => {

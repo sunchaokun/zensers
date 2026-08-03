@@ -27,6 +27,27 @@ logging.getLogger().addHandler(_handler)
 
 logger = logging.getLogger(__name__)
 
+
+def _build_message_entry(msg: dict, fallback_id: str, fallback_ts: str = "") -> dict:
+    entry = {
+        "id": msg.get("id") or fallback_id,
+        "role": msg.get("role", msg.get("type", "unknown")),
+        "content": msg["content"],
+        "timestamp": msg.get("timestamp", fallback_ts),
+    }
+    if msg.get("_type"):
+        entry["_type"] = msg["_type"]
+    if msg.get("agent_id") or msg.get("agent_name") or msg.get("action"):
+        entry["agent_id"] = msg.get("agent_id", "")
+        entry["agent_name"] = msg.get("agent_name", "")
+        entry["action"] = msg.get("action", "")
+        if msg.get("completedCount") is not None:
+            entry["completedCount"] = msg["completedCount"]
+        if msg.get("totalCount") is not None:
+            entry["totalCount"] = msg["totalCount"]
+    return entry
+
+
 from src.core.version import get_version_info, get_local_version
 from src.core.session_manager import SessionManager
 _session_manager = SessionManager.get_instance()
@@ -764,15 +785,7 @@ async def get_research_detail(task_id: str):
     history = session.get("display_history") or session.get("conversation_history", [])
     for i, msg in enumerate(history):
         if isinstance(msg, dict) and ("role" in msg or "type" in msg) and "content" in msg:
-            entry = {
-                "id": msg.get("id") or f"msg-{i}",
-                "role": msg.get("role", msg.get("type", "unknown")),
-                "content": msg["content"],
-                "timestamp": msg.get("timestamp", created_at or ""),
-            }
-            if msg.get("_type"):
-                entry["_type"] = msg["_type"]
-            messages.append(entry)
+            messages.append(_build_message_entry(msg, f"msg-{i}", created_at or ""))
 
     return {**meta, "messages": messages, "config": {
         "output_type": meta.get("output_type", "report"),
@@ -814,15 +827,7 @@ async def get_research_messages(
     messages = []
     for i, msg in enumerate(page):
         if isinstance(msg, dict) and ("role" in msg or "type" in msg) and "content" in msg:
-            entry = {
-                "id": msg.get("id") or f"msg-{offset + i}",
-                "role": msg.get("role", msg.get("type", "unknown")),
-                "content": msg["content"],
-                "timestamp": msg.get("timestamp", created_at or ""),
-            }
-            if msg.get("_type"):
-                entry["_type"] = msg["_type"]
-            messages.append(entry)
+            messages.append(_build_message_entry(msg, f"msg-{offset + i}", created_at or ""))
     
     return {
         "messages": messages,

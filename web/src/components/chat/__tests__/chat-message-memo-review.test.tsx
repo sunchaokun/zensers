@@ -119,7 +119,7 @@ describe('Strict review: ChatMessage correctness', () => {
     expect(screen.getByText('Searching web...')).toBeDefined();
   });
 
-  it('renders agent heartbeat message', () => {
+  it('renders agent heartbeat message as null', () => {
     render(
       <ChatMessage message={makeMessage({
         role: 'agent',
@@ -127,7 +127,7 @@ describe('Strict review: ChatMessage correctness', () => {
         agent: { id: 'hb', name: '', action: 'heartbeat' },
       })} />
     );
-    expect(screen.getByText('still working...')).toBeDefined();
+    expect(screen.queryByText('still working...')).toBeNull();
   });
 
   it('shows completed thinking in details when status is not thinking', () => {

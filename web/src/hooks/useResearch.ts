@@ -474,8 +474,9 @@ export function useResearch() {
               return data;
             }
             const mode = data.mode || 'chat';
-            if (mode === 'framework') {
-              setStep(0, data.suggestions || data.options);
+        if (mode === 'framework') {
+          setStatus('idle');
+          setStep(0, data.suggestions || data.options);
               if (data.framework) {
                 setFrameworkAction(data.framework);
               }
@@ -557,6 +558,7 @@ export function useResearch() {
         const mode = data.mode || 'chat';
         
         if (mode === 'framework') {
+          setStatus('idle');
           setStep(0, data.suggestions || data.options);
           if (data.framework) {
             setFrameworkAction(data.framework);
@@ -639,6 +641,7 @@ export function useResearch() {
         const mode = data.mode || 'chat';
         
         if (mode === 'framework') {
+          setStatus('idle');
           setStep(0, data.suggestions || data.options);
           if (data.framework) {
             setFrameworkAction(data.framework);
