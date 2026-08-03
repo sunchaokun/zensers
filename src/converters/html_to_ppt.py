@@ -438,7 +438,7 @@ class HTMLToPPTConverter:
             raise
     
     def _should_use_template_renderer(self):
-        return os.environ.get("USE_TEMPLATE_RENDERER", "0") == "1"
+        return os.environ.get("USE_TEMPLATE_RENDERER", "1") == "1"
 
     def _auto_generate_charts(self, slide_data: Dict, template_name: str, chart_gen) -> None:
         """Auto-generate chart images for slides with data but no images."""

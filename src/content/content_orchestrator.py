@@ -122,7 +122,9 @@ class ContentOrchestrator:
         """Initialize content orchestrator"""
         self._max_slide_content = MAX_SLIDE_CONTENT
         self._template_engine = TemplateEngine()
-        self._current_template_html: Optional[str] = None  # Current template HTML
+        self._current_template_html: Optional[str] = None
+        from .content_condenser import ContentCondenser
+        self._condenser = ContentCondenser()
     
     def get_template_html(self, template_name: Optional[str] = None) -> Optional[str]:
         """
@@ -273,13 +275,49 @@ class ContentOrchestrator:
             
             section_dict = {
                 "id": section.id,
-                "title": section.title,  # Phase 1: title guaranteed clean by _parse_sections, no regex needed
-                "content": self._content_to_html(section.content) if section.content else "",  # Phase 2: removed section_title parameter
-                "page": i + 3,  # Assume cover and TOC occupy first 2 pages
+                "title": section.title,
+                "page": i + 3,
                 "index": i + 1,
-                "subsections": [],  # Always include to avoid template rendering warnings
-                "tables": section_tables,  # P0-3 fix: Fill section table data
+                "subsections": [],
+                "tables": section_tables,
             }
+            
+            if output_format == "pptx" and section.content:
+                table_data_for_condenser = None
+                if section_tables and len(section_tables) > 0:
+                    first_table = section_tables[0]
+                    if isinstance(first_table, dict):
+                        rows = first_table.get("rows", [])
+                        headers = first_table.get("headers", [])
+                        if headers:
+                            table_data_for_condenser = [headers] + rows
+                        elif rows:
+                            table_data_for_condenser = rows
+                    elif isinstance(first_table, list):
+                        table_data_for_condenser = first_table
+
+                condensed = self._condenser.condense(
+                    section.content,
+                    title=section.title,
+                    table_data=table_data_for_condenser,
+                )
+                items = condensed.get("items", [])
+                kpi_data = condensed.get("kpi_data", [])
+                chart_suggestions = condensed.get("chart_suggestions", [])
+                
+                bullet_html_parts = []
+                if items:
+                    li_items = [f'<li>{ContentOrchestrator._inline_markdown(item)}</li>' for item in items]
+                    bullet_html_parts.append(f'<ul>{chr(10).join(li_items)}</ul>')
+                else:
+                    bullet_html_parts.append(self._content_to_html(section.content))
+                
+                section_dict["content"] = chr(10).join(bullet_html_parts)
+                section_dict["items"] = items
+                section_dict["kpi_data"] = kpi_data
+                section_dict["chart_suggestions"] = chart_suggestions
+            else:
+                section_dict["content"] = self._content_to_html(section.content) if section.content else ""
             
             # Process charts: read from raw_section, distribute top-level charts
             charts_data = []
@@ -1421,7 +1459,11 @@ class ContentOrchestrator:
         section: ContentSection,
         start_slide_num: int
     ) -> List[str]:
-        """Render section slides (possibly multiple pages)"""
+        """Render section slides (possibly multiple pages)
+        
+        For PPT output, content is condensed into bullet items (<li>)
+        rather than long paragraphs (<p>).
+        """
         slides = []
         
         slides.append(f'''<section class="slide" data-type="section-title" data-page="{start_slide_num}">
@@ -1437,35 +1479,117 @@ class ContentOrchestrator:
         chart_idx = 0
         
         if section.content:
-            content_chunks = self._split_content_for_slides(section.content)
-            for i, chunk in enumerate(content_chunks):
-                slide_num = start_slide_num + 1 + i
-                chart_imgs = ""
-                while chart_idx < len(charts):
-                    chart = charts[chart_idx]
-                    anchor = chart.get("insertion_anchor", "")
-                    anchor_type = chart.get("anchor_type", "section_end")
-                    if anchor_type == "section_end" and i < len(content_chunks) - 1:
-                        break
-                    if anchor and chunk.find(anchor) < 0 and anchor_type != "section_end":
-                        break
-                    chart_path = chart.get("path", "")
-                    chart_alt = html.escape(chart.get("caption", "") or chart.get("title", "") or "Chart")
-                    if chart_path:
-                        chart_imgs += f'<img src="{html.escape(chart_path, quote=True)}" alt="{chart_alt}">'
-                    chart_idx += 1
-                    if anchor_type != "section_end":
-                        break
+            condensed = self._condenser.condense(
+                section.content,
+                title=section.title,
+            )
+            items = condensed.get("items", [])
+            kpi_data = condensed.get("kpi_data", [])
+            chart_suggestions = condensed.get("chart_suggestions", [])
+            
+            if kpi_data and len(kpi_data) >= 2:
+                kpi_slide_num = start_slide_num + 1
+                kpi_items = []
+                for kpi in kpi_data[:5]:
+                    num = kpi.get("number", "")
+                    label = kpi.get("label", "")
+                    trend = kpi.get("trend", "")
+                    parts = [num]
+                    if label:
+                        parts.insert(0, label)
+                    if trend:
+                        parts.append(trend)
+                    kpi_items.append(html.escape(" ".join(p for p in parts if p)))
                 
-                slides.append(f'''<section class="slide" data-type="content" data-page="{slide_num}" data-section="{section.id}">
+                kpi_li = "\n            ".join(f'<li>{item}</li>' for item in kpi_items)
+                slides.append(f'''<section class="slide" data-type="findings" data-page="{kpi_slide_num}" data-section="{section.id}">
     <div class="slide-content">
+        <div class="slide-title">
+            <h2>{html.escape(section.title)} - 核心指标</h2>
+        </div>
+        <ul class="findings-list">
+            {kpi_li}
+        </ul>
+    </div>
+</section>'''
+                )
+                start_offset = 1
+            else:
+                start_offset = 0
+            
+            if items:
+                chunk_size = self._condenser.max_bullets_per_slide
+                item_chunks = [items[i:i+chunk_size] for i in range(0, len(items), chunk_size)]
+                
+                for ci, item_chunk in enumerate(item_chunks):
+                    slide_num = start_slide_num + 1 + start_offset + ci
+                    
+                    chart_imgs = ""
+                    while chart_idx < len(charts):
+                        chart = charts[chart_idx]
+                        anchor_type = chart.get("anchor_type", "section_end")
+                        if anchor_type == "section_end" and ci < len(item_chunks) - 1:
+                            break
+                        chart_path = chart.get("path", "")
+                        chart_alt = html.escape(chart.get("caption", "") or chart.get("title", "") or "Chart")
+                        if chart_path:
+                            chart_imgs += f'<img src="{html.escape(chart_path, quote=True)}" alt="{chart_alt}">'
+                        chart_idx += 1
+                        if anchor_type != "section_end":
+                            break
+                    
+                    li_items = []
+                    for item in item_chunk:
+                        li_items.append(f'<li>{ContentOrchestrator._inline_markdown(item)}</li>')
+                    li_html = "\n            ".join(li_items)
+                    
+                    slides.append(f'''<section class="slide" data-type="content" data-page="{slide_num}" data-section="{section.id}">
+    <div class="slide-content">
+        <div class="slide-title">
+            <h2>{html.escape(section.title)}</h2>
+        </div>
+        <div class="slide-body">
+            <ul>
+            {li_html}
+            </ul>
+            {chart_imgs}
+        </div>
+    </div>
+</section>'''
+                    )
+            else:
+                content_chunks = self._split_content_for_slides(section.content)
+                for i, chunk in enumerate(content_chunks):
+                    slide_num = start_slide_num + 1 + start_offset + i
+                    chart_imgs = ""
+                    while chart_idx < len(charts):
+                        chart = charts[chart_idx]
+                        anchor = chart.get("insertion_anchor", "")
+                        anchor_type = chart.get("anchor_type", "section_end")
+                        if anchor_type == "section_end" and i < len(content_chunks) - 1:
+                            break
+                        if anchor and chunk.find(anchor) < 0 and anchor_type != "section_end":
+                            break
+                        chart_path = chart.get("path", "")
+                        chart_alt = html.escape(chart.get("caption", "") or chart.get("title", "") or "Chart")
+                        if chart_path:
+                            chart_imgs += f'<img src="{html.escape(chart_path, quote=True)}" alt="{chart_alt}">'
+                        chart_idx += 1
+                        if anchor_type != "section_end":
+                            break
+                    
+                    slides.append(f'''<section class="slide" data-type="content" data-page="{slide_num}" data-section="{section.id}">
+    <div class="slide-content">
+        <div class="slide-title">
+            <h2>{html.escape(section.title)}</h2>
+        </div>
         <div class="slide-body">
             <p>{ContentOrchestrator._inline_markdown(chunk)}</p>
             {chart_imgs}
         </div>
     </div>
 </section>'''
-                )
+                    )
         
         while chart_idx < len(charts):
             chart = charts[chart_idx]

@@ -28,7 +28,7 @@
       "source": "content",
       "position": { "left": 1.5, "top": 4.0, "width": 10.3, "height": 0.8 },
       "style": {
-        "font_size": 28,
+        "font_size": 24,
         "color": "white",
         "alignment": "center",
         "font": "Microsoft YaHei"
@@ -36,7 +36,8 @@
     }
   ],
   "decorations": [
-    { "type": "footer_bar", "layer": "bottom", "color": "white", "height": 0.11 },
+    { "type": "footer_bar", "layer": "bottom", "color": "gold", "height": 0.11 },
+    { "type": "title_underline", "layer": "bottom", "color": "gold", "width": 6.0, "offset_top": 3.8 },
     { "type": "branding", "layer": "top", "text": "CONFIDENTIAL", "position": "top_right", "color": "text_light", "font_size": 9 }
   ]
 }

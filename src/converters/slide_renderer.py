@@ -373,8 +373,16 @@ class SlideRenderer:
         shape.fill.solid()
         shape.fill.fore_color.rgb = self._rgb(card_bg)
         shape.line.fill.background()
+        try:
+            shape.shadow.inherit = False
+        except Exception:
+            pass
         tf = shape.text_frame
         tf.word_wrap = True
+        tf.margin_top = Pt(8)
+        tf.margin_bottom = Pt(8)
+        tf.margin_left = Pt(6)
+        tf.margin_right = Pt(6)
         tf.paragraphs[0].alignment = PP_ALIGN.CENTER
         number_text = kpi.get("number", "")
         trend = kpi.get("trend")
@@ -384,6 +392,7 @@ class SlideRenderer:
             trend_color_key = "trend_color_up" if trend_dir == "up" else "trend_color_down"
             trend_color = self._resolve_color(st.get(trend_color_key, "4CAF50"))
             p_num = tf.paragraphs[0]
+            p_num.space_before = Pt(4)
             run_num = p_num.add_run()
             run_num.text = number_text + " "
             run_num.font.size = Pt(number_size)
@@ -392,16 +401,19 @@ class SlideRenderer:
             run_num.font.name = "Microsoft YaHei"
             run_trend = p_num.add_run()
             run_trend.text = f"{arrow} {trend}"
-            run_trend.font.size = Pt(16)
+            run_trend.font.size = Pt(14)
             run_trend.font.color.rgb = self._rgb(trend_color)
+            run_trend.font.bold = True
             run_trend.font.name = "Microsoft YaHei"
         else:
             p_num = tf.paragraphs[0]
-            p_num.text = number_text
-            p_num.font.size = Pt(number_size)
-            p_num.font.color.rgb = self._rgb(number_color)
-            p_num.font.bold = True
-            p_num.font.name = "Microsoft YaHei"
+            p_num.space_before = Pt(4)
+            run_num = p_num.add_run()
+            run_num.text = number_text
+            run_num.font.size = Pt(number_size)
+            run_num.font.color.rgb = self._rgb(number_color)
+            run_num.font.bold = True
+            run_num.font.name = "Microsoft YaHei"
         label = kpi.get("label", "")
         if not label:
             label = kpi.get("original_text", "")[:30]
@@ -412,6 +424,7 @@ class SlideRenderer:
             p_label.font.color.rgb = self._rgb(label_color)
             p_label.font.name = "Microsoft YaHei"
             p_label.alignment = PP_ALIGN.CENTER
+            p_label.space_before = Pt(4)
 
     def _render_insight_bar_slot(self, slide, slot: Dict, slide_data: Dict, styles: Dict):
         text = slide_data.get(slot.get("source", "insight_text"), "")

@@ -51,7 +51,7 @@ class TestHTMLToPPTConverterBasic:
     @pytest.fixture
     def temp_dir(self):
         """创建临时目录"""
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(dir=os.getcwd()) as tmpdir:
             yield tmpdir
     
     def test_convert_simple_html(self, converter, temp_dir):
@@ -104,7 +104,7 @@ class TestHTMLToPPTConverterSlideTypes:
     
     @pytest.fixture
     def temp_dir(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(dir=os.getcwd()) as tmpdir:
             yield tmpdir
     
     def test_cover_slide(self, converter, temp_dir):
@@ -228,7 +228,7 @@ class TestHTMLToPPTConverterLists:
     
     @pytest.fixture
     def temp_dir(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(dir=os.getcwd()) as tmpdir:
             yield tmpdir
     
     def test_unordered_list(self, converter, temp_dir):
@@ -278,7 +278,7 @@ class TestHTMLToPPTConverterTables:
     
     @pytest.fixture
     def temp_dir(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(dir=os.getcwd()) as tmpdir:
             yield tmpdir
     
     def test_simple_table(self, converter, temp_dir):
@@ -309,7 +309,7 @@ class TestHTMLToPPTConverterStyles:
     
     @pytest.fixture
     def temp_dir(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(dir=os.getcwd()) as tmpdir:
             yield tmpdir
     
     def test_custom_styles(self, converter, temp_dir):
@@ -342,7 +342,7 @@ class TestHTMLToPPTConverterErrorHandling:
     
     @pytest.fixture
     def temp_dir(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(dir=os.getcwd()) as tmpdir:
             yield tmpdir
     
     def test_empty_html(self, converter, temp_dir):
@@ -384,7 +384,7 @@ class TestHTMLToPPTConverterResult:
     
     @pytest.fixture
     def temp_dir(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(dir=os.getcwd()) as tmpdir:
             yield tmpdir
     
     def test_result_has_file_size(self, converter, temp_dir):
@@ -434,7 +434,7 @@ class TestHTMLToPPTConverterComplex:
     
     @pytest.fixture
     def temp_dir(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(dir=os.getcwd()) as tmpdir:
             yield tmpdir
     
     def test_full_presentation(self, converter, temp_dir):
@@ -525,3 +525,75 @@ class TestHTMLToPPTConverterComplex:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestTemplateRendererDefault:
+    """测试Template Renderer默认开启"""
+
+    def test_template_renderer_is_default(self):
+        from src.converters.html_to_ppt import HTMLToPPTConverter
+        converter = HTMLToPPTConverter()
+        assert converter._should_use_template_renderer() is True
+
+    def test_template_renderer_can_be_disabled(self, monkeypatch):
+        from src.converters.html_to_ppt import HTMLToPPTConverter
+        monkeypatch.setenv("USE_TEMPLATE_RENDERER", "0")
+        converter = HTMLToPPTConverter()
+        assert converter._should_use_template_renderer() is False
+
+
+class TestPPTBulletContentRendering:
+    """测试<li>要点内容在PPTX中正确渲染"""
+
+    @pytest.fixture
+    def converter(self):
+        from src.converters.html_to_ppt import HTMLToPPTConverter
+        return HTMLToPPTConverter()
+
+    @pytest.fixture
+    def temp_dir(self):
+        with tempfile.TemporaryDirectory(dir=os.getcwd()) as tmpdir:
+            yield tmpdir
+
+    def test_li_items_rendered_as_bullets(self, converter, temp_dir):
+        html = """
+        <section class="slide" data-type="content" data-page="1">
+            <h2>行业概览</h2>
+            <ul>
+                <li>销量950万辆 同比+37.5%</li>
+                <li>市场规模1.2万亿</li>
+                <li>渗透率突破40%</li>
+            </ul>
+        </section>
+        """
+        output_path = os.path.join(temp_dir, "bullets.pptx")
+        result = converter.convert(html, output_path)
+        assert result.success is True
+
+        from pptx import Presentation
+        prs = Presentation(output_path)
+        slide = prs.slides[0]
+        texts = []
+        for sh in slide.shapes:
+            if sh.has_text_frame:
+                for para in sh.text_frame.paragraphs:
+                    t = para.text.strip()
+                    if t:
+                        texts.append(t)
+        all_text = " ".join(texts)
+        assert "950" in all_text or "1.2" in all_text, "Bullet items should be rendered in PPTX"
+
+    def test_findings_slide_with_li(self, converter, temp_dir):
+        html = """
+        <section class="slide" data-type="findings" data-page="1">
+            <h2>核心指标</h2>
+            <ul>
+                <li>950万辆 同比+37.5%</li>
+                <li>1.2万亿元 市场规模</li>
+                <li>40.3% 渗透率</li>
+            </ul>
+        </section>
+        """
+        output_path = os.path.join(temp_dir, "findings.pptx")
+        result = converter.convert(html, output_path)
+        assert result.success is True

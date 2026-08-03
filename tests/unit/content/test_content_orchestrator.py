@@ -306,8 +306,107 @@ class TestContentOrchestratorPPTSpecific:
             output_format="pptx"
         )
         
-        # 应正确分页
         assert html is not None
+
+
+class TestContentOrchestratorPPTBulletItems:
+    """测试PPT输出使用<li>要点而非<p>长段落"""
+
+    @pytest.fixture
+    def orchestrator(self):
+        from src.content.content_orchestrator import ContentOrchestrator
+        return ContentOrchestrator()
+
+    def test_ppt_content_uses_li_not_p(self, orchestrator):
+        research_result = {
+            "title": "测试报告",
+            "sections": [
+                {
+                    "id": "s1",
+                    "title": "市场分析",
+                    "content": (
+                        "2025年中国新能源汽车销量达到950万辆，同比增长37.5%。"
+                        "全球市场持续高速增长，中国占据全球55%的份额。"
+                        "政策驱动向市场驱动转型完成。"
+                    ),
+                }
+            ],
+        }
+        html = orchestrator.transform_to_html(
+            research_result=research_result,
+            output_format="pptx"
+        )
+        assert "<li>" in html, "PPT should use <li> bullet items for content"
+        li_count = html.count("<li>")
+        p_in_slide_count = 0
+        import re
+        slides = re.findall(r'<section[^>]*data-type="content"[^>]*>.*?</section>', html, re.DOTALL)
+        for slide in slides:
+            p_in_slide_count += len(re.findall(r'<p>', slide))
+        assert li_count > 0, "Should have bullet items"
+        assert li_count >= p_in_slide_count, "Should prefer <li> over <p> in content slides"
+
+    def test_ppt_content_slide_has_title(self, orchestrator):
+        research_result = {
+            "title": "测试报告",
+            "sections": [
+                {
+                    "id": "s1",
+                    "title": "竞争格局",
+                    "content": "比亚迪市场份额35%，特斯拉7%。",
+                }
+            ],
+        }
+        html = orchestrator.transform_to_html(
+            research_result=research_result,
+            output_format="pptx"
+        )
+        import re
+        content_slides = re.findall(
+            r'<section[^>]*data-type="content"[^>]*>.*?</section>',
+            html, re.DOTALL
+        )
+        assert len(content_slides) >= 1, "Should have at least one content slide"
+        has_h2 = any("<h2>" in slide or "<h3>" in slide for slide in content_slides)
+        assert has_h2, "Content slides should have a title heading"
+
+    def test_ppt_condenses_long_content_to_bullets(self, orchestrator):
+        long_content = (
+            "2025年中国新能源汽车销量达到950万辆，同比增长37.5%，渗透率突破40%。"
+            "全球新能源汽车市场持续高速增长，中国作为最大单一市场，占据全球55%的份额。"
+            "政策驱动向市场驱动转型完成，消费者自发购买意愿显著增强。"
+            "核心数据：市场规模1.2万亿元，出口量120万辆，充电桩800万个。"
+        )
+        research_result = {
+            "title": "测试报告",
+            "sections": [{"id": "s1", "title": "行业概览", "content": long_content}],
+        }
+        html = orchestrator.transform_to_html(
+            research_result=research_result,
+            output_format="pptx"
+        )
+        assert "<li>" in html
+        import re
+        li_items = re.findall(r'<li>(.*?)</li>', html)
+        assert len(li_items) >= 2, "Long content should be condensed to multiple bullet items"
+        assert len(li_items) <= 6, "Should not have too many items per slide"
+
+    def test_word_still_uses_p_not_li(self, orchestrator):
+        research_result = {
+            "title": "测试报告",
+            "sections": [
+                {
+                    "id": "s1",
+                    "title": "市场分析",
+                    "content": "2025年销量950万辆，同比增长37.5%。",
+                }
+            ],
+        }
+        html = orchestrator.transform_to_html(
+            research_result=research_result,
+            output_format="docx"
+        )
+        assert "<p>" in html or "content" in html.lower()
 
 
 if __name__ == "__main__":

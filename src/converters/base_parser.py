@@ -414,27 +414,47 @@ class SlideElementParser(HTMLElementParser):
         return self._split_dense_slides(raw_slides)
     
     def _group_by_sections(self, elements: List[Dict]) -> List[Dict[str, Any]]:
-        """Group elements by section_start/section_end markers."""
+        """Group elements by section_start/section_end markers.
+        
+        Only <section> elements with data-type attribute are treated as slide boundaries.
+        <div> elements are treated as structural containers (not slide separators).
+        """
         slides = []
         current_elements: List[Dict] = []
         current_attrs: Dict[str, str] = {}
+        in_section_slide = False
         
         for elem in elements:
             etype = elem.get("type", "")
             
-            if etype in ("section_start", "div_start"):
-                current_elements = []
-                current_attrs = elem.get("attrs", {})
-            elif etype in ("section_end", "div_end"):
-                slide = self._build_slide_dict(current_elements, current_attrs)
-                if slide:
-                    slides.append(slide)
-                current_elements = []
-                current_attrs = {}
+            if etype == "section_start":
+                attrs = elem.get("attrs", {})
+                if attrs.get("data-type"):
+                    if current_elements and in_section_slide:
+                        slide = self._build_slide_dict(current_elements, current_attrs)
+                        if slide:
+                            slides.append(slide)
+                    current_elements = []
+                    current_attrs = attrs
+                    in_section_slide = True
+                else:
+                    pass
+            elif etype == "section_end":
+                attrs_snapshot = current_attrs
+                if in_section_slide:
+                    slide = self._build_slide_dict(current_elements, current_attrs)
+                    if slide:
+                        slides.append(slide)
+                    current_elements = []
+                    current_attrs = {}
+                    in_section_slide = False
+            elif etype in ("div_start", "div_end"):
+                pass
             else:
-                current_elements.append(elem)
+                if in_section_slide:
+                    current_elements.append(elem)
         
-        if current_elements:
+        if current_elements and in_section_slide:
             slide = self._build_slide_dict(current_elements, current_attrs)
             if slide:
                 slides.append(slide)

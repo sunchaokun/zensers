@@ -230,8 +230,11 @@ class TemplateSelector:
             if existing_kpi and len(existing_kpi) >= 2:
                 kpis = existing_kpi
         has_comparison = comparison is not None
+        has_images = bool(images)
 
-        if kpis and len(kpis) >= 2:
+        if kpis and len(kpis) >= 2 and has_images:
+            return "kpi_highlight"
+        if kpis and len(kpis) >= 2 and not has_images:
             return "kpi_highlight"
         if has_comparison:
             return "comparison"
