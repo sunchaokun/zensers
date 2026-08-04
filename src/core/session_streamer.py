@@ -126,8 +126,8 @@ class SessionStreamer:
     def _persist_event(cls, session_id: str, event_type: str, data: Dict[str, Any]):
         """持久化 SSE 事件到 SessionManager (最多 200 条, 分类保留)
         
-        同时将 chat_response 和 agent_message 写入 conversation_history，
-        确保刷新页面后消息不丢失。
+        chat_response: 仅当 conversation_history 中不存在相同消息时才追加（去重）。
+        agent_message: 始终追加（agent消息没有其他写入路径）。
         """
         with cls._persist_lock:
             try:
@@ -140,11 +140,22 @@ class SessionStreamer:
                 if event_type in ("chat_response", "agent_message"):
                     history = session.get("conversation_history", [])
                     if event_type == "chat_response":
-                        history.append({
-                            "role": "assistant",
-                            "content": data.get("message", ""),
-                            "timestamp": data.get("timestamp", datetime.now().isoformat()),
-                        })
+                        msg_content = data.get("message", "")
+                        msg_ts = data.get("timestamp", "")
+                        already_exists = any(
+                            isinstance(m, dict)
+                            and m.get("role") == "assistant"
+                            and m.get("content") == msg_content
+                            and m.get("timestamp") == msg_ts
+                            for m in history[-5:]
+                        )
+                        if not already_exists:
+                            history.append({
+                                "role": "assistant",
+                                "content": msg_content,
+                                "timestamp": msg_ts or datetime.now().isoformat(),
+                            })
+                            session["conversation_history"] = history
                     elif event_type == "agent_message":
                         history.append({
                             "role": "agent",
@@ -154,7 +165,7 @@ class SessionStreamer:
                             "action": data.get("action", ""),
                             "timestamp": data.get("timestamp", datetime.now().isoformat()),
                         })
-                    session["conversation_history"] = history
+                        session["conversation_history"] = history
 
                 events = session.get("recent_events", [])
                 events.append({

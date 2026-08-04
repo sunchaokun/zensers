@@ -318,3 +318,61 @@ class TestIntegration:
             assert len(summaries) == 2
             original_msgs = [m for m in session["conversation_history"] if m.get("type") != "context_summary"]
             assert len(original_msgs) == 16
+
+
+class TestPersistEventDedup:
+    """_persist_event deduplicates chat_response entries"""
+
+    def test_chat_response_not_duplicated(self):
+        from src.core.session_streamer import SessionStreamer
+        import asyncio
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from src.core.session_manager import SessionManager
+            SessionManager.reset_instance()
+            mgr = SessionManager(storage_dir=tmpdir)
+            mgr.create("s1", {"user_id": "u1", "conversation_history": [
+                {"role": "assistant", "content": "Hello", "timestamp": "2026-01-01T00:00:00"},
+            ]})
+            SessionStreamer._persist_event("s1", "chat_response", {
+                "message": "Hello",
+                "timestamp": "2026-01-01T00:00:00",
+            })
+            session = mgr.get("s1")
+            assistant_msgs = [m for m in session["conversation_history"] if m.get("role") == "assistant"]
+            assert len(assistant_msgs) == 1
+
+    def test_chat_response_appended_when_new(self):
+        from src.core.session_streamer import SessionStreamer
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from src.core.session_manager import SessionManager
+            SessionManager.reset_instance()
+            mgr = SessionManager(storage_dir=tmpdir)
+            mgr.create("s2", {"user_id": "u1", "conversation_history": []})
+            SessionStreamer._persist_event("s2", "chat_response", {
+                "message": "New message",
+                "timestamp": "2026-01-01T00:00:01",
+            })
+            session = mgr.get("s2")
+            assistant_msgs = [m for m in session["conversation_history"] if m.get("role") == "assistant"]
+            assert len(assistant_msgs) == 1
+            assert assistant_msgs[0]["content"] == "New message"
+
+    def test_agent_message_always_appended(self):
+        from src.core.session_streamer import SessionStreamer
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from src.core.session_manager import SessionManager
+            SessionManager.reset_instance()
+            mgr = SessionManager(storage_dir=tmpdir)
+            mgr.create("s3", {"user_id": "u1", "conversation_history": []})
+            SessionStreamer._persist_event("s3", "agent_message", {
+                "content": "Searching...",
+                "agent_id": "web_search",
+                "agent_name": "Web Search",
+                "action": "searching",
+                "timestamp": "2026-01-01T00:00:00",
+            })
+            session = mgr.get("s3")
+            agent_msgs = [m for m in session["conversation_history"] if m.get("role") == "agent"]
+            assert len(agent_msgs) == 1
