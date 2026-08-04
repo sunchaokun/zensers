@@ -32,8 +32,6 @@ interface ChatInputProps {
   isRunning?: boolean;
   /** Research is paused — adjust placeholder text */
   isPaused?: boolean;
-  /** Pre-filled input from quality panel issue action */
-  pendingInput?: string;
 }
 
 /**
@@ -50,18 +48,11 @@ export function ChatInput({
   isWaitingForReply = false,
   isRunning = false,
   isPaused = false,
-  pendingInput,
 }: ChatInputProps) {
   const [text, setText] = useState('');
   const [attachments, setAttachments] = useState<File[]>([]);
   const [mounted, setMounted] = useState(false);
 
-  useEffect(() => {
-    if (pendingInput !== undefined && pendingInput !== null && pendingInput !== '') {
-      setText(pendingInput);
-    }
-  }, [pendingInput]);
-  
   useEffect(() => {
     setMounted(true);
   }, []);

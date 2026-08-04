@@ -126,7 +126,10 @@ class SessionStreamer:
     def _persist_event(cls, session_id: str, event_type: str, data: Dict[str, Any]):
         """持久化 SSE 事件到 SessionManager (最多 200 条, 分类保留)
         
-        chat_response: 仅当 conversation_history 中不存在相同消息时才追加（去重）。
+        chat_response: 追加到 conversation_history（防御性去重：检查末尾5条是否有相同内容）。
+            注意：当前 _chat_response()/_framework_response()/_start_execution() 与
+            ProgressStreamer.push_chat_response() 路径互斥（Chat模式走前者，Research模式走后者），
+            所以去重实际上不会触发，但保留作为防御性编程。
         agent_message: 始终追加（agent消息没有其他写入路径）。
         """
         with cls._persist_lock:
@@ -141,19 +144,18 @@ class SessionStreamer:
                     history = session.get("conversation_history", [])
                     if event_type == "chat_response":
                         msg_content = data.get("message", "")
-                        msg_ts = data.get("timestamp", "")
                         already_exists = any(
                             isinstance(m, dict)
                             and m.get("role") == "assistant"
                             and m.get("content") == msg_content
-                            and m.get("timestamp") == msg_ts
+                            and msg_content != ""
                             for m in history[-5:]
                         )
                         if not already_exists:
                             history.append({
                                 "role": "assistant",
                                 "content": msg_content,
-                                "timestamp": msg_ts or datetime.now().isoformat(),
+                                "timestamp": data.get("timestamp") or datetime.now().isoformat(),
                             })
                             session["conversation_history"] = history
                     elif event_type == "agent_message":

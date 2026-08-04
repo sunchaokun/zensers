@@ -316,12 +316,6 @@ export interface QualityStateData {
   current_version?: string;
 }
 
-export interface PendingInputData {
-  text: string;
-  issueId?: string;
-  sectionName?: string;
-}
-
 export interface ProgressData {
   task_id: string;
   phase_id: string;

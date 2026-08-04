@@ -17,7 +17,6 @@ import type {
   ResearchResult,
   ResearchFramework,
   QualityStateData,
-  PendingInputData,
 } from '@/types/api';
 
 export interface SessionCache {
@@ -44,7 +43,6 @@ export interface SessionCache {
   language: string;
   mode: string;
   qualityState: QualityStateData | null;
-  pendingInput: PendingInputData | null;
 }
 
 interface SessionRegistry {
@@ -228,7 +226,6 @@ function emptyCache(id: string, title?: string): SessionCache {
     language: 'zh',
     mode: 'chat',
     qualityState: null,
-    pendingInput: null,
   };
 }
 
@@ -304,9 +301,8 @@ export const useSessionStore = create<SessionRegistry>()(
                ...v,
                messages: (v as any).messages?.filter((m: any) => !(m.role === 'agent' && (m.agent?.action === 'heartbeat' || m.action === 'heartbeat'))) || [],
                result: undefined,
-               qualityState: undefined,
-               pendingInput: undefined,
-             }])
+                qualityState: undefined,
+              }])
         ),
       }),
       merge: (persisted, current) => ({
@@ -322,9 +318,8 @@ export const useSessionStore = create<SessionRegistry>()(
                ...v,
                messages: v?.messages?.filter((m: any) => !(m.role === 'agent' && (m.agent?.action === 'heartbeat' || m.action === 'heartbeat'))) || [],
                status: fixedStatus,
-               qualityState: v?.qualityState ?? null,
-               pendingInput: v?.pendingInput ?? null,
-             }];
+                qualityState: v?.qualityState ?? null,
+              }];
           })
         ),
       }),

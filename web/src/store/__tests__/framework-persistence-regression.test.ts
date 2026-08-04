@@ -38,7 +38,6 @@ function makeSession(id: string, overrides: Partial<SessionCache> = {}): Session
     language: 'zh',
     mode: 'chat',
     qualityState: null,
-    pendingInput: null,
     ...overrides,
   };
 }

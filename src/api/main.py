@@ -784,7 +784,7 @@ async def get_research_detail(task_id: str):
     messages = []
     history = session.get("conversation_history", [])
     for i, msg in enumerate(history):
-        if isinstance(msg, dict) and ("role" in msg or "type" in msg) and "content" in msg:
+        if isinstance(msg, dict) and msg.get("type") != "context_summary" and ("role" in msg or "type" in msg) and "content" in msg:
             messages.append(_build_message_entry(msg, f"msg-{i}", created_at or ""))
 
     return {**meta, "messages": messages, "config": {
@@ -819,7 +819,7 @@ async def get_research_messages(
     offset = max(0, offset)
     limit = max(1, limit)
     
-    source = session.get("conversation_history", [])
+    source = [m for m in session.get("conversation_history", []) if isinstance(m, dict) and m.get("type") != "context_summary"]
     total = len(source)
     page = source[offset:offset + limit]
     
