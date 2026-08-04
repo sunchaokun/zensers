@@ -66,6 +66,28 @@ agents:
     simulation_timeout: 300
     max_respondents: 500
 
+# --- Network Proxy Configuration ---
+# Proxy for accessing external services (Google, Bing Intl, Jina Reader, etc.)
+# Without proxy, these services may be unreachable in CN.
+#
+# ┌─ How to set ─────────────────────────────────────────────────────────────┐
+# │ 3 ways, priority high → low:                                             │
+# │   1. Env var:  set HTTPS_PROXY=http://127.0.0.1:7890                     │
+# │   2. This file: uncomment proxy.url below and fill your VPN address       │
+# │   3. Legacy:    search.proxy (deprecated, still works as fallback)        │
+# │                                                                          │
+# │ Common proxy addresses by VPN client:                                    │
+# │   Clash / Clash Verge: http://127.0.0.1:7890                             │
+# │   V2RayN:             http://127.0.0.1:10809                             │
+# │   Shadowsocks:        socks5://127.0.0.1:1080 (needs: pip install        │
+# │                                                                httpx[socks])│
+# └──────────────────────────────────────────────────────────────────────────┘
+proxy:
+  url: ""                            # Empty = no proxy (direct connection)
+  # url: "http://127.0.0.1:7890"    # Clash / Clash Verge
+  # url: "http://127.0.0.1:10809"   # V2RayN
+  # url: "socks5://127.0.0.1:1080"  # Shadowsocks
+
 # --- Search Configuration ---
 search:
   max_results_per_query: 20
