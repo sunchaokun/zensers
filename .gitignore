@@ -68,14 +68,14 @@ secrets/
 # ═══════════════════════════════════════════════════════════════════
 
 # 输出文件
-output/
-reports/
-logs/
+/output/
+/reports/
+/logs/
 
 # 数据文件
-data/
-cache/
-tmp/
+/data/
+/cache/
+/tmp/
 
 # 临时文件
 *.tmp
