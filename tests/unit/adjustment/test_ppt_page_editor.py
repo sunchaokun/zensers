@@ -1,6 +1,6 @@
-import os
-import pytest
 from unittest.mock import MagicMock, patch
+from pptx import Presentation
+from src.core.adjustment.ppt_structure_editor import PptStructureEditor
 from src.core.adjustment.ppt_page_editor import PptPageEditor
 
 
@@ -36,31 +36,60 @@ class TestComputeSectionIndex:
         assert result == 2
 
 
-class TestReplaceSlide:
-    def test_without_feature_flag_raises(self):
-        editor = PptPageEditor.__new__(PptPageEditor)
-        with patch.dict(os.environ, {}, clear=True):
-            with pytest.raises(NotImplementedError, match="not enabled"):
-                editor._replace_slide(MagicMock(), 0, MagicMock())
-
-    def test_with_feature_flag_not_implemented(self):
-        editor = PptPageEditor.__new__(PptPageEditor)
-        with patch.dict(os.environ, {"PPT_ENABLE_L3_SINGLE_SLIDE": "1"}):
-            with pytest.raises(NotImplementedError, match="not yet implemented"):
-                editor._replace_slide(MagicMock(), 0, MagicMock())
-
-
 class TestEdit:
-    def test_edit_degrades_to_l4_when_no_flag(self):
+    @patch("src.core.adjustment.ppt_page_editor.os.path.exists", return_value=True)
+    @patch.object(PptPageEditor, "_replace_slide_xml")
+    def test_edit_renders_only_target_page(self, replace_xml, _exists):
+        editor = PptPageEditor.__new__(PptPageEditor)
+        mock_structure_editor = MagicMock()
+        mock_structure_editor.edit.return_value = MagicMock(success=True)
+        editor._structure_editor = mock_structure_editor
+        sd_list = _make_slide_data_list()
+        mock_pptx = "source.pptx"
+        mock_styles = MagicMock()
+
+        result = editor.edit(2, sd_list[2], mock_pptx, sd_list,
+                             styles=mock_styles, output_path=mock_pptx)
+        assert result.success is True
+        mock_structure_editor.edit.assert_called_once_with(
+            [sd_list[2]], pptx=mock_pptx, styles=mock_styles,
+            output_path=mock_structure_editor.edit.call_args.kwargs["output_path"],
+        )
+        replace_xml.assert_called_once()
+
+    @patch("src.core.adjustment.ppt_page_editor.os.path.exists", return_value=True)
+    def test_edit_rejects_external_media_for_safe_upgrade(self, _exists):
         editor = PptPageEditor.__new__(PptPageEditor)
         mock_structure_editor = MagicMock()
         editor._structure_editor = mock_structure_editor
         sd_list = _make_slide_data_list()
-        mock_pptx = MagicMock()
-        mock_styles = MagicMock()
+        sd_list[2]["images"] = [{"src": "chart.png"}]
 
-        with patch.dict(os.environ, {}, clear=True):
-            editor.edit(2, sd_list[2], mock_pptx, sd_list, styles=mock_styles)
-            mock_structure_editor.edit.assert_called_once_with(
-                sd_list, mock_pptx, styles=mock_styles, output_path=None
-            )
+        result = editor.edit(2, sd_list[2], "source.pptx", sd_list, output_path="out.pptx")
+        assert result.success is False
+        assert "external media" in result.error.lower()
+        mock_structure_editor.edit.assert_not_called()
+
+    def test_single_page_replacement_preserves_other_pages(self, tmp_path):
+        slides = [
+            {"slide_type": "cover", "title": "Cover", "content": "", "items": [], "table_data": [], "images": []},
+            {"slide_type": "content", "title": "Before", "content": "", "items": [], "table_data": [], "images": []},
+            {"slide_type": "end", "title": "End", "content": "", "items": [], "table_data": [], "images": []},
+        ]
+        path = tmp_path / "deck.pptx"
+        PptStructureEditor().edit(slides, pptx=str(path), output_path=str(path))
+        editor = PptPageEditor()
+        slides[1]["images"] = [{"src": "", "image_type": "image"}]
+        slides[1]["title"] = "After"
+        result = editor.edit(1, slides[1], str(path), slides, output_path=str(path))
+        assert result.success is True
+
+        prs = Presentation(str(path))
+        assert len(prs.slides) == 3
+        texts = [
+            " ".join(shape.text for shape in slide.shapes if getattr(shape, "has_text_frame", False))
+            for slide in prs.slides
+        ]
+        assert "After" in texts[1]
+        assert "Cover" in texts[0]
+        assert "End" in texts[2]

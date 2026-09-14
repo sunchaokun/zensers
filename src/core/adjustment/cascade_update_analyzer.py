@@ -198,10 +198,13 @@ class CascadeUpdateAnalyzer:
         
         # BFS 遍历依赖关系
         visited: Set[str] = set()
-        queue: List[tuple] = [(s, 0) for s in target_sections]  # (section, depth)
+        # Keep the originally revised section as the source for every emitted
+        # consistency check.  The BFS may traverse intermediate dependencies,
+        # but those nodes are impact paths, not new revision origins.
+        queue: List[tuple] = [(s, 0, s) for s in target_sections]  # (section, depth, origin)
         
         while queue:
-            current, depth = queue.pop(0)
+            current, depth, origin = queue.pop(0)
             
             if current in visited or depth > self.MAX_CASCADE_DEPTH:
                 continue
@@ -221,7 +224,7 @@ class CascadeUpdateAnalyzer:
                     
                     # 添加数据一致性检查
                     consistency_checks.append(ConsistencyCheck(
-                        source=current,
+                        source=origin,
                         target=affected_section,
                         data_points=data_points,
                         check_type=check_type,
@@ -230,7 +233,7 @@ class CascadeUpdateAnalyzer:
                     
                     # 添加到队列继续遍历
                     if affected_section not in visited:
-                        queue.append((affected_section, depth + 1))
+                        queue.append((affected_section, depth + 1, origin))
         
         # 生成更新建议
         suggested_updates = self._generate_update_suggestions(

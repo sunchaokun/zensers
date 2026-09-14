@@ -19,14 +19,13 @@ Trigger conditions (auto-detection):
 """
 
 import logging
-import os
+import math
 import re
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from src.services.chart_generator import ChartGenerator, ChartType, ChartConfig
+from src.services.chart_generator import ChartGenerator, ChartType, ChartSpec
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +39,8 @@ class ChartSuggestion:
     caption: str
     confidence: float  # 0.0 - 1.0
     reason: str  # Why this chart is recommended
+    verified: bool = False
+    source: str = "content_regex"
 
 
 class SmartChartGenerator:
@@ -194,7 +195,9 @@ class SmartChartGenerator:
                 data=chart_data,
                 caption=caption,
                 confidence=0.95,  # Table data is high confidence
-                reason=f"Extracted {len(table.rows)} rows from Markdown table"
+                reason=f"Extracted {len(table.rows)} rows from Markdown table",
+                verified=True,
+                source="markdown_table",
             )
             suggestions.append(suggestion)
         
@@ -208,16 +211,26 @@ class SmartChartGenerator:
         """Recommend chart type based on table structure"""
         has_year = any(h for h in table.headers if "年" in h or "year" in h.lower() or "time" in h.lower())
         if has_year and len(table.numeric_columns) >= 1:
-            if ChartType.LINE in section_charts:
+            # A line needs enough temporal points to show a shape.  A sparse
+            # table is more honest as a discrete comparison bar chart.
+            if len(table.rows) >= 8 and ChartType.LINE in section_charts:
                 return ChartType.LINE
-            return ChartType.LINE
+            return ChartType.BAR
         
         if len(table.numeric_columns) >= 2 and len(table.rows) >= 2:
             if ChartType.BAR in section_charts:
                 return ChartType.BAR
             return ChartType.BAR
         
-        if len(table.rows) <= 6:
+        # A small table is not automatically a part-to-whole composition.
+        # Pie charts are only defensible when the table explicitly names a
+        # share/proportion/composition measure; otherwise use a bar comparison.
+        has_composition_header = any(
+            token in str(header).lower()
+            for header in table.headers
+            for token in ("份额", "市占", "占比", "比例", "构成", "share", "proportion")
+        )
+        if len(table.rows) <= 6 and has_composition_header:
             if ChartType.PIE in section_charts:
                 return ChartType.PIE
             return ChartType.PIE
@@ -262,16 +275,17 @@ class SmartChartGenerator:
         extracted_data = self._extract_data_from_content(content)
         
         # 4. Extract data from data points
+        points_data = []
         if data_points:
             points_data = self._extract_data_from_points(data_points)
-            for data_type, data in points_data:
-                if data_type in extracted_data:
-                    existing = extracted_data[data_type]
-                    if "categories" in existing and "categories" in data:
-                        existing["categories"].extend(data["categories"])
-                        existing["values"].extend(data["values"])
-                else:
-                    extracted_data[data_type] = data
+        structured_types = set()
+        for data_type, data in points_data:
+            # Structured points are the stronger source.  Replacing the
+            # regex candidate also prevents duplicate categories when the
+            # same fact appears in both prose and data_points.
+            if len(data.get("categories", [])) >= 2:
+                extracted_data[data_type] = data
+                structured_types.add(data_type)
         
         # 4b. P1: Validate extracted data quality
         validated_data = {}
@@ -284,7 +298,7 @@ class SmartChartGenerator:
         
         # 5. Generate chart suggestions for each extracted data type
         for data_type, data in extracted_data.items():
-            chart_type = self._recommend_chart_type(data_type, section_charts)
+            chart_type = self._recommend_chart_type(data_type, section_charts, data)
             
             if chart_type and data:
                 suggestion = ChartSuggestion(
@@ -292,8 +306,14 @@ class SmartChartGenerator:
                     title=self._generate_title(section_title, data_type),
                     data=data,
                     caption=self._generate_caption(data_type, data),
-                    confidence=self._calculate_confidence(data_type, data),
-                    reason=f"Detected {data_type} data, recommending {chart_type.value} chart"
+                    confidence=self._calculate_confidence(
+                        data_type,
+                        data,
+                        verified=data_type in structured_types,
+                    ),
+                    reason=f"Detected {data_type} data, recommending {chart_type.value} chart",
+                    verified=data_type in structured_types,
+                    source="structured_data_points" if data_type in structured_types else "content_regex",
                 )
                 suggestions.append(suggestion)
         
@@ -302,7 +322,11 @@ class SmartChartGenerator:
         
         return suggestions
         
-    def generate_chart(self, suggestion: ChartSuggestion) -> Optional[str]:
+    def generate_chart(
+        self,
+        suggestion: ChartSuggestion,
+        allow_unverified: bool = False,
+    ) -> Optional[str]:
         """
         Generate chart
         
@@ -313,11 +337,21 @@ class SmartChartGenerator:
             Chart file path, or None if failed
         """
         try:
-            config = ChartConfig(
+            if not suggestion.verified and not allow_unverified:
+                logger.warning(
+                    "Refusing to generate chart from unverified %s data: %s",
+                    suggestion.source,
+                    suggestion.title,
+                )
+                return None
+            config = ChartSpec(
                 chart_type=suggestion.chart_type,
                 title=suggestion.title,
                 data=suggestion.data,
+                question=suggestion.reason,
                 caption=suggestion.caption,
+                data_grain="table rows or structured data points",
+                source=suggestion.source,
             )
             
             result = self.chart_generator.generate(config)
@@ -638,29 +672,36 @@ class SmartChartGenerator:
     
     def _extract_data_from_points(self, data_points: List[Dict]) -> List[Tuple[str, Dict]]:
         """Extract data from data points"""
-        extracted: List[Tuple[str, Dict]] = []
+        grouped: Dict[str, Dict[str, float]] = {}
         
         for point in data_points:
-            metric = point.get("metric", "")
+            metric = str(point.get("metric", "")).strip()
             value = point.get("value", "")
-            unit = point.get("unit", "")
+            unit = str(point.get("unit", "")).strip().lower()
             
             if metric and value:
-                # Determine data type
-                if "%" in str(unit) or "rate" in metric.lower():
-                    match = re.search(r'[\d.]+', str(value))
-                    if match:
-                        extracted.append(("market_share", {
-                            "categories": [metric],
-                            "values": [float(match.group())]
-                        }))
-        
+                metric_lower = metric.lower()
+                is_share = any(token in metric_lower for token in ("份额", "市占", "占比", "share", "构成"))
+                if not is_share or ("%" not in unit and "％" not in unit and "百分" not in unit):
+                    continue
+                match = re.search(r'-?\d+(?:\.\d+)?', str(value).replace(',', ''))
+                if match:
+                    grouped.setdefault("market_share", {})[metric] = float(match.group())
+
+        extracted = []
+        for data_type, metrics in grouped.items():
+            if len(metrics) >= 2:
+                extracted.append((
+                    data_type,
+                    {"categories": list(metrics.keys()), "values": list(metrics.values())},
+                ))
         return extracted
     
     def _recommend_chart_type(
         self,
         data_type: str,
-        section_charts: List[ChartType]
+        section_charts: List[ChartType],
+        data: Optional[Dict] = None,
     ) -> Optional[ChartType]:
         """Recommend chart type"""
         type_mapping = {
@@ -672,6 +713,9 @@ class SmartChartGenerator:
         }
         
         recommended = type_mapping.get(data_type)
+
+        if data_type == "growth" and len((data or {}).get("categories", [])) < 8:
+            recommended = ChartType.BAR
         
         # If recommended type is in section recommendation list, use it
         if recommended in section_charts:
@@ -725,7 +769,7 @@ class SmartChartGenerator:
     def _generate_caption(self, data_type: str, data: Dict) -> str:
         categories = data.get("categories", [])
         cn_captions = {
-            "market_share": "份额对比",
+            "market_share": "市场份额对比",
             "sales": "销量/销售额对比",
             "growth": "增长率变化趋势",
             "ranking": "排名对比",
@@ -745,6 +789,10 @@ class SmartChartGenerator:
             return False
         if len(categories) != len(values):
             return False
+        if len(set(str(category) for category in categories)) != len(categories):
+            return False
+        if any(not isinstance(value, (int, float)) or not math.isfinite(float(value)) for value in values):
+            return False
         
         # Check semantic relevance: reject if any category looks like a year or index
         year_count = sum(1 for c in categories if re.match(r"^20\d{2}$", c) or re.match(r"^19\d{2}$", c))
@@ -761,22 +809,31 @@ class SmartChartGenerator:
         
         return True
     
-    def _calculate_confidence(self, data_type: str, data: Dict) -> float:
-        """Calculate confidence"""
+    def _calculate_confidence(self, data_type: str, data: Dict, verified: bool = False) -> float:
+        """Calculate confidence from source, completeness, semantics, and sample size."""
         categories = data.get("categories", [])
         values = data.get("values", [])
         
         if not categories or not values:
             return 0.0
         
-        # More data points = higher confidence
+        # Unverified prose extraction is intentionally capped below the
+        # production threshold even when it contains many numeric tokens.
+        score = 0.55 if verified else 0.25
         data_count = len(categories)
-        if data_count >= 5:
-            return 0.9
-        elif data_count >= 3:
-            return 0.7
-        else:
-            return 0.5
+        score += min(data_count, 8) / 8 * 0.2
+        if len(set(str(category) for category in categories)) == data_count:
+            score += 0.1
+        if all(self._is_numeric_value(value) for value in values):
+            score += 0.1
+        return min(score, 0.99)
+
+    @staticmethod
+    def _is_numeric_value(value: Any) -> bool:
+        try:
+            return math.isfinite(float(value))
+        except (TypeError, ValueError, OverflowError):
+            return False
 
 
 # Export

@@ -74,7 +74,7 @@ class TemplateSelector:
 
     _ABS_RE = re.compile(
         r'(?<!\d)(?!(?:19|20)\d{2})'
-        r'((?:\d+\.\d+|\d{2,})\s*(?:万亿|亿|万|[BMK]|家|倍|个|辆|台|颗|款|项|人|名|次|期|支|条)'
+        r'((?:\d+\.\d+|\d{1,})\s*(?:万亿|亿|万|[BMK]|家|倍|个|辆|台|颗|款|项|人|名|次|期|支|条)'
         r'(?:\s*(?:USD|CNY|EUR|元|美元))?'
         r'|\d+\.\d+[TBMK](?!\w)'
         r'|\d\s*[BMK]\s*(?:USD|CNY|EUR|元|美元))'
@@ -84,7 +84,7 @@ class TemplateSelector:
 
     _PCT_RE = re.compile(r'(\d+\.?\d*)\s*%')
 
-    _NUM_UNIT_RE = re.compile(r'([\d.]+)\s*(万亿|亿|万|[BMK]|家|倍|个|辆|台|颗|款|项|人|名|次|期|支|条)', re.I)
+    _NUM_UNIT_RE = re.compile(r'(?<!第)([\d.]+)\s*(万亿|亿|万|[BMK]|家|倍|个|辆|台|颗|款|项|人|名|次|期|支|条)', re.I)
 
     _PCT_TOKEN_RE = re.compile(r'^[\d.]+%?$')
 

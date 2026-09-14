@@ -13,6 +13,7 @@ Features:
 """
 
 import logging
+import math
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -40,17 +41,17 @@ class ExtractedTable:
             numeric_count = 0
             for row in self.rows:
                 if col_idx < len(row):
-                    val = row[col_idx].strip().replace(",", "").replace("%", "").replace("$", "")
-                    try:
-                        float(val)
+                    if ExtractedTable._parse_number(row[col_idx]) is not None:
                         numeric_count += 1
-                    except ValueError:
-                        pass
             if numeric_count > len(self.rows) * 0.5:
                 numeric_cols.append(col_idx)
         return numeric_cols
 
-    def to_chart_data(self) -> Optional[Dict[str, Any]]:
+    def to_chart_data(
+        self,
+        value_column: Optional[int] = None,
+        preferred_headers: Optional[List[str]] = None,
+    ) -> Optional[Dict[str, Any]]:
         """Convert to ChartGenerator-compatible data dict"""
         if len(self.headers) < 2 or len(self.rows) < 2:
             return None
@@ -59,24 +60,69 @@ class ExtractedTable:
         categories = []
         values = []
         label_column = 0
-        value_column = self.numeric_columns[0]
+        if value_column is None:
+            value_column = self._choose_value_column(preferred_headers or self.headers)
+        if value_column not in self.numeric_columns:
+            return None
         for row in self.rows:
             if label_column < len(row) and value_column < len(row):
                 label = row[label_column].strip()
-                val_str = row[value_column].strip().replace(",", "").replace("%", "").replace("$", "")
-                try:
-                    values.append(float(val_str))
-                    categories.append(label[:15])
-                except ValueError:
+                value = ExtractedTable._parse_number(row[value_column])
+                if value is None or not label:
                     continue
+                values.append(value)
+                categories.append(label[:15])
         if len(categories) < 2:
             return None
         return {
             "categories": categories,
             "values": values,
             "headers": self.headers,
+            "value_column": value_column,
+            "value_header": self.headers[value_column],
             "source": "table",
         }
+
+    def _choose_value_column(self, preferred_headers: List[str]) -> int:
+        """Choose a semantically relevant numeric column deterministically.
+
+        The old behavior always selected the first numeric column, which could
+        silently chart revenue when the requested measure was margin or share.
+        Header matching is intentionally conservative; callers can still pass
+        an explicit column index when the table is ambiguous.
+        """
+        candidates = [h.lower() for h in preferred_headers if h]
+        semantic_tokens = [
+            token for header in candidates for token in (
+                "份额", "市占", "占比", "比例", "率", "share", "margin", "利润",
+                "growth", "增速", "增长", "revenue", "营收", "销售", "销量", "金额", "规模",
+            ) if token in header
+        ]
+        if semantic_tokens:
+            for index in self.numeric_columns:
+                header = self.headers[index].lower()
+                if any(token in header for token in semantic_tokens):
+                    return index
+        return self.numeric_columns[0]
+
+    @staticmethod
+    def _parse_number(value: Any) -> Optional[float]:
+        """Parse common report-table numeric forms, including (1,234.5)."""
+        if value is None:
+            return None
+        text = str(value).strip().replace(',', '').replace('%', '').replace('$', '')
+        if not text or text in {'-', '--', '—', 'N/A', 'NA'}:
+            return None
+        negative = text.startswith('(') and text.endswith(')')
+        if negative:
+            text = text[1:-1].strip()
+        try:
+            parsed = float(text)
+        except ValueError:
+            return None
+        if not math.isfinite(parsed):
+            return None
+        return -parsed if negative else parsed
 
 
 class TableDataExtractor:

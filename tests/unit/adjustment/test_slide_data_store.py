@@ -1,7 +1,4 @@
 import json
-import hashlib
-import os
-import shutil
 import pytest
 from src.core.adjustment.slide_data_store import SlideDataStore
 
@@ -33,6 +30,12 @@ class TestSlideDataStorePersist:
         assert fpath.exists()
         loaded = json.loads(fpath.read_text(encoding="utf-8"))
         assert len(loaded["slides"]) == 2
+
+    def test_version_is_loaded_by_a_new_store_instance(self, store_dir):
+        first = SlideDataStore(data_dir=str(store_dir), task_id="t1")
+        first.persist("t1", _make_slide_data_list())
+        second = SlideDataStore(data_dir=str(store_dir), task_id="t1")
+        assert second.get_version("t1") == 1
 
     def test_persist_increments_version(self, store):
         sdl = _make_slide_data_list()
@@ -106,6 +109,16 @@ class TestSlideDataStoreRecovery:
         store.restore_backup("t1")
         loaded = store.load("t1")
         assert loaded[0]["title"] == "Report"
+
+    def test_pptx_path_survives_persist_and_restore(self, store):
+        pptx_path = "/output/report.pptx"
+        store.set_pptx_path("t1", pptx_path)
+        store.persist("t1", _make_slide_data_list())
+        updated = _make_slide_data_list()
+        updated[0]["title"] = "Updated"
+        store.persist("t1", updated)
+        store.restore_backup("t1")
+        assert store.get_pptx_path("t1") == pptx_path
 
     def test_restore_no_backup_raises(self, store):
         sdl = _make_slide_data_list()

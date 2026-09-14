@@ -628,8 +628,9 @@ class HTMLToWordConverter:
                         paragraph_count += 1
                     else:
                         # Normal heading
-                        heading = doc.add_heading(text, level=level)
-                        self._apply_heading_style(heading, level, styles, css_class)
+                        safe_level = max(1, min(level, 9))
+                        heading = doc.add_heading(text, level=safe_level)
+                        self._apply_heading_style(heading, safe_level, styles, css_class)
                         paragraph_count += 1
             
             elif elem_type == "paragraph":
@@ -918,12 +919,6 @@ class HTMLToWordConverter:
             if remaining:
                 paragraph.add_run(remaining)
         
-        # If no tags matched, add text directly
-        if last_end == 0 and text:
-            # Clean HTML tags
-            clean_text = re.sub(r'</?(strong|em|code|del|a[^>]*)>', '', text)
-            paragraph.add_run(clean_text)
-    
     def _parse_color_to_rgb(self, color_str: str):
         """
         Convert color string to RGB tuple

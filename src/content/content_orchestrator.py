@@ -124,7 +124,10 @@ class ContentOrchestrator:
         self._template_engine = TemplateEngine()
         self._current_template_html: Optional[str] = None
         from .content_condenser import ContentCondenser
-        self._condenser = ContentCondenser()
+        # PPT uses a stricter editorial contract than Word.  The condenser
+        # still exposes a larger default for standalone callers, but the
+        # orchestrator must enforce presentation-scale bullets.
+        self._condenser = ContentCondenser(max_bullet_chars=25)
     
     def get_template_html(self, template_name: Optional[str] = None) -> Optional[str]:
         """
@@ -169,12 +172,27 @@ class ContentOrchestrator:
         if output_format not in self.supported_formats:
             logger.warning(f"Unsupported format: {output_format}, defaulting to docx")
             output_format = "docx"
-        
+
         # Parse content
         title=research_result.get("title", "Research Report")
         sections = self._parse_sections(research_result.get("sections", []))
         key_findings = research_result.get("key_findings", [])
         data_points = research_result.get("data_points", [])
+
+        # PPT needs an explicit page plan.  The generic document template is
+        # intentionally bypassed here because it represents one section as
+        # one page, which is a Word/report layout assumption.  Keep the
+        # template available for CSS extraction and browser preview.
+        if output_format == "pptx":
+            self._current_template_html = self._template_engine.load_template(
+                template_name or DEFAULT_TEMPLATE_MAP["pptx"]
+            )
+            return self._generate_ppt_html(
+                title,
+                sections,
+                key_findings,
+                data_points,
+            )
         
         logger.debug(f"Transforming to HTML: format={output_format}, sections={len(sections)}")
         
@@ -301,7 +319,9 @@ class ContentOrchestrator:
                     title=section.title,
                     table_data=table_data_for_condenser,
                 )
-                items = condensed.get("items", [])
+                # Use the full set here; pagination is the renderer's job.  The
+                # capped ``items`` field is retained for single-slide consumers.
+                items = condensed.get("all_items", condensed.get("items", []))
                 kpi_data = condensed.get("kpi_data", [])
                 chart_suggestions = condensed.get("chart_suggestions", [])
                 
@@ -484,6 +504,19 @@ class ContentOrchestrator:
         if not os.path.isabs(path):
             return (Path(__file__).resolve().parent.parent.parent / path).exists()
         return False
+
+    @staticmethod
+    def _resolve_ppt_chart_path(path: str) -> str:
+        """Resolve chart paths for the direct multi-slide PPT path."""
+        if not path:
+            return ""
+        if os.path.exists(path):
+            return path
+        if not os.path.isabs(path):
+            candidate = Path(__file__).resolve().parent.parent.parent / path
+            if candidate.exists():
+                return str(candidate)
+        return path
 
     def _insert_charts_into_html(
         self,
@@ -1446,7 +1479,7 @@ class ContentOrchestrator:
         return f'''<section class="slide" data-type="toc" data-page="{slide_num}">
     <div class="slide-content">
         <div class="slide-title">
-            <h2>Table of Contents</h2>
+            <h2>目录</h2>
         </div>
         <ul class="toc-list">
             {chr(10).join(items)}
@@ -1465,12 +1498,19 @@ class ContentOrchestrator:
         rather than long paragraphs (<p>).
         """
         slides = []
+        # Build a short chapter thesis for the divider without putting the
+        # full report paragraph on the page.
+        section_summary = ""
+        if section.content:
+            summary_items = self._condenser.extract_all_bullets(section.content)
+            section_summary = summary_items[0] if summary_items else ""
         
         slides.append(f'''<section class="slide" data-type="section-title" data-page="{start_slide_num}">
     <div class="slide-content">
         <div class="slide-title">
             <h2>{html.escape(section.title)}</h2>
         </div>
+        <p class="section-summary">{ContentOrchestrator._inline_markdown(section_summary)}</p>
     </div>
 </section>'''
         )
@@ -1483,14 +1523,15 @@ class ContentOrchestrator:
                 section.content,
                 title=section.title,
             )
-            items = condensed.get("items", [])
+            items = condensed.get("all_items", condensed.get("items", []))
             kpi_data = condensed.get("kpi_data", [])
             chart_suggestions = condensed.get("chart_suggestions", [])
+            display_items = items
             
             if kpi_data and len(kpi_data) >= 2:
                 kpi_slide_num = start_slide_num + 1
                 kpi_items = []
-                for kpi in kpi_data[:5]:
+                for kpi in kpi_data[:4]:
                     num = kpi.get("number", "")
                     label = kpi.get("label", "")
                     trend = kpi.get("trend", "")
@@ -1502,7 +1543,9 @@ class ContentOrchestrator:
                     kpi_items.append(html.escape(" ".join(p for p in parts if p)))
                 
                 kpi_li = "\n            ".join(f'<li>{item}</li>' for item in kpi_items)
-                slides.append(f'''<section class="slide" data-type="findings" data-page="{kpi_slide_num}" data-section="{section.id}">
+                # Keep this as a content slide so the PPT renderer can detect
+                # the numeric items and choose the editable KPI-card layout.
+                slides.append(f'''<section class="slide" data-type="content" data-page="{kpi_slide_num}" data-section="{section.id}">
     <div class="slide-content">
         <div class="slide-title">
             <h2>{html.escape(section.title)} - 核心指标</h2>
@@ -1514,15 +1557,35 @@ class ContentOrchestrator:
 </section>'''
                 )
                 start_offset = 1
+                # Do not show the same numeric evidence once as KPI cards and
+                # again as ordinary bullets.  Keep anything beyond the
+                # editable four-card capacity for the following content page.
+                removed = 0
+                display_items = []
+                for item in items:
+                    # A KPI card may replace a short, number-only bullet, but
+                    # it must not replace a descriptive fact that contains
+                    # several named entities or a category list.  Doing so
+                    # used to delete revisions such as
+                    # "Key verticals: semiconductor manufacturing ...".
+                    descriptive_fact = ":" in item or "：" in item
+                    if (
+                        removed < 4
+                        and self._condenser.extract_kpis(item)
+                        and not descriptive_fact
+                    ):
+                        removed += 1
+                        continue
+                    display_items.append(item)
             else:
                 start_offset = 0
             
-            if items:
+            if display_items:
                 chunk_size = self._condenser.max_bullets_per_slide
-                item_chunks = [items[i:i+chunk_size] for i in range(0, len(items), chunk_size)]
+                item_chunks = [display_items[i:i+chunk_size] for i in range(0, len(display_items), chunk_size)]
                 
                 for ci, item_chunk in enumerate(item_chunks):
-                    slide_num = start_slide_num + 1 + start_offset + ci
+                    slide_num = start_slide_num + len(slides)
                     
                     chart_imgs = ""
                     while chart_idx < len(charts):
@@ -1530,7 +1593,7 @@ class ContentOrchestrator:
                         anchor_type = chart.get("anchor_type", "section_end")
                         if anchor_type == "section_end" and ci < len(item_chunks) - 1:
                             break
-                        chart_path = chart.get("path", "")
+                        chart_path = self._resolve_ppt_chart_path(chart.get("path", ""))
                         chart_alt = html.escape(chart.get("caption", "") or chart.get("title", "") or "Chart")
                         if chart_path:
                             chart_imgs += f'<img src="{html.escape(chart_path, quote=True)}" alt="{chart_alt}">'
@@ -1560,7 +1623,7 @@ class ContentOrchestrator:
             else:
                 content_chunks = self._split_content_for_slides(section.content)
                 for i, chunk in enumerate(content_chunks):
-                    slide_num = start_slide_num + 1 + start_offset + i
+                    slide_num = start_slide_num + len(slides)
                     chart_imgs = ""
                     while chart_idx < len(charts):
                         chart = charts[chart_idx]
@@ -1570,7 +1633,7 @@ class ContentOrchestrator:
                             break
                         if anchor and chunk.find(anchor) < 0 and anchor_type != "section_end":
                             break
-                        chart_path = chart.get("path", "")
+                        chart_path = self._resolve_ppt_chart_path(chart.get("path", ""))
                         chart_alt = html.escape(chart.get("caption", "") or chart.get("title", "") or "Chart")
                         if chart_path:
                             chart_imgs += f'<img src="{html.escape(chart_path, quote=True)}" alt="{chart_alt}">'
@@ -1593,9 +1656,9 @@ class ContentOrchestrator:
         
         while chart_idx < len(charts):
             chart = charts[chart_idx]
-            chart_path = chart.get("path", "")
+            chart_path = self._resolve_ppt_chart_path(chart.get("path", ""))
             chart_alt = html.escape(chart.get("caption", "") or chart.get("title", "") or "Chart")
-            slide_num = start_slide_num + len(slides) + 1
+            slide_num = start_slide_num + len(slides)
             if chart_path:
                 slides.append(f'''<section class="slide" data-type="data" data-page="{slide_num}" data-section="{section.id}">
     <div class="slide-content">
@@ -1694,10 +1757,10 @@ class ContentOrchestrator:
         return f'''<section class="slide" data-type="end" data-page="{slide_num}">
     <div class="slide-content">
         <div class="slide-title">
-            <h2>Thank You</h2>
+            <h2>报告结论</h2>
         </div>
         <div class="slide-footer">
-            <p>{html.escape(title)}</p>
+            <p>{html.escape(title)} · 感谢关注</p>
         </div>
     </div>
 </section>'''

@@ -1,5 +1,8 @@
 import pytest
+from pathlib import Path
+from unittest.mock import patch
 from src.core.adjustment.ppt_structure_editor import PptStructureEditor
+from src.converters.html_to_ppt import ConversionResult
 
 
 def _make_slide_data_list():
@@ -39,6 +42,49 @@ class TestDeleteSlide:
         sdl = _make_slide_data_list()
         result = editor.delete_slide(sdl, 10)
         assert result is False
+
+
+class TestHtmlRerenderAtomicity:
+    def test_success_replaces_output_only_after_valid_conversion(self, tmp_path):
+        output = tmp_path / "report.pptx"
+        output.write_bytes(b"original")
+
+        class FakeConverter:
+            def _merge_styles(self, _, styles):
+                return styles or {}
+
+            def _create_pptx_document(self, slides, output_path, styles):
+                from pptx import Presentation
+                Presentation().save(output_path)
+                return ConversionResult(success=True, output_path=output_path)
+
+        editor = PptStructureEditor()
+        with patch("src.converters.html_to_ppt.HTMLToPPTConverter", FakeConverter):
+            result = editor.edit([{"slide_type": "content", "title": "x"}],
+                                 pptx="source.pptx", output_path=str(output))
+
+        assert result.success is True
+        assert output.read_bytes() != b"original"
+
+    def test_failed_conversion_keeps_original_output(self, tmp_path):
+        output = tmp_path / "report.pptx"
+        output.write_bytes(b"original")
+
+        class FakeConverter:
+            def _merge_styles(self, _, styles):
+                return styles or {}
+
+            def _create_pptx_document(self, slides, output_path, styles):
+                Path(output_path).write_bytes(b"broken")
+                return ConversionResult(success=False, error="conversion failed")
+
+        editor = PptStructureEditor()
+        with patch("src.converters.html_to_ppt.HTMLToPPTConverter", FakeConverter):
+            result = editor.edit([{"slide_type": "content", "title": "x"}],
+                                 pptx="source.pptx", output_path=str(output))
+
+        assert result.success is False
+        assert output.read_bytes() == b"original"
 
 
 class TestAddSlide:

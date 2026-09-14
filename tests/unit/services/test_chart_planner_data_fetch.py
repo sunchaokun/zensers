@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import unittest
+from unittest.mock import AsyncMock, patch
 
 from src.services.chart_planner import ChartPlannerAgent
 from src.services.chart_generator import ChartType
@@ -133,6 +134,77 @@ class TestIsAShareSymbol(unittest.TestCase):
 
     def test_strips_whitespace(self):
         self.assertTrue(self.agent._is_a_share_symbol("  002594  "))
+
+
+class TestStockSymbolCanonicalization(unittest.IsolatedAsyncioTestCase):
+    async def test_company_alias_is_resolved_before_akshare_fetch(self):
+        agent = ChartPlannerAgent()
+        resolver = AsyncMock()
+        resolver.resolve.return_value = [
+            type("Entity", (), {"resolved_code": "002594"})()
+        ]
+        impl = AsyncMock(return_value={"dates": ["2026-01-01"], "closes": [100]})
+
+        with patch("src.core.entity_resolver.get_entity_resolver", return_value=resolver), \
+             patch.object(agent, "_fetch_stock_data_impl", impl):
+            result = await agent._fetch_stock_data(
+                "stock_price", {"symbol": "比亚迪股份有限公司", "days": 1}
+            )
+
+        self.assertEqual(result["closes"], [100])
+        self.assertEqual(impl.await_args.args[2], "002594")
+        resolver.resolve.assert_awaited_once_with("比亚迪股份有限公司")
+
+
+class TestSearchBackedChartData(unittest.IsolatedAsyncioTestCase):
+    async def test_search_source_retrieves_evidence_before_llm_extraction(self):
+        agent = ChartPlannerAgent()
+        search = AsyncMock()
+        search.execute.return_value = {
+            "success": True,
+            "results": [{"title": "比亚迪销量", "snippet": "销量为 100 万辆", "url": "https://example.test"}],
+        }
+        llm = AsyncMock(return_value={
+            "success": True,
+            "content": '{"dates": ["2025"], "values": [100], "unit": "万辆"}',
+        })
+
+        with patch("src.skills.search_skill.MultiSearchSkill", return_value=search), \
+             patch("src.core.llm_client.call_llm", new=llm):
+            result = await agent._fetch_search_data({"query": "比亚迪销量"}, "新能源汽车")
+
+        self.assertEqual(result["values"], [100])
+        search.execute.assert_awaited_once()
+        self.assertIn("比亚迪销量", llm.await_args.kwargs["prompt"])
+        self.assertIn("销量为 100 万辆", llm.await_args.kwargs["prompt"])
+
+    async def test_search_source_prefers_task_search_gateway_over_legacy_engines(self):
+        gateway = AsyncMock()
+        gateway.search.return_value = type("Response", (), {
+            "success": True,
+            "results": [type("Result", (), {
+                "title": "AnySearch证据",
+                "snippet": "销量为 120 万辆",
+                "excerpt": "",
+                "url": "https://example.test/anysearch",
+                "source": "anysearch",
+                "evidence_id": "ev_1",
+                "provenance_id": "prov_1",
+            })()],
+        })()
+        agent = ChartPlannerAgent(search_gateway=gateway)
+        llm = AsyncMock(return_value={
+            "success": True,
+            "content": '{"dates": ["2025"], "values": [120], "unit": "万辆"}',
+        })
+
+        with patch("src.core.llm_client.call_llm", new=llm), \
+             patch("src.skills.search_skill.MultiSearchSkill.execute", new_callable=AsyncMock) as legacy:
+            result = await agent._fetch_search_data({"query": "比亚迪销量"}, "新能源汽车")
+
+        self.assertEqual(result["values"], [120])
+        gateway.search.assert_awaited_once()
+        legacy.assert_not_awaited()
 
 
 class TestPrepareLlmInput(unittest.TestCase):

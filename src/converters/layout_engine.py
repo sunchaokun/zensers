@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -83,14 +83,12 @@ class LayoutEngine:
         return {
             "has_kpis": bool(kpi_data) and len(kpi_data) >= 2,
             "kpi_count": min(len(kpi_data), 4),
-            "has_chart": bool(images) and all(
-                img.get("image_type", "chart") == "chart" for img in images
-            ),
+            "has_chart": any(img.get("image_type") == "chart" for img in images),
             "has_photo": bool(images) and any(
                 img.get("image_type") in ("product", "technology", "illustration")
                 for img in images
             ),
-            "chart_count": len(images),
+            "chart_count": sum(1 for img in images if img.get("image_type") == "chart"),
             "has_table": bool(table_data) and len(table_data) >= 2,
             "table_rows": len(table_data) if table_data else 0,
             "has_items": bool(items),

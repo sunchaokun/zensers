@@ -292,8 +292,12 @@ _SYSTEM_PROMPT = f"""你是一个专业的数据可视化规划师，同时也�
 
 class ChartPlannerAgent:
 
-    def __init__(self, output_dir: str = "output/charts"):
+    def __init__(self, output_dir: str = "output/charts", search_gateway=None):
         self.output_dir = output_dir
+        # Production report generation injects the task-scoped gateway.  Keep
+        # the optional argument for legacy callers that use this service in
+        # isolation.
+        self.search_gateway = search_gateway
 
     async def plan(
         self,
@@ -527,7 +531,7 @@ class ChartPlannerAgent:
         result = await call_llm(
             prompt=user_prompt,
             system_prompt=_SYSTEM_PROMPT,
-            max_tokens=1500,
+            max_tokens=self._get_llm_max_tokens(),
             temperature=0.3,
             routing_hint=RoutingHint(
                 agent_type="generic", action="chart_planning"
@@ -540,7 +544,42 @@ class ChartPlannerAgent:
             )
             return []
 
-        return await self._parse_and_resolve(result.get("content", ""), topic)
+        content = result.get("content", "")
+        if not str(content).strip():
+            logger.warning(
+                "ChartPlanner: empty LLM response for section='%s'; retrying compact plan",
+                section_title,
+            )
+            result = await call_llm(
+                prompt=user_prompt + "\nReturn compact JSON only. If no chart is justified, return {\"charts\": [], \"skip_reason\": \"insufficient evidence\"}.",
+                system_prompt=_SYSTEM_PROMPT,
+                max_tokens=self._get_llm_max_tokens(),
+                temperature=0,
+                routing_hint=RoutingHint(agent_type="generic", action="chart_planning"),
+            )
+            if not result.get("success"):
+                logger.warning("ChartPlanner retry failed: %s", result.get("error"))
+                return []
+            content = result.get("content", "")
+            if not str(content).strip():
+                logger.warning("ChartPlanner: retry also returned empty response")
+                return []
+        logger.debug(
+            "ChartPlanner: LLM response received section='%s' chars=%d",
+            section_title,
+            len(content),
+        )
+        return await self._parse_and_resolve(content, topic)
+
+    @staticmethod
+    def _get_llm_max_tokens() -> int:
+        """Return the chart-planning output budget without imposing a runtime limit."""
+        try:
+            from src.config import settings
+            value = int(getattr(settings.chart_planner, "llm_max_tokens", 4096))
+        except (ImportError, TypeError, ValueError, AttributeError):
+            value = 4096
+        return max(2048, value)
 
     def _clean_json_string(self, json_str: str) -> str:
         lines = []
@@ -572,10 +611,22 @@ class ChartPlannerAgent:
                 try:
                     parsed = json.loads(json_str[brace_start : brace_end + 1])
                 except json.JSONDecodeError:
-                    logger.warning("ChartPlanner: failed to parse LLM JSON response")
+                    logger.warning(
+                        "ChartPlanner: failed to parse LLM JSON response "
+                        "chars=%d likely_truncated=%s tail=%r",
+                        len(json_str),
+                        not json_str.rstrip().endswith(("}", "]", "```")),
+                        json_str[-120:],
+                    )
                     return []
             else:
-                logger.warning("ChartPlanner: failed to parse LLM JSON response")
+                logger.warning(
+                    "ChartPlanner: failed to parse LLM JSON response "
+                    "chars=%d likely_truncated=%s tail=%r",
+                    len(json_str),
+                    not json_str.rstrip().endswith(("}", "]", "```")),
+                    json_str[-120:],
+                )
                 return []
 
         if not isinstance(parsed, dict):
@@ -705,6 +756,17 @@ class ChartPlannerAgent:
         if not symbol:
             return None
 
+        # LLM plans naturally use company names/aliases, while AkShare's
+        # A-share endpoints require a six-digit security code.  Canonicalize
+        # through the shared entity resolver before deciding to fall back to
+        # web search; otherwise a valid listed company is misclassified as a
+        # non-A-share symbol and structured data is never attempted.
+        if source in ("stock_price", "stock_financials", "stock_metrics"):
+            resolved = await self._canonicalize_stock_symbol(symbol)
+            if resolved:
+                symbol = resolved
+                params["symbol"] = resolved
+
         if source in ("stock_price", "stock_financials", "stock_metrics"):
             if not self._is_a_share_symbol(symbol):
                 logger.info(f"Symbol '{symbol}' is not A-share, falling back to search")
@@ -733,6 +795,32 @@ class ChartPlannerAgent:
                 logger.exception(f"Stock data fetch failed (attempt {attempt+1}/{max_retries}): {source}/{symbol}")
 
         return None
+
+    async def _canonicalize_stock_symbol(self, symbol: str) -> str:
+        """Resolve a company name/alias to the canonical A-share code."""
+        symbol = str(symbol or "").strip()
+        if self._is_a_share_symbol(symbol):
+            return symbol
+        try:
+            from src.core.entity_resolver import get_entity_resolver
+
+            entities = await get_entity_resolver().resolve(symbol)
+            for entity in entities:
+                code = getattr(entity, "resolved_code", None)
+                if code and self._is_a_share_symbol(str(code)):
+                    logger.info(
+                        "ChartPlanner: canonicalized stock symbol '%s' -> '%s'",
+                        symbol,
+                        code,
+                    )
+                    return str(code)
+        except Exception as exc:
+            logger.debug(
+                "ChartPlanner: stock symbol resolution failed for '%s': %s",
+                symbol,
+                exc,
+            )
+        return ""
 
     async def _fetch_stock_data_impl(
         self, source: str, params: Dict[str, Any], symbol: str
@@ -802,6 +890,73 @@ class ChartPlannerAgent:
         if not query:
             return None
 
+        # Search-backed chart data must come from the search Skill first.
+        # Previously this method sent only the query to an LLM, which is not
+        # retrieval and made the result unverifiable (especially for company
+        # abbreviations and fuzzy names).
+        try:
+            if self.search_gateway is not None:
+                from src.core.search import SearchRequest
+
+                gateway_response = await self.search_gateway.search(
+                    SearchRequest(
+                        query=query,
+                        objective="chart_data",
+                        region="cn-cn",
+                        max_results=5,
+                    ),
+                    scope="report_generation",
+                )
+                search_result = {
+                    "success": bool(gateway_response.success),
+                    "results": [
+                        {
+                            "title": item.title,
+                            "snippet": item.snippet or item.excerpt,
+                            "content": item.excerpt or item.snippet,
+                            "url": item.url,
+                            "source": item.source,
+                            "evidence_id": item.evidence_id,
+                            "provenance_id": item.provenance_id,
+                        }
+                        for item in (gateway_response.results or [])
+                    ],
+                }
+            else:
+                from src.skills.search_skill import MultiSearchSkill
+
+                search_result = await MultiSearchSkill().execute(
+                    query=query,
+                    max_results=5,
+                    context={"topic": topic, "purpose": "chart_data"},
+                )
+        except Exception as exc:
+            logger.warning("ChartPlanner: search provider failed for '%s': %s", query, exc)
+            return None
+
+        if not isinstance(search_result, dict) or not search_result.get("success"):
+            logger.warning("ChartPlanner: search skill returned no evidence for '%s'", query)
+            return None
+        search_results = search_result.get("results")
+        if search_results is None and isinstance(search_result.get("data"), dict):
+            search_results = search_result["data"].get("results")
+        if not isinstance(search_results, list) or not search_results:
+            logger.warning("ChartPlanner: search skill returned empty evidence for '%s'", query)
+            return None
+
+        evidence = []
+        for item in search_results[:5]:
+            if isinstance(item, dict):
+                evidence.append({
+                    key: item.get(key, "")
+                    for key in ("title", "snippet", "content", "url", "source")
+                    if item.get(key)
+                })
+            elif item:
+                evidence.append({"content": str(item)})
+        if not evidence:
+            return None
+
         try:
             from src.core.llm_client import call_llm
             from src.config.llm_profiles import RoutingHint
@@ -810,8 +965,9 @@ class ChartPlannerAgent:
 
         result = await call_llm(
             prompt=(
-                f"请提取以下数据的具体数值，以JSON格式返回。\n"
-                f"查询：{query}\n\n"
+                f"请仅根据下列搜索证据提取查询所需的具体数值，以JSON格式返回。\n"
+                f"查询：{query}\n"
+                f"搜索证据：{json.dumps(evidence, ensure_ascii=False)}\n\n"
                 f"返回格式要求：\n"
                 f'{{"dates": ["2025-01", "2025-02", ...], "values": [数值1, 数值2, ...], "unit": "单位"}}\n\n'
                 f"注意：\n"

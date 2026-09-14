@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 _NUM_UNIT_RE = re.compile(
-    r'([\d.]+)\s*(万亿|亿|万|[BMK]|家|倍|个|辆|台|颗|款|项|人|名|次|期|支|条|元|美元|USD|CNY|EUR)',
+    r'(?<!第)([\d.]+)\s*(万亿|亿|万|[BMK]|家|倍|个|辆|台|颗|款|项|人|名|次|期|支|条|元|美元|USD|CNY|EUR)',
     re.I,
 )
 _PCT_RE = re.compile(r'(\d+\.?\d*)\s*%')
@@ -14,7 +14,11 @@ _TREND_UP_RE = re.compile(r'(增长|上升|提升|增加|上涨|grew|increased|u
 _TREND_DOWN_RE = re.compile(r'(下降|减少|下滑|降低|跌|declined|decreased|down|fell|dropped)', re.I)
 _YEAR_RE = re.compile(r'(20\d{2})\s*[年]')
 
-_SENTENCE_SPLIT_RE = re.compile(r'[。！？；\n]')
+# Split on Chinese punctuation/newlines and on whitespace following English
+# sentence punctuation.  The previous expression did not split English
+# paragraphs at all, so a long revised section was condensed into one bullet
+# and its trailing facts were silently discarded.
+_SENTENCE_SPLIT_RE = re.compile(r'[。！？；\n]+|(?<=[.!?])\s+')
 _BULLET_PREFIX_RE = re.compile(r'^[\-\*•▪▸►]\s*')
 _NUMBERED_PREFIX_RE = re.compile(r'^\d+[\.、）)]\s*')
 
@@ -88,7 +92,7 @@ class ContentCondenser:
         if year_match:
             data_parts.append(year_match.group(0))
         if num_match:
-            data_parts.append(num_match.group(0))
+            data_parts.append(self._numeric_token(sentence, num_match))
         if pct_match:
             data_parts.append(pct_match.group(0))
 
@@ -105,14 +109,52 @@ class ContentCondenser:
             return sentence[:self.max_bullet_chars * 2]
 
         if data_parts:
-            result = f"{prefix} {' '.join(data_parts)}"
+            # Keep the numeric evidence first-class.  Truncating the whole
+            # string from the right used to remove the very number the bullet
+            # was meant to surface.
+            data_text = " ".join(data_parts)
+            prefix_budget = self.max_bullet_chars - len(data_text) - 1
+            if prefix_budget <= 0:
+                return data_text[:self.max_bullet_chars]
+            if len(prefix) > prefix_budget:
+                prefix = prefix[:max(1, prefix_budget - 1)] + "…"
+            result = f"{prefix} {data_text}"
         else:
             result = prefix
-
-        if len(result) > self.max_bullet_chars * 2:
-            result = result[:self.max_bullet_chars * 2 - 1] + "…"
+            # This is a slide-writing limit, not a paragraph-writing limit.
+            if len(result) > self.max_bullet_chars:
+                result = result[:self.max_bullet_chars - 1] + "…"
 
         return result
+
+    @staticmethod
+    def _numeric_token(sentence: str, match) -> str:
+        """Keep currency suffixes attached to the numeric evidence."""
+        token = match.group(0)
+        tail = sentence[match.end():]
+        for suffix in ("人民币", "美元", "元"):
+            if tail.startswith(suffix):
+                return token + suffix
+        return token
+
+    def extract_all_bullets(self, content: str) -> List[str]:
+        """Return every source point without silently dropping later facts.
+
+        ``extract_bullets`` remains capped for callers that need a single-page
+        preview.  The PPT page planner uses this method and performs the
+        pagination explicitly.  Unlike the preview path, this method keeps
+        the complete sentence: truncating a sentence here can remove a later
+        metric or named entity before pagination has a chance to place it on
+        another slide.
+        """
+        if not content or not content.strip():
+            return []
+        stripped = content.strip()
+        existing = self._parse_existing_bullets(stripped)
+        if existing:
+            return [item.strip() for item in existing if item.strip()]
+        sentences = [s.strip() for s in _SENTENCE_SPLIT_RE.split(stripped) if s.strip()]
+        return sentences
 
     def extract_kpis(self, content: str) -> List[Dict[str, Any]]:
         if not content or not content.strip():
@@ -134,7 +176,7 @@ class ContentCondenser:
 
             for i, num_match in enumerate(num_matches):
                 kpi: Dict[str, Any] = {}
-                kpi["number"] = num_match.group(0).strip()
+                kpi["number"] = self._numeric_token(sent, num_match).strip()
 
                 associated_pct = None
                 for pct_match in pct_matches:
@@ -247,6 +289,7 @@ class ContentCondenser:
         table_data: Optional[List[List[str]]] = None,
     ) -> Dict[str, Any]:
         items = self.extract_bullets(content)
+        all_items = self.extract_all_bullets(content)
         kpi_data = self.extract_kpis(content)
         chart_suggestions = self.suggest_charts(content)
 
@@ -259,6 +302,7 @@ class ContentCondenser:
 
         return {
             "items": items,
+            "all_items": all_items,
             "kpi_data": kpi_data,
             "chart_suggestions": chart_suggestions,
         }

@@ -26,9 +26,9 @@ import logging
 import os
 import re
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 from .base_parser import SlideElementParser
 from .css_extractor import CSSStyleExtractor, ExtractedStyles
@@ -442,11 +442,9 @@ class HTMLToPPTConverter:
 
     def _auto_generate_charts(self, slide_data: Dict, template_name: str, chart_gen) -> None:
         """Auto-generate chart images for slides with data but no images."""
-        from src.services.chart_generator import ChartConfig, ChartType
         title = slide_data.get("title", "")
         items = slide_data.get("items", [])
         table_data = slide_data.get("table_data", [])
-        content = slide_data.get("content", "")
         text_parts = []
         if title:
             text_parts.append(title)
@@ -477,7 +475,14 @@ class HTMLToPPTConverter:
                 chart_path = self._generate_chart_from_table(table_data, title, chart_gen)
                 if chart_path and os.path.isfile(chart_path):
                     images = slide_data.get("images", [])
-                    images.append({"src": chart_path, "alt": title})
+                    images.append({
+                        "src": chart_path,
+                        "alt": title,
+                        "image_type": "chart",
+                        "chart_type": "bar",
+                        "chart_id": f"{title}:table",
+                        "data_ref": "slide.table_data",
+                    })
                     slide_data["images"] = images
                     logger.info(f"Auto-generated table chart for '{title}': {chart_path}")
             except Exception:
@@ -493,7 +498,15 @@ class HTMLToPPTConverter:
             try:
                 chart_path = chart_gen.generate_chart(suggestion)
                 if chart_path and os.path.isfile(chart_path):
-                    images.append({"src": chart_path, "alt": suggestion.title})
+                    images.append({
+                        "src": chart_path,
+                        "alt": suggestion.title,
+                        "image_type": "chart",
+                        "chart_type": suggestion.chart_type.value,
+                        "chart_id": f"{title}:{len(images)}",
+                        "data_ref": "slide.content",
+                        "caption": suggestion.caption,
+                    })
                     logger.info(f"Auto-generated chart for '{title}': {chart_path}")
             except Exception:
                 logger.warning(f"Chart generation failed for slide: {title}")
@@ -580,8 +593,7 @@ class HTMLToPPTConverter:
             ConversionResult
         """
         from pptx import Presentation
-        from pptx.util import Inches, Pt
-        from pptx.enum.text import PP_ALIGN
+        from pptx.util import Inches
         
         # Create presentation
         prs = Presentation()
@@ -646,7 +658,7 @@ class HTMLToPPTConverter:
                 if chart_gen and layout_engine.can_accommodate_chart(slide_data, template_name):
                     existing_images = slide_data.get("images", [])
                     has_chart = any(
-                        img.get("image_type", "chart") == "chart" or
+                        img.get("image_type") == "chart" or
                         (img.get("src", "").endswith((".png", ".jpg")) and "chart" in img.get("src", ""))
                         for img in existing_images
                     )
@@ -714,7 +726,6 @@ class HTMLToPPTConverter:
 
     def _set_slide_bg(self, slide, color_hex: str):
         """Set solid background color for a slide."""
-        from pptx.util import Pt
         bg = slide.background
         fill = bg.fill
         fill.solid()
@@ -730,15 +741,13 @@ class HTMLToPPTConverter:
 
     def _rgb(self, hex_color: str):
         """Convert hex color string to RGBColor."""
-        from pptx.util import Pt
         from pptx.dml.color import RGBColor
         hex_color = hex_color.lstrip('#')
         return RGBColor(int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16))
 
     def _add_footer_bar(self, slide, styles: Dict[str, Any], color: str = None):
         """Add gold footer bar at bottom of slide."""
-        from pptx.util import Inches, Pt
-        from pptx.dml.color import RGBColor
+        from pptx.util import Inches
         sw = styles.get("slide_width", 13.333)
         sh = styles.get("slide_height", 7.5)
         bar_color = color or self.DESIGN["gold"]
@@ -784,7 +793,6 @@ class HTMLToPPTConverter:
         except Exception:
             self._set_slide_bg(slide, self.DESIGN["navy"])
 
-        cw = self._content_width(styles)
         sw = styles.get("slide_width", 13.333)
 
         self._add_footer_bar(slide, styles, self.DESIGN["gold"])
@@ -889,8 +897,6 @@ class HTMLToPPTConverter:
         position: "right" = right half of slide (left-text-right-image layout)
                   "below" = below text area (top-text-bottom-image layout)
         """
-        from pptx.util import Inches, Pt
-        
         images = slide_data.get("images", [])
         if not images:
             return
@@ -1107,11 +1113,9 @@ class HTMLToPPTConverter:
     def _create_data_slide(self, slide, slide_data: Dict[str, Any], styles: Dict[str, Any]):
         """Create data slide: left table / right chart."""
         from pptx.util import Inches, Pt
-        from pptx.dml.color import RGBColor
 
         self._set_slide_bg(slide, self.DESIGN["white"])
         sw = styles.get("slide_width", 13.333)
-        sh = styles.get("slide_height", 7.5)
         self._add_side_accent(slide, styles)
         self._add_footer_bar(slide, styles)
 
@@ -1176,7 +1180,6 @@ class HTMLToPPTConverter:
         from pptx.enum.text import PP_ALIGN
 
         self._set_slide_bg(slide, self.DESIGN["navy"])
-        cw = self._content_width(styles)
         sw = styles.get("slide_width", 13.333)
 
         self._add_footer_bar(slide, styles, self.DESIGN["white"])

@@ -92,7 +92,7 @@ class BatchRevisionService:
         self,
         llm_client: Optional[Any] = None,
         max_retries: int = 2,
-        timeout: float = 120.0,
+        timeout: Optional[float] = None,
     ):
         """
         初始化批量修订服务
@@ -390,21 +390,17 @@ class BatchRevisionService:
             from src.core.llm_client import call_llm
             from src.config.llm_profiles import RoutingHint
 
-            result = await asyncio.wait_for(
-                call_llm(
-                    prompt=prompt,
-                    routing_hint=RoutingHint(action="batch_revision"),
-                ),
-                timeout=self._timeout,
+            # Batch revision is Agent work and must not be truncated by the
+            # historical fixed 120s deadline.
+            result = await call_llm(
+                prompt=prompt,
+                routing_hint=RoutingHint(action="batch_revision"),
             )
             if result and result.get("success"):
                 return result.get("content")
             else:
                 logger.error(f"[BatchRevision] LLM call failed: {result.get('error', 'Unknown error') if result else 'No result'}")
                 return None
-        except asyncio.TimeoutError:
-            logger.error(f"[BatchRevision] LLM call timed out after {self._timeout}s")
-            raise
         except Exception as e:
             logger.error(f"[BatchRevision] LLM call failed: {e}")
             return None

@@ -4,23 +4,16 @@ E2E test for the full PPT Revision Pipeline.
 Flow: data collection → analysis → framework confirm → PPT generation
       → outline confirm → preview → revision (L1-L4) → finalize → export
 """
-import os
-import json
 import pytest
-from unittest.mock import MagicMock, patch, AsyncMock
 
 from src.core.adjustment.slide_data_builder import SlideDataBuilder
 from src.core.adjustment.slide_data_store import SlideDataStore
 from src.converters.slide_outline_builder import SlideOutlineBuilder
 from src.core.adjustment.ppt_report_adapter import PptReportAdapter
 from src.core.adjustment.ppt_revision_router import PptRevisionRouter
-from src.core.adjustment.ppt_revision_service import (
-    PptRevisionService, PptRevisionRequest, PptRevisionResult,
-)
+from src.core.adjustment.ppt_revision_service import PptRevisionService, PptRevisionRequest
 from src.core.adjustment.ppt_slide_locator import PptSlideLocator
 from src.core.adjustment.ppt_atomic_editor import PptAtomicEditor
-from src.core.adjustment.ppt_element_editor import PptElementEditor
-from src.core.adjustment.ppt_page_editor import PptPageEditor
 from src.core.adjustment.ppt_structure_editor import PptStructureEditor
 from src.core.adjustment.ppt_version_manager import PptVersionManager
 from src.core.adjustment.slide_data_path_resolver import SlideDataPathResolver
@@ -144,9 +137,12 @@ class TestE2EFullPipeline:
             "全球市场份额超过60%",
             "预计2025年销量将突破1200万辆",
         ]
-        assert slide_data_list[1]["images"] == [
-            {"src": "", "alt": "2019-2024年新能源汽车销量", "image_type": "chart"}
-        ]
+        chart_image = slide_data_list[1]["images"][0]
+        assert chart_image["src"] == ""
+        assert chart_image["alt"] == "2019-2024年新能源汽车销量"
+        assert chart_image["image_type"] == "chart"
+        assert chart_image["chart_type"] == "bar"
+        assert {"chart_id", "caption", "source", "unit", "data_ref"}.issubset(chart_image)
         assert slide_data_list[-1]["slide_type"] == "end"
         assert slide_data_list[3]["source_text"] == ""
         assert slide_data_list[4]["source_text"] == "中国汽车工业协会、乘联会、工信部、各上市公司财报"
@@ -166,8 +162,8 @@ class TestE2EFullPipeline:
         assert outline.total_pages == 6
         assert outline.confirmed is False
         assert outline.slides[0].slide_type == "cover"
-        assert outline.slides[1].chart_type == "chart"
-        assert outline.slides[2].chart_type == "chart"
+        assert outline.slides[1].chart_type == "bar"
+        assert outline.slides[2].chart_type == "pie"
         assert outline.slides[3].chart_type is None
 
         # Simulate user confirming outline
@@ -206,6 +202,7 @@ class TestE2EFullPipeline:
         dummy_pptx = str(workspace / "output" / "report.pptx")
         with open(dummy_pptx, "wb") as f:
             f.write(b"PK\x03\x04dummy_pptx_v1")
+        store.set_pptx_path("task_e2e_001", dummy_pptx)
 
         v1 = version_mgr.create_snapshot("task_e2e_001", dummy_pptx, "L0", "initial generation")
         assert v1 == 1
@@ -364,7 +361,7 @@ class TestE2EFullPipeline:
         assert final_hash is not None
         assert len(final_hash) == 64
 
-        print(f"\n✓ E2E pipeline completed successfully!")
+        print("\n✓ E2E pipeline completed successfully!")
         print(f"  - {len(final_data)} slides in final output")
         print(f"  - {store.get_version('task_e2e_001')} versions tracked")
         print(f"  - {len(versions)} snapshots stored")

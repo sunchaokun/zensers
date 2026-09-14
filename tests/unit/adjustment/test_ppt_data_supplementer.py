@@ -3,6 +3,7 @@ from src.core.adjustment.ppt_data_supplementer import DataGap, PptDataSupplement
 from src.core.adjustment.extraction_types import ExtractionResult
 from src.core.adjustment.ppt_requirement_extractor import PptRequirement
 from src.content.content_orchestrator import ContentSection, SectionType
+from src.core.search import SearchGateway, SearchRequest
 
 
 def _make_extraction(title="Report", sections=None, key_topics=None):
@@ -70,6 +71,34 @@ class TestPptDataSupplementerAnalyzeGaps:
 
 
 class TestPptDataSupplementerSupplement:
+    @pytest.mark.anyio
+    async def test_supplement_async_uses_gateway_and_preserves_structured_results(self):
+        class Provider:
+            async def search(self, request: SearchRequest):
+                return {"results": [{
+                    "title": "来源",
+                    "url": "https://source.example/ppt",
+                    "snippet": "补充数据",
+                    "source": "official",
+                    "quality_score": 90,
+                }]}
+
+        gateway = SearchGateway(
+            task_id="ppt-task",
+            providers={"fake": Provider()},
+            primary_provider="fake",
+            task_max_searches=1,
+            default_scope_max_searches=1,
+            quality_threshold=70,
+        )
+        gaps = [DataGap("Market Size", "critical", ["market size"])]
+
+        result = await PptDataSupplementer().supplement_async(gaps, gateway=gateway)
+
+        assert result[0].filled is True
+        assert result[0].search_results[0]["url"] == "https://source.example/ppt"
+        assert gateway.get_stats()["scope_used_searches"] == {"ppt_supplement": 1}
+
     def test_supplement_fills_gaps_with_search_skill(self):
         gaps = [
             DataGap(topic="Market Size", priority="critical",

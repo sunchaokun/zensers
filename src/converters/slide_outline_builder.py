@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 
@@ -41,6 +41,9 @@ class SlideOutlineBuilder:
         images = sd.get("images", [])
         for img in images:
             if img.get("image_type") == "chart":
+                explicit_type = img.get("chart_type")
+                if explicit_type and explicit_type != "chart":
+                    return explicit_type
                 src = img.get("src", "").lower()
                 result = self._match_chart_type_from_src(src)
                 if result:

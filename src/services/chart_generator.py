@@ -21,23 +21,20 @@ Design doc: docs/KNOWLEDGE_BASE/02_ARCHITECTURE/ORCHESTRATOR_REDESIGN.md
 """
 
 import logging
-import os
+import math
 import tempfile
+import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
-from matplotlib.patches import FancyBboxPatch
 import numpy as np
 
 logger = logging.getLogger(__name__)
-
-# Set matplotlib backend
-matplotlib.use('Agg')
 
 # Set Chinese fonts
 plt.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei', 'SimSun', 'DejaVu Sans']
@@ -68,9 +65,54 @@ class ChartConfig:
     ylabel: str = ""
     caption: str = ""
     source: str = "Public data compilation"
+    subtitle: str = ""
+    unit: str = ""
+    data_ref: str = ""
     width: int = 9
     height: int = 5.5
     dpi: int = 150
+
+
+@dataclass(frozen=True)
+class ChartSpec:
+    """Canonical, auditable chart contract used before rendering.
+
+    ``ChartConfig`` remains the renderer-facing compatibility shape.  New
+    production callers should construct ``ChartSpec`` so the analytical
+    question, grain, denominator, and provenance travel with the data.
+    """
+    chart_type: ChartType
+    title: str
+    data: Dict[str, Any]
+    question: str
+    takeaway: str = ""
+    subtitle: str = ""
+    unit: str = ""
+    denominator: str = ""
+    data_grain: str = ""
+    time_range: str = ""
+    source: str = "Public data compilation"
+    data_ref: str = ""
+    xlabel: str = ""
+    ylabel: str = ""
+    caption: str = ""
+
+    def to_config(self) -> ChartConfig:
+        """Convert the audited contract to the legacy renderer config."""
+        subtitle_parts = [part for part in (self.subtitle, self.takeaway) if part]
+        context_parts = [part for part in (self.denominator, self.data_grain, self.time_range) if part]
+        return ChartConfig(
+            chart_type=self.chart_type,
+            title=self.title,
+            data=self.data,
+            xlabel=self.xlabel,
+            ylabel=self.ylabel,
+            caption=self.caption,
+            source=self.source,
+            subtitle=" · ".join(subtitle_parts + context_parts),
+            unit=self.unit,
+            data_ref=self.data_ref,
+        )
 
 
 @dataclass
@@ -149,12 +191,13 @@ class ChartGenerator:
         self._gold = self._rgb(*self.COLORS['gold'])
         self._char = self._rgb(*self.COLORS['charcoal'])
         self._chart_counter = 0
+        self._generator_id = uuid.uuid4().hex[:10]
     
     def _rgb(self, r: int, g: int, b: int) -> Tuple[float, float, float]:
         """Convert RGB to matplotlib format"""
         return (r/255, g/255, b/255)
     
-    def generate(self, config: ChartConfig) -> ChartResult:
+    def generate(self, config: ChartConfig | ChartSpec) -> ChartResult:
         """
         Generate chart
         
@@ -165,6 +208,14 @@ class ChartGenerator:
             ChartResult generation result
         """
         try:
+            if isinstance(config, ChartSpec):
+                if not config.question.strip():
+                    return ChartResult(success=False, error="chart question is required")
+                config = config.to_config()
+            validation_error = self._validate_config(config)
+            if validation_error:
+                return ChartResult(success=False, error=validation_error)
+
             # Select generation method based on type
             handlers = {
                 ChartType.BAR: self._generate_bar,
@@ -193,20 +244,242 @@ class ChartGenerator:
                 success=True,
                 image_path=image_path
             )
-            
         except Exception as e:
             logger.error(f"Chart generation failed: {e}", exc_info=True)
             return ChartResult(
                 success=False,
                 error=str(e)
             )
-    
+
+    @staticmethod
+    def _is_finite_number(value: Any, allow_none: bool = False) -> bool:
+        """Return whether a chart value is a finite real number."""
+        if value is None:
+            return allow_none
+        if isinstance(value, bool):
+            return False
+        try:
+            return math.isfinite(float(value))
+        except (TypeError, ValueError, OverflowError):
+            return False
+
+    @classmethod
+    def _validate_numeric_sequence(
+        cls, values: Any, field: str, allow_none: bool = False
+    ) -> Optional[str]:
+        if not isinstance(values, (list, tuple, np.ndarray)):
+            return f"{field} must be a sequence"
+        for index, value in enumerate(values):
+            if not cls._is_finite_number(value, allow_none=allow_none):
+                return f"{field}[{index}] must be a finite number"
+        return None
+
+    @classmethod
+    def _validate_config(cls, config: ChartConfig) -> Optional[str]:
+        """Validate chart data before any renderer is allowed to run.
+
+        A chart file is not evidence of a valid chart.  This boundary rejects
+        malformed or mixed-grain payloads instead of silently truncating them
+        inside individual renderers.
+        """
+        if not isinstance(config, ChartConfig):
+            return "config must be a ChartConfig"
+        if not isinstance(config.title, str) or not config.title.strip():
+            return "chart title is required"
+        if not isinstance(config.data, dict):
+            return "chart data must be a mapping"
+
+        data = config.data
+        chart_type = config.chart_type
+
+        def require_equal_lengths(*named_values: Tuple[str, Any]) -> Optional[str]:
+            lengths = {name: len(value) for name, value in named_values}
+            if len(set(lengths.values())) != 1:
+                return "chart series lengths must match: " + ", ".join(
+                    f"{name}={length}" for name, length in lengths.items()
+                )
+            return None
+
+        if chart_type in (ChartType.BAR, ChartType.HBAR):
+            categories = data.get("labels", data.get("categories"))
+            if not isinstance(categories, (list, tuple)) or not categories:
+                return "bar chart requires non-empty categories"
+            values = data.get("values")
+            if values is not None:
+                error = require_equal_lengths(("categories", categories), ("values", values))
+                if error:
+                    return error
+                return cls._validate_numeric_sequence(values, "values")
+            series = data.get("series")
+            if not isinstance(series, list) or not series:
+                return "bar chart requires values or a non-empty series list"
+            for index, item in enumerate(series):
+                if not isinstance(item, dict):
+                    return f"series[{index}] must be a mapping"
+                error = require_equal_lengths(
+                    ("categories", categories), (f"series[{index}].values", item.get("values", []))
+                )
+                if error:
+                    return error
+                error = cls._validate_numeric_sequence(item.get("values", []), f"series[{index}].values", allow_none=True)
+                if error:
+                    return error
+            return None
+
+        if chart_type == ChartType.BAR_LINE:
+            years = data.get("years")
+            bars = data.get("bar")
+            lines = data.get("line")
+            if not isinstance(years, (list, tuple)) or not years:
+                return "bar_line chart requires non-empty years"
+            if not isinstance(bars, (list, tuple)) or not isinstance(lines, (list, tuple)):
+                return "bar_line chart requires bar and line sequences"
+            error = require_equal_lengths(("years", years), ("bar", bars), ("line", lines))
+            if error:
+                return error
+            error = cls._validate_numeric_sequence(bars, "bar")
+            return error or cls._validate_numeric_sequence(lines, "line", allow_none=True)
+
+        if chart_type == ChartType.LINE:
+            years = data.get("years", data.get("x"))
+            scenarios = data.get("scenarios")
+            if scenarios is None and "y" in data:
+                scenarios = {data.get("series_name", "Series 1"): data.get("y")}
+            if not isinstance(years, (list, tuple)) or not years:
+                return "line chart requires non-empty x/years"
+            if not isinstance(scenarios, dict) or not scenarios:
+                return "line chart requires at least one named series"
+            for label, values in scenarios.items():
+                if not isinstance(label, str) or not label.strip():
+                    return "line series names must be non-empty strings"
+                error = require_equal_lengths(("years", years), (f"series[{label}].values", values))
+                if error:
+                    return error
+                error = cls._validate_numeric_sequence(values, f"series[{label}].values", allow_none=True)
+                if error:
+                    return error
+            return None
+
+        if chart_type == ChartType.PIE:
+            labels = data.get("labels", data.get("categories"))
+            values = data.get("values")
+            if not isinstance(labels, (list, tuple)) or not labels:
+                return "pie chart requires non-empty labels"
+            if not isinstance(values, (list, tuple)):
+                return "pie chart requires values"
+            error = require_equal_lengths(("labels", labels), ("values", values))
+            if error:
+                return error
+            error = cls._validate_numeric_sequence(values, "values")
+            if error:
+                return error
+            if any(float(value) < 0 for value in values) or sum(float(value) for value in values) <= 0:
+                return "pie chart values must be non-negative and have a positive total"
+            return None
+
+        if chart_type == ChartType.SCATTER:
+            x_values = data.get("x")
+            y_values = data.get("y")
+            if not isinstance(x_values, (list, tuple)) or not isinstance(y_values, (list, tuple)):
+                return "scatter chart requires x and y sequences"
+            error = require_equal_lengths(("x", x_values), ("y", y_values))
+            if error:
+                return error
+            error = cls._validate_numeric_sequence(x_values, "x")
+            if error:
+                return error
+            error = cls._validate_numeric_sequence(y_values, "y")
+            if error:
+                return error
+            labels = data.get("labels", [])
+            if labels and len(labels) != len(x_values):
+                return "scatter labels length must match x and y"
+            return None
+
+        if chart_type == ChartType.BUBBLE:
+            sectors = data.get("sectors")
+            if not isinstance(sectors, list) or not sectors:
+                return "bubble chart requires a non-empty sectors list"
+            for index, item in enumerate(sectors):
+                if not isinstance(item, dict):
+                    return f"sectors[{index}] must be a mapping"
+                for key in ("x", "y"):
+                    if not cls._is_finite_number(item.get(key)):
+                        return f"sectors[{index}].{key} must be a finite number"
+                if not cls._is_finite_number(item.get("size", 10)) or float(item.get("size", 10)) < 0:
+                    return f"sectors[{index}].size must be a non-negative number"
+            return None
+
+        if chart_type == ChartType.WATERFALL:
+            factors = data.get("factors")
+            if not isinstance(factors, list) or not factors:
+                return "waterfall chart requires a non-empty factors list"
+            for index, item in enumerate(factors):
+                if not isinstance(item, dict) or not str(item.get("label", "")).strip():
+                    return f"factors[{index}] requires a label"
+                if not cls._is_finite_number(item.get("value")):
+                    return f"factors[{index}].value must be a finite number"
+            return None
+
+        if chart_type == ChartType.QUADRANT:
+            players = data.get("players")
+            if not isinstance(players, list):
+                return "quadrant chart requires a players list"
+            for index, item in enumerate(players):
+                if not isinstance(item, dict) or not str(item.get("name", "")).strip():
+                    return f"players[{index}] requires a name"
+                for key in ("x", "y"):
+                    if not cls._is_finite_number(item.get(key)):
+                        return f"players[{index}].{key} must be a finite number"
+            return None
+
+        if chart_type == ChartType.RADAR:
+            categories = data.get("categories")
+            if not isinstance(categories, (list, tuple)) or not categories:
+                return "radar chart requires non-empty categories"
+            scenarios = data.get("scenarios")
+            if scenarios is not None:
+                if not isinstance(scenarios, dict) or not scenarios:
+                    return "radar scenarios must be a non-empty mapping"
+                for label, values in scenarios.items():
+                    error = require_equal_lengths(("categories", categories), (f"series[{label}].values", values))
+                    if error:
+                        return error
+                    error = cls._validate_numeric_sequence(values, f"series[{label}].values")
+                    if error:
+                        return error
+            else:
+                values = data.get("values")
+                error = require_equal_lengths(("categories", categories), ("values", values)) if isinstance(values, (list, tuple)) else "radar chart requires values or scenarios"
+                if error:
+                    return error
+                return cls._validate_numeric_sequence(values, "values")
+            return None
+
+        return f"unsupported chart type: {chart_type}"
+
     def _create_figure(self, config: ChartConfig) -> Tuple[plt.Figure, plt.Axes]:
         """Create figure"""
         fig, ax = plt.subplots(figsize=(config.width, config.height))
         fig.patch.set_facecolor('white')
         ax.set_facecolor('#FAFAFA')
         return fig, ax
+
+    def _set_title(self, ax: plt.Axes, config: ChartConfig, pad: int = 12) -> None:
+        """Apply a consistent title and optional evidence subtitle."""
+        ax.set_title(config.title, fontsize=12, fontweight='bold', pad=pad, color=self._char)
+        subtitle_parts = [part for part in (config.subtitle, config.unit) if part]
+        if subtitle_parts:
+            ax.text(
+                0.0,
+                1.01,
+                " · ".join(subtitle_parts),
+                transform=ax.transAxes,
+                ha="left",
+                va="bottom",
+                fontsize=8,
+                color="#666666",
+            )
     
     def _add_annotations(self, fig: plt.Figure, config: ChartConfig) -> None:
         """Add caption and source text below the chart"""
@@ -224,12 +497,52 @@ class ChartGenerator:
         if config:
             self._add_annotations(fig, config)
         self._chart_counter += 1
-        image_path = str(self.output_dir / f"{name}_{self._chart_counter}.png")
+        image_path = str(
+            self.output_dir /
+            f"{name}_{self._generator_id}_{self._chart_counter}.png"
+        )
         dpi = config.dpi if config else 150
         fig.savefig(image_path, dpi=dpi, bbox_inches='tight',
                    facecolor='white', edgecolor='none')
         plt.close(fig)
+        self._validate_rendered_image(image_path)
         return image_path
+
+    @staticmethod
+    def _validate_rendered_image(image_path: str) -> None:
+        """Reject corrupt or empty render artifacts at the renderer boundary."""
+        path = Path(image_path)
+        if not path.is_file() or path.stat().st_size < 1024:
+            raise ValueError(f"rendered chart artifact is missing or empty: {image_path}")
+        try:
+            from PIL import Image
+
+            with Image.open(path) as image:
+                if image.width < 320 or image.height < 180:
+                    raise ValueError(f"rendered chart is too small: {image.width}x{image.height}")
+                image.verify()
+        except ImportError:
+            logger.debug("Pillow unavailable; skipped image integrity verification")
+
+    @staticmethod
+    def _scale_padding(values: List[float], minimum: float = 1.0) -> float:
+        """Return a scale-relative padding instead of a fixed data-unit offset."""
+        magnitude = max((abs(float(value)) for value in values), default=0.0)
+        return max(magnitude * 0.08, minimum)
+
+    @staticmethod
+    def _set_numeric_limits(axis, values: List[float], horizontal: bool = False) -> None:
+        """Keep absolute bar comparisons honest while supporting signed values."""
+        numeric = [float(value) for value in values if value is not None]
+        if not numeric:
+            return
+        padding = ChartGenerator._scale_padding(numeric)
+        lower = min(0.0, min(numeric))
+        upper = max(0.0, max(numeric))
+        if horizontal:
+            axis.set_xlim(lower - padding if lower < 0 else 0, upper + padding)
+        else:
+            axis.set_ylim(lower - padding if lower < 0 else 0, upper + padding)
     
     def _generate_bar(self, config: ChartConfig) -> str:
         """Generate bar chart (single series or grouped)"""
@@ -265,8 +578,10 @@ class ChartGenerator:
                         label = f'{val:.1f}'
                     else:
                         label = f'{val:.2f}'
-                    ax.text(bar.get_x() + bar.get_width()/2, bar.get_height(),
-                           label, ha='center', va='bottom', fontsize=7, color=self._char)
+                    offset = self._scale_padding([v for v in s_values if v is not None], minimum=0.01)
+                    label_y = bar.get_height() + (offset if val >= 0 else -offset)
+                    ax.text(bar.get_x() + bar.get_width()/2, label_y,
+                           label, ha='center', va='bottom' if val >= 0 else 'top', fontsize=7, color=self._char)
             
             ax.set_xticks(x)
             ax.legend(fontsize=8, loc='best')
@@ -288,13 +603,19 @@ class ChartGenerator:
                     label = f'{val:.1f}'
                 else:
                     label = f'{val:.2f}'
-                ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.5,
-                       label, ha='center', va='bottom', fontsize=9, color=self._char)
+                offset = self._scale_padding(values, minimum=0.01)
+                ax.text(bar.get_x() + bar.get_width()/2,
+                       bar.get_height() + (offset if val >= 0 else -offset),
+                       label, ha='center', va='bottom' if val >= 0 else 'top', fontsize=9, color=self._char)
+
+            self._set_numeric_limits(ax, values)
         
         ax.set_xticks(x)
-        ax.set_xticklabels(categories, fontsize=9, rotation=15)
+        rotation = 30 if any(len(str(category)) > 8 for category in categories) else 0
+        ax.set_xticklabels(categories, fontsize=9, rotation=rotation,
+                           ha='right' if rotation else 'center')
         ax.set_ylabel(config.ylabel, fontsize=10)
-        ax.set_title(config.title, fontsize=12, fontweight='bold', pad=12, color=self._char)
+        self._set_title(ax, config)
         ax.spines['top'].set_visible(False)
         ax.grid(axis='y', linestyle='--', alpha=0.4, zorder=0)
         
@@ -324,7 +645,8 @@ class ChartGenerator:
                 label = f'{val:.1f}'
             else:
                 label = f'{val:.2f}'
-            x_pos = bar.get_width() + 5 if val >= 0 else bar.get_width() - 5
+            offset = self._scale_padding(values, minimum=0.01)
+            x_pos = bar.get_width() + offset if val >= 0 else bar.get_width() - offset
             ha = 'left' if val >= 0 else 'right'
             ax.text(x_pos, bar.get_y() + bar.get_height()/2,
                    label, va='center', ha=ha, fontsize=9, color=self._char)
@@ -332,9 +654,10 @@ class ChartGenerator:
         ax.set_yticks(y)
         ax.set_yticklabels(labels, fontsize=10)
         ax.set_xlabel(config.xlabel or config.ylabel, fontsize=10)
-        ax.set_title(config.title, fontsize=12, fontweight='bold', pad=12, color=self._char)
+        self._set_title(ax, config)
         ax.spines['top'].set_visible(False)
         ax.grid(axis='x', linestyle='--', alpha=0.4, zorder=0)
+        self._set_numeric_limits(ax, values, horizontal=True)
         ax.invert_yaxis()
         
         return self._save_figure(fig, f"hbar_{hash(config.title) % 10000}", config)
@@ -349,6 +672,8 @@ class ChartGenerator:
         bar_label = data.get('bar_label', '')
         line_label = data.get('line_label', '')
 
+        if not years or not bar_values or not line_values:
+            raise ValueError("bar_line chart requires years, bar and line data")
         x = np.arange(len(years))
         w = 0.5
 
@@ -388,7 +713,7 @@ class ChartGenerator:
         ax.set_xticks(x)
         ax.set_xticklabels(years, fontsize=9)
         ax.set_ylabel(config.ylabel or bar_label, fontsize=10)
-        ax.set_title(config.title, fontsize=12, fontweight='bold', pad=12, color=self._char)
+        self._set_title(ax, config)
         ax.spines['top'].set_visible(False)
         ax.grid(axis='y', linestyle='--', alpha=0.4, zorder=0)
 
@@ -440,33 +765,50 @@ class ChartGenerator:
             autotext.set_fontsize(9)
             autotext.set_fontweight('bold')
         
-        ax.set_title(config.title, fontsize=12, fontweight='bold', pad=12, color=self._char)
+        self._set_title(ax, config)
         
         return self._save_figure(fig, f"pie_{hash(config.title) % 10000}", config)
     
     def _generate_line(self, config: ChartConfig) -> str:
         """Generate line chart"""
         fig, ax = self._create_figure(config)
-        
+
         data = config.data
-        years = data.get('years', [])
-        scenarios = data.get('scenarios', {})
-        
+        # Accept both the planner format (years/scenarios) and the generic
+        # x/y format used by callers and ChartConfig examples.
+        years = data.get('years', data.get('x', []))
+        scenarios = data.get('scenarios')
+        if scenarios is None and 'y' in data:
+            scenarios = {data.get('series_name', 'Series 1'): data.get('y', [])}
+        scenarios = scenarios or {}
+
+        if not years or not scenarios:
+            plt.close(fig)
+            raise ValueError("line chart requires x/years and at least one series")
+
         x = np.arange(len(years))
         line_colors = [self._navy, self._gold, '#7EB5A6', '#E8836B', '#8E558E', '#CBAE7F', '#4A90D9', '#5B8DB8']
         line_styles = ['-', '--', '-.', ':']
 
+        plotted = 0
         for i, (label, vals) in enumerate(scenarios.items()):
             col = line_colors[i % len(line_colors)]
             ls = line_styles[i % len(line_styles)]
             ax.plot(x, vals, marker='o', linewidth=2, color=col,
                    linestyle=ls, label=label, zorder=3)
+            plotted += 1
+
+        if not plotted:
+            plt.close(fig)
+            raise ValueError("line chart has no non-empty series")
         
         ax.set_xticks(x)
         ax.set_xticklabels(years, fontsize=9)
         ax.set_ylabel(config.ylabel, fontsize=10)
-        ax.set_title(config.title, fontsize=12, fontweight='bold', pad=12, color=self._char)
-        ax.legend(fontsize=9, loc='upper left')
+        self._set_title(ax, config)
+        handles, labels = ax.get_legend_handles_labels()
+        if handles:
+            ax.legend(handles, labels, fontsize=9, loc='upper left')
         ax.spines['top'].set_visible(False)
         ax.grid(linestyle='--', alpha=0.4, zorder=0)
         
@@ -512,7 +854,7 @@ class ChartGenerator:
             all_vals = data.get('values', [])
         max_val = max(all_vals) if all_vals else 100
         ax.set_ylim(0, max(max_val * 1.1, 100))
-        ax.set_title(config.title, fontsize=12, fontweight='bold', pad=20)
+        self._set_title(ax, config, pad=20)
 
         plt.tight_layout()
         return self._save_figure(fig, f"radar_{hash(config.title) % 10000}", config)
@@ -534,7 +876,7 @@ class ChartGenerator:
         
         ax.set_xlabel(config.xlabel, fontsize=10)
         ax.set_ylabel(config.ylabel, fontsize=10)
-        ax.set_title(config.title, fontsize=12, fontweight='bold', pad=12, color=self._char)
+        self._set_title(ax, config)
         ax.spines['top'].set_visible(False)
         ax.grid(linestyle='--', alpha=0.4, zorder=0)
         
@@ -555,7 +897,7 @@ class ChartGenerator:
         
         ax.set_xlabel(config.xlabel, fontsize=10)
         ax.set_ylabel(config.ylabel, fontsize=10)
-        ax.set_title(config.title, fontsize=12, fontweight='bold', pad=12, color=self._char)
+        self._set_title(ax, config)
         ax.spines['top'].set_visible(False)
         ax.grid(linestyle='--', alpha=0.4, zorder=0)
         
@@ -622,7 +964,7 @@ class ChartGenerator:
         ax.set_xticklabels(labels, fontsize=8, rotation=20)
         ax.set_ylabel(config.ylabel, fontsize=10)
         ax.axhline(y=0, color='black', linewidth=0.5)
-        ax.set_title(config.title, fontsize=12, fontweight='bold', pad=12, color=self._char)
+        self._set_title(ax, config)
         ax.spines['top'].set_visible(False)
         ax.grid(axis='y', linestyle='--', alpha=0.4, zorder=0)
         
@@ -659,7 +1001,7 @@ class ChartGenerator:
         ax.text(5, 5.3, config.xlabel or '规模', ha='center', fontsize=8, color='gray')
         ax.text(5.3, 5, config.ylabel or '能力', ha='center', va='center', fontsize=8,
                color='gray', rotation=90)
-        ax.set_title(config.title, fontsize=12, fontweight='bold', pad=12, color=self._char)
+        self._set_title(ax, config)
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         
@@ -667,4 +1009,4 @@ class ChartGenerator:
 
 
 # Export
-__all__ = ["ChartGenerator", "ChartConfig", "ChartType", "ChartResult"]
+__all__ = ["ChartGenerator", "ChartConfig", "ChartSpec", "ChartType", "ChartResult"]

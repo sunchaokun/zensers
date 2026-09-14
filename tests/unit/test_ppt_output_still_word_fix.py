@@ -96,7 +96,7 @@ class TestBug3LegacyFallbackIncludesPptx:
 
 class TestBug4RegenerateFromRevisionGeneratesFinalDoc:
     @pytest.mark.asyncio
-    async def test_regenerate_generates_final_doc_for_pptx(self):
+    async def test_regenerate_defers_final_pptx_until_html_confirmation(self):
         from src.api.research_api import ResearchAPI
         api = ResearchAPI.__new__(ResearchAPI)
         api._orchestrator = MagicMock()
@@ -109,9 +109,8 @@ class TestBug4RegenerateFromRevisionGeneratesFinalDoc:
         }
 
         preview_result = {'document_path': 'data/ses_test/report.html'}
-        doc_result = {'document_path': 'data/ses_test/report.pptx'}
         api._orchestrator._document_agent = MagicMock()
-        api._orchestrator._document_agent.execute = AsyncMock(side_effect=[preview_result, doc_result])
+        api._orchestrator._document_agent.execute = AsyncMock(return_value=preview_result)
 
         with patch('src.core.preview_storage.PreviewStorage.copy_file'):
             with patch('src.core.session_streamer.SessionStreamer.push_preview_refresh'):
@@ -122,8 +121,8 @@ class TestBug4RegenerateFromRevisionGeneratesFinalDoc:
                     mock_path_cls.return_value = mock_path
                     await api._regenerate_from_revision('ses_test', session, [])
 
-        assert session['research_result']['document_path'].endswith('.pptx')
-        assert api._orchestrator._document_agent.execute.call_count == 2
+        assert session['research_result']['document_path'].endswith('.html')
+        assert api._orchestrator._document_agent.execute.call_count == 1
 
     @pytest.mark.asyncio
     async def test_regenerate_skips_final_doc_for_html_format(self):
