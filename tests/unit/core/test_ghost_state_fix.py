@@ -521,5 +521,13 @@ class TestEdgeCases:
                                             api._llm_converse("test_ses", "hello"),
                                             timeout=30,
                                         )
-                                        error_calls = [c for c in mock_logger.error.call_args_list if "API quota exhausted" in str(c)]
+                                        error_calls = [
+                                            c
+                                            for calls in (
+                                                mock_logger.error.call_args_list,
+                                                mock_logger.exception.call_args_list,
+                                            )
+                                            for c in calls
+                                            if "API quota exhausted" in str(c)
+                                        ]
                                         assert len(error_calls) > 0

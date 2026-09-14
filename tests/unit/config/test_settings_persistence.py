@@ -103,7 +103,10 @@ class TestLegacyMigration:
         s = Settings()
         s._llm_config_persist_path = llm_path
         s._load_llm_config_from_disk()
-        del s.llm_profiles.profiles["migrated"]
+        # The normal Settings instance already contains YAML-defined
+        # profiles.  Isolate the legacy migration contract so the test does
+        # not depend on the repository's configured profile set.
+        s.llm_profiles = LLMProfileRegistry(default_profile="migrated")
         s._migrate_legacy_to_profile()
         migrated = s.llm_profiles.profiles["migrated"]
         assert migrated.model == "gpt-4o"

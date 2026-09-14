@@ -345,15 +345,17 @@ class TestHTMLToPDFConverterErrorHandling:
         
         assert result is not None
     
-    def test_invalid_output_path(self, converter):
-        """测试无效输出路径"""
+    def test_nested_output_path_is_created(self, converter, tmp_path):
+        """转换器应创建缺失的输出目录。"""
         html = "<article><p>内容</p></article>"
         
-        output_path = "/nonexistent/path/test.pdf"
-        
+        # The converter deliberately creates missing output directories.
+        output_path = str(tmp_path / "missing-parent" / "test.pdf")
+
         result = converter.convert(html, output_path)
-        
-        assert result.success is False or result.error is not None
+
+        assert result.success is True
+        assert os.path.exists(output_path)
 
 
 class TestHTMLToPDFConverterResult:

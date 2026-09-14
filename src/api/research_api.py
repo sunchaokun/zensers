@@ -1454,7 +1454,14 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
                             for piece_type, piece_text in stream_filter.flush():
                                 _publish_stream_piece(piece_type, piece_text)
 
-                        await _collect_stream()
+                        # Bound the stream itself, rather than the whole
+                        # dialogue request, so a provider that emits a
+                        # partial response and then hangs can still degrade
+                        # to the non-streaming fallback below.
+                        await asyncio.wait_for(
+                            _collect_stream(),
+                            timeout=STREAM_TIMEOUT,
+                        )
                     except Exception as stream_err:
                         stream_error = stream_err
 
