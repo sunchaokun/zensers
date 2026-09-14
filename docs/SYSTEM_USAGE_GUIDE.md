@@ -1,6 +1,6 @@
 ﻿# Zensers System Usage Guide
 
-> Version: v1.2 | Updated: 2026-05-04
+> Version: v3.6.0 | Updated: 2026-09-06
 
 ---
 
@@ -18,6 +18,7 @@ Zensers is an automated market research report generation system that completes 
 | Professional Report Generation | McKinsey-style reports, including charts, statistics, analysis |
 | Quality Check | Automatically check content completeness, data accuracy |
 | Checkpoint Recovery | Supports task pause, resume, revision |
+| Evidence-grounded revision | L0-L5 audits emit issues; ReportAgent searches, repairs, re-audits, and persists evidence identities |
 
 ---
 

@@ -6,7 +6,6 @@ goal: Conduct comprehensive research and provide actionable insights
 backstory: You are a versatile research analyst capable of conducting research across multiple domains and synthesizing information into clear conclusions.
 skills:
   required:
-    - llm_skill
     - search_skill
   optional:
     - file_skill

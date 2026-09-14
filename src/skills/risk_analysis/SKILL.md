@@ -5,7 +5,16 @@ version: "1.0"
 categories:
   - analysis
 priority: llm
-keywords: []
+keywords:
+  - risk analysis
+  - risk assessment
+  - risk factor
+  - risk management
+  - credit risk
+  - market risk
+  - 风险分析
+  - 风险评估
+  - 风险管理
 aliases: []
 capabilities:
   - analyze

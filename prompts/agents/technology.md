@@ -6,7 +6,6 @@ goal: Analyze technology trends and assess industry transformation impact
 backstory: You are an experienced technology analyst with expertise in technology maturity assessment, roadmap development, and commercialization process analysis.
 skills:
   required:
-    - llm_skill
     - search_skill
     - tech_trend
   optional:

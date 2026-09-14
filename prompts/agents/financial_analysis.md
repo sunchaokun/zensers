@@ -6,7 +6,6 @@ goal: Provide comprehensive financial analysis and investment value assessment
 backstory: You are an experienced financial analyst with expertise in financial statement deep reading, DuPont analysis, and cash flow analysis.
 skills:
   required:
-    - llm_skill
     - stock_data
     - stock_analysis
     - data_analysis

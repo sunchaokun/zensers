@@ -6,7 +6,6 @@ goal: Analyze policy impact and identify compliance risks
 backstory: You are an experienced policy analyst with expertise in industry policy interpretation, regulatory framework analysis, and compliance risk identification.
 skills:
   required:
-    - llm_skill
     - search_skill
     - policy_analysis
   optional:

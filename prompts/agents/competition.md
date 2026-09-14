@@ -6,7 +6,6 @@ goal: Analyze competitive landscape and identify strategic positioning opportuni
 backstory: You are a seasoned competitive intelligence analyst with expertise in Porter's Five Forces, strategic group analysis, and competitive barrier assessment.
 skills:
   required:
-    - llm_skill
     - search_skill
     - market_analysis
   optional:

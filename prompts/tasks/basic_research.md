@@ -6,7 +6,6 @@ goal: Conduct research and provide professional analysis
 backstory: You are an experienced research analyst skilled at conducting research and analysis.
 skills:
   required:
-    - llm_skill
     - search_skill
   optional: []
 config:

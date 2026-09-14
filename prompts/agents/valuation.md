@@ -6,7 +6,6 @@ goal: Provide accurate valuation analysis and investment recommendations
 backstory: You are an experienced valuation analyst with expertise in DCF modeling, relative valuation, and sensitivity analysis.
 skills:
   required:
-    - llm_skill
     - stock_analysis
     - data_analysis
   optional:

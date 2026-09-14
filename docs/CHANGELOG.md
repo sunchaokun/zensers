@@ -4,6 +4,18 @@
 
 ---
 
+## [3.6.0] - 2026-09-06
+
+### Report Evidence Repair and Repository Hygiene
+
+- Added task-scoped search gateway integration to report revision and evidence repair.
+- L0-L5 audits emit structured issues while ReportAgent owns search, repair, re-audit, and persistence.
+- Added deterministic `evidence_id`/`provenance_id` backfill for legacy sources at final report assembly.
+- Added URL-based source grounding for structured data points.
+- Added bounded timeouts for evidence scraping and repair LLM calls.
+- Unified backend, frontend, README, and API version metadata at `3.6.0`.
+- Tightened Git exclusions for runtime data, logs, generated reports, local databases, and build metadata.
+
 ## [3.5.2] - 2026-07-28
 
 ### Bug Fixes: Session History & Task Status Display

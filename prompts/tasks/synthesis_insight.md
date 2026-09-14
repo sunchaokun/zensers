@@ -5,8 +5,7 @@ role: Insight Extraction Specialist
 goal: Extract 3-5 most valuable insights from research sections
 backstory: You are an experienced analyst skilled at identifying key insights with strategic value.
 skills:
-  required:
-    - llm_skill
+  required: []
   optional: []
 config:
   max_queries: 0

@@ -62,11 +62,10 @@ def test_get_local_version_from_env(monkeypatch):
 
 
 def test_get_local_version_from_file():
-    """回退到 VERSION 文件"""
+    """回退到 pyproject.toml 中的唯一版本源"""
     os.environ.pop("ZENSERS_VERSION", None)
     ver = get_local_version()
-    # VERSION 文件内容为 "1.0.0"
-    assert ver == "1.0.0", f"Expected 1.0.0, got {ver}"
+    assert ver == "3.6.0", f"Expected 3.6.0, got {ver}"
 
 
 # ================================================================

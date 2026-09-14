@@ -1,6 +1,8 @@
 ﻿# Zensers Quick Start Guide
 
 > Get started with the automated market research report generation system in 5 minutes
+>
+> Version: v3.6.0
 
 ---
 
@@ -25,11 +27,13 @@ Edit the `.env` file and fill in your API keys:
 
 ```env
 # OpenAI compatible interface (required)
-OPENAI_API_KEY=sk-xxxxx
-OPENAI_API_BASE=https://api.openai.com/v1
+LLM_API_KEY=sk-xxxxx
+LLM_BASE_URL=https://api.openai.com/v1
+LLM_MODEL=gpt-4o
 
-# Search service (optional)
-TAVILY_API_KEY=tvly-xxxxx
+# Search service (recommended for evidence repair)
+ANYSEARCH_API_KEY=xxxxx
+ANYSEARCH_API_BASE_URL=https://api.anysearch.com
 ```
 
 ---
@@ -168,7 +172,7 @@ The system supports multiple report templates:
 
 ### Q1: API Key configuration error?
 
-Make sure `OPENAI_API_KEY` in the `.env` file is correct and the API service is accessible.
+Make sure `LLM_API_KEY` and `LLM_BASE_URL` in the `.env` file are correct and the API service is accessible.
 
 ### Q2: Report generation failed?
 
@@ -176,10 +180,10 @@ Check the log file `logs/Zensers.log` for specific error information.
 
 ### Q3: How to use local model?
 
-Modify `OPENAI_API_BASE` in `.env` to point to your local model service:
+Modify `LLM_BASE_URL` in `.env` to point to your local model service:
 
 ```env
-OPENAI_API_BASE=http://localhost:8000/v1
+LLM_BASE_URL=http://localhost:8000/v1
 ```
 
 ### Q4: Where is the output directory?

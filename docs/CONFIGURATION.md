@@ -25,6 +25,8 @@ Reference: `.env.example`
 | `REDIS_PASSWORD` | Redis password | Yes (if Redis enabled) |
 | `CORS_ORIGINS` | Allowed CORS origins (comma-separated) | Yes (production) |
 | `ZENSERS_API_URL` | API server URL for CLI | No |
+| `ANYSEARCH_API_KEY` | Search provider API key used by research and report repair | Recommended for production |
+| `ANYSEARCH_API_BASE_URL` | Search provider endpoint | `https://api.anysearch.com` |
 
 ### Knowledge Auto-Import (Optional)
 
@@ -104,6 +106,11 @@ search:
   min_sources: 8
   region: "cn-cn"
 ```
+
+The report revision loop uses the shared SearchGateway. L0-L5 produce issues;
+the ReportAgent performs evidence search and repair directly. Keep the search
+key in `.env`; never place it in source code, reports, logs, or committed
+configuration files.
 
 ### MCP Settings
 

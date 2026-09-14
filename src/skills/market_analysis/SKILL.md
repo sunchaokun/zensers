@@ -5,7 +5,15 @@ version: "1.0"
 categories:
   - analysis
 priority: llm
-keywords: []
+keywords:
+  - market analysis
+  - competitive landscape
+  - market share
+  - market size
+  - 行业分析
+  - 竞争格局
+  - 市场份额
+  - 市场规模
 aliases: []
 capabilities:
   - analyze

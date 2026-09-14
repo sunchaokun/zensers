@@ -5,7 +5,15 @@ version: "1.0"
 categories:
   - analysis
 priority: llm
-keywords: []
+keywords:
+  - policy analysis
+  - regulation analysis
+  - compliance
+  - government policy
+  - regulatory impact
+  - 政策分析
+  - 监管分析
+  - 合规分析
 aliases: []
 capabilities:
   - analyze

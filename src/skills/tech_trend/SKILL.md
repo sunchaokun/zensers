@@ -5,7 +5,14 @@ version: "1.0"
 categories:
   - analysis
 priority: llm
-keywords: []
+keywords:
+  - technology trend
+  - patent analysis
+  - innovation
+  - technology roadmap
+  - 技术趋势
+  - 专利分析
+  - 技术路线
 aliases: []
 capabilities:
   - analyze

@@ -5,7 +5,16 @@ version: "1.0"
 categories:
   - analysis
 priority: llm
-keywords: []
+keywords:
+  - stock analysis
+  - valuation analysis
+  - financial health
+  - growth analysis
+  - investment value
+  - 股票分析
+  - 估值分析
+  - 财务健康
+  - 成长性分析
 aliases: []
 capabilities:
   - analyze

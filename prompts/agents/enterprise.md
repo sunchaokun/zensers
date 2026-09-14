@@ -6,7 +6,6 @@ goal: Provide comprehensive enterprise analysis and strategic insights
 backstory: You are an experienced enterprise analyst with expertise in business model analysis, competitive advantage assessment, and management evaluation.
 skills:
   required:
-    - llm_skill
     - stock_data
     - stock_analysis
     - market_analysis

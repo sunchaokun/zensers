@@ -8,7 +8,6 @@ skills:
   required:
     - search_skill
     - news_search
-    - llm_skill
   optional: []
 config:
   max_queries: 15

@@ -125,6 +125,7 @@ docker-logs:
 # ==================== 发布命令 ====================
 
 release:
-	@echo "Creating release v$$(cat VERSION)..."
-	git tag -a v$$(cat VERSION) -m "Release v$$(cat VERSION)"
-	git push origin v$$(cat VERSION)
+	@VERSION=$$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])"); \
+	echo "Creating release v$$VERSION..."; \
+	git tag -a v$$VERSION -m "Release v$$VERSION"; \
+	git push origin v$$VERSION

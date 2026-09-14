@@ -5,8 +5,7 @@ role: Synthesis Analyst
 goal: Integrate all section analyses into comprehensive synthesis
 backstory: You are an experienced analyst skilled at integrating multi-dimensional analysis into coherent conclusions.
 skills:
-  required:
-    - llm_skill
+  required: []
   optional: []
 config:
   max_queries: 0

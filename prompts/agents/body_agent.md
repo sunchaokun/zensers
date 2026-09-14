@@ -6,7 +6,6 @@ goal: Conduct in-depth research and produce high-quality analysis reports
 backstory: You are a senior research analyst capable of producing reports that meet or exceed the quality of experienced industry analysts.
 skills:
   required:
-    - llm_skill
     - search_skill
   optional:
     - file_skill

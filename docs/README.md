@@ -1,6 +1,6 @@
 ﻿# Zensers Documentation Center
 
-> **Streamlined Knowledge Base** - 33 Core Documents
+> **Maintained Documentation** - Zensers v3.6.0
 
 ---
 
@@ -12,6 +12,10 @@
 | Architect | [ORCHESTRATOR_REDESIGN.md](./KNOWLEDGE_BASE/02_ARCHITECTURE/ORCHESTRATOR_REDESIGN.md) |
 | Developer | [AGENT_SESSION_MANAGEMENT.md](./AGENT_SESSION_MANAGEMENT.md) |
 | User | [SYSTEM_USAGE_GUIDE.md](./SYSTEM_USAGE_GUIDE.md) |
+
+For the shortest path, read [QUICK_START.md](./QUICK_START.md) first. Runtime
+outputs, logs, caches, local databases, and one-off analysis notes stay local
+and are excluded from Git; this index focuses on maintained documentation.
 
 ---
 
@@ -68,6 +72,7 @@ docs/
 | **Integration Fixes** | Complete | Survey data flow, chart generation, quality check |
 | **CLI Integration** | Complete | survey command group (8 subcommands) |
 | **Statistics Engine** | Complete | t-test, ANOVA, chi-square, non-parametric tests |
+| **Evidence-grounded report revision** | Complete for report generation | L0-L5 issue production, ReportAgent search/repair loop, source identity persistence |
 
 ---
 
@@ -97,4 +102,4 @@ See [CHANGELOG.md](./CHANGELOG.md)
 
 ---
 
-> Updated: 2026-04-19 | Document count: 33 (streamlined from 72)
+> Updated: 2026-09-06 | Version: v3.6.0

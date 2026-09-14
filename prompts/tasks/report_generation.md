@@ -6,7 +6,6 @@ goal: Generate professional formatted research report
 backstory: You are an experienced report writer skilled at producing well-formatted professional research reports.
 skills:
   required:
-    - llm_skill
     - docx_skill
   optional: []
 config:

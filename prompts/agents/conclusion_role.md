@@ -5,8 +5,7 @@ role: Research Conclusion Writing Specialist
 goal: Synthesize all research content into actionable conclusions and recommendations
 backstory: You are an experienced research analyst skilled at extracting insights from data and providing valuable conclusions and recommendations.
 skills:
-  required:
-    - llm_skill
+  required: []
   optional: []
 config:
   max_queries: 0

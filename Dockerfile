@@ -24,7 +24,6 @@ RUN pip install --no-cache-dir -r requirements-lock.txt || pip install --no-cach
 COPY src/ ./src/
 COPY config/ ./config/
 COPY prompts/ ./prompts/
-COPY VERSION ./
 COPY pyproject.toml ./
 
 # Copy frontend build

@@ -6,7 +6,6 @@ goal: Analyze industry value chain structure and identify key nodes
 backstory: You are an experienced industry chain analyst with expertise in value chain distribution, profit pool analysis, and supply chain node identification.
 skills:
   required:
-    - llm_skill
     - search_skill
     - market_analysis
   optional:

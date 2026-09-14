@@ -6,12 +6,12 @@
 
 | 机制 | 位置 | 特性 |
 |------|------|------|
-| `LLMSkill` (llm_skill) | `src/skills/llm_skill.py` (委托模式) | Skill 接口，**已委托到 `call_llm()`**，DEPRECATED |
+| `LLMSkill` (llm_skill) | 已删除 | 不再作为 Skill 注册；LLM 是 Agent 的内在能力 |
 | `call_llm()` | `src/core/llm_client.py` (384行) | 独立工具函数，支持 profile 路由、fallback、streaming、vision、sync wrapper |
 
 **核心矛盾**：`LLMSkill` 是早期将 LLM 能力建模为"外部技能"的设计产物。实际上 LLM 是 Agent 的内在能力，不应经过 Skill 注册表。`call_llm()` 已是更完善、更底层的实现。
 
-**当前状态**：迁移已完成，`llm_skill.py` 保留为向后兼容委托（DEPRECATED），所有 `execute()` 内部转发到 `call_llm()`。
+**当前状态**：迁移和清理已完成。`llm_skill.py`、`LLMSkill` 导出、注册表自动注册及运行时 prompt 元数据中的 `llm_skill` 均已移除。所有 LLM 调用统一通过 `call_llm()` 或其流式/同步封装完成。
 
 ## 2. 迁移完成状态
 
@@ -61,8 +61,8 @@
 | generic_agent.py | `ACTION_TO_SKILL` 中 LLM 映射改为 `None`；内在 LLM 路径走 `call_llm()` |
 | semantic_intent.py | 移除所有 `"llm_skill"` 字符串和追加逻辑 |
 | skill_keywords.py | 移除 `LLM_FALLBACK_SKILL` 和 fallback 注入 |
-| registry.py | `CATEGORY_TO_SKILLS` 移除 `"llm_skill"`；移除 `llm_skill` 特殊分支；**保留 `llm_skill` 自动注册（委托模式）** |
-| factory.py | `_SKILL_ALIAS_MAP` 中 `"llm_skill"` → `"data_analysis"`；fallback 改为 warning |
+| registry.py | `CATEGORY_TO_SKILLS` 移除 `"llm_skill"`；移除特殊分支和自动注册 |
+| factory.py | 不再把 `"llm_skill"` 当作 Skill 或别名；未知 Skill 仅记录 warning 并过滤 |
 | intelligent_routing_adapter.py | 移除 `self._llm_skill`；7 个 `recommended_skills` 移除 `"llm_skill"` |
 | task_structure.py | 默认技能从 `["llm_skill"]` → `[]`；初始集合从 `{"llm_skill"}` → `set()` |
 | prompt_manager.py | 默认返回从 `["llm_skill", "search_skill"]` → `["search_skill"]` |
@@ -78,36 +78,34 @@
 | `asyncio.run()` 条件性风险 | `sentiment.py` | → `call_llm_sync()` |
 | `.is_available()` 不存在 | `simulation_engine.py` | 移除检查 |
 
-### 2.4 llm_skill.py 委托模式 ✅
+### 2.4 llm_skill 彻底清理 ✅
 
-`llm_skill.py` 已重写为委托模式：
-- 移除直接 `AsyncOpenAI` 调用和 `_call_llm()` 私有方法
-- `execute()` 全部委托到 `call_llm()`
-- 标记 `DEPRECATED`
-- `skills/__init__.py` 保留 `LLMSkill` 导出
-- `registry.py` 保留 `llm_skill` 自动注册
+`llm_skill.py` 已删除，不再保留兼容层：
+- 不再存在 `LLMSkill` 类或 `llm_skill` 注册项
+- `skills/__init__.py` 不再导出 `LLMSkill`
+- `registry.py` 不再自动注册或特殊处理 `llm_skill`
+- 运行时 prompt 元数据不再声明 `llm_skill`
 
 ## 3. 功能差异对比
 
-| 特性 | `LLMSkill.execute()` (旧) | `call_llm()` | `LLMSkill.execute()` (委托) |
+| 特性 | `LLMSkill.execute()` (旧) | `call_llm()` | 当前实现 |
 |------|--------------------------|-------------|---------------------------|
 | OpenAI 兼容 API | ✅ 直接调用 | ✅ | ✅ 委托到 call_llm |
 | 主/备模型 fallback | ✅ 自行实现 | ✅ | ✅ 继承 call_llm |
 | Profile 路由 | ❌ | ✅ | ✅ 继承 call_llm |
-| Streaming | ❌ | ✅ | ❌ (execute 不支持) |
-| Vision/Multimodal | ❌ | ✅ | ❌ (execute 不支持) |
-| 同步包装 | ❌ | ✅ | ❌ (execute 是 async) |
-| Cost limit 检查 | ✅ 简单估算 | ✅ | ✅ 继承 call_llm |
+| Streaming | ❌ | ✅ | ✅ 通过 `call_llm_stream()` |
+| Vision/Multimodal | ❌ | ✅ | ✅ 通过 `call_llm()` |
+| 同步包装 | ❌ | ✅ | ✅ 通过 `call_llm_sync()` |
+| Cost limit 检查 | ✅ 简单估算 | ✅ | ✅ 由 `call_llm()` 统一处理 |
 
 ## 4. 测试验证
 
-- **84 个迁移专项测试全部通过**（`tests/unit/test_llm_skill_migration.py`）
+- **85 个迁移专项测试全部通过**（`tests/unit/test_llm_skill_migration.py`）
 - 所有 src/ Python 文件语法检查通过
 - 所有修改模块 import 验证通过
 
-## 5. 后续步骤（项目全面验证后）
+## 5. 后续维护
 
-1. 删除 `llm_skill.py`
-2. 移除 `skills/__init__.py` 中的 `LLMSkill` 导出
-3. 移除 `registry.py` 中的 `llm_skill` 自动注册
-4. 清理 3 个向后兼容参数签名（persona_skill, simulation_skill, ai_simulation）
+1. 新增 Skill 时，不要把 LLM 推理能力加入 `required_skills`；需要推理时直接调用 Agent 的 intrinsic LLM 路径。
+2. 新增 prompt 时，仅声明真实存在且可注册的外部 Skill。
+3. 迁移审计测试应继续阻止 `src/` 和运行时 `prompts/` 重新引入 `llm_skill`。

@@ -5,8 +5,7 @@ role: Executive Summary Writing Specialist
 goal: Synthesize all research findings into a concise, impactful executive summary
 backstory: You are an experienced report writer skilled at distilling complex information into clear, actionable insights for decision-makers.
 skills:
-  required:
-    - llm_skill
+  required: []
   optional: []
 config:
   max_queries: 0

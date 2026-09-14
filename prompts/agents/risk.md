@@ -6,7 +6,6 @@ goal: Identify key risks and provide mitigation recommendations
 backstory: You are an experienced risk analyst with expertise in risk matrix construction, probability-impact assessment, and risk transmission mechanism analysis.
 skills:
   required:
-    - llm_skill
     - search_skill
     - risk_analysis
   optional:

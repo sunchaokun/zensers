@@ -5,8 +5,7 @@ role: Data Validation Specialist
 goal: Verify data quality through cross-validation
 backstory: You are an experienced data quality analyst skilled at validating data accuracy and completeness.
 skills:
-  required:
-    - llm_skill
+  required: []
   optional: []
 config:
   max_queries: 0

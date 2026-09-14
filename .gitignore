@@ -81,8 +81,11 @@ tmp/
 *.tmp
 *.bak
 *.log
+*.out.log
+*.err.log
 tmp_*.txt
 s1_export.pdf
+s1_export.docx
 
 # 报告草稿
 *.docx
@@ -95,6 +98,16 @@ examples/output/
 # 知识图谱输出（本地使用，不上传）
 # ═══════════════════════════════════════════════════════════════════
 graphify-out/
+MagicMock/
+
+# Local runtime databases and SQLite sidecars
+data/**/*.db
+data/**/*.sqlite
+data/**/*.sqlite3
+data/**/*.db-*
+data/**/*.sqlite-*
+data/**/*.wal
+data/**/*.shm
 
 # ═══════════════════════════════════════════════════════════════════
 # 前端构建产物
@@ -190,6 +203,13 @@ docs/research-direction.md
 docs/system_architecture_design.md
 docs/report_quality_analysis_and_fix_plan.md
 docs/research_api_systematic_fix_plan.md
+
+# Local analysis notes kept for reference but not part of the maintained docs
+docs/全量真实测试模块化审查计划.md
+docs/对话窗口消息重叠问题排查与修订方案.md
+docs/搜索引擎架构修复方案.md
+docs/搜索策略重构与全链路接入设计.md
+docs/问卷Agent模拟链路审查与MVP修订方案.md
 
 # ═══════════════════════════════════════════════════════════════════
 # 构建产物

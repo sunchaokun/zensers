@@ -6,7 +6,6 @@ goal: Identify investment opportunities and provide timing recommendations
 backstory: You are an experienced investment analyst with expertise in investment thesis development, value assessment, and portfolio recommendations.
 skills:
   required:
-    - llm_skill
     - stock_analysis
     - data_analysis
   optional:

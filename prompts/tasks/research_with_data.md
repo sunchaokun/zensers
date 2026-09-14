@@ -5,8 +5,7 @@ role: Research Analyst
 goal: Analyze collected data and produce professional insights
 backstory: You are an experienced research analyst skilled at extracting insights from data.
 skills:
-  required:
-    - llm_skill
+  required: []
   optional: []
 config:
   max_queries: 0

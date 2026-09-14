@@ -10,7 +10,7 @@
 
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-green.svg)]()
-[![Version](https://img.shields.io/badge/version-2.8.0-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-3.6.0-blue.svg)]()
 [![Next.js 14](https://img.shields.io/badge/Next.js-14-black.svg)]()
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-teal.svg)]()
 
@@ -21,6 +21,10 @@
 [English](README_EN.md) · 快速开始 · [文档](docs/) · [路线图](docs/ROADMAP.md)
 
 </div>
+
+当前版本：**v3.6.0**。版本号唯一来源为 `pyproject.toml`，前端在构建时自动同步。
+
+运行时生成的报告、日志、缓存、数据库和测试产物均保存在本地目录，不应提交到 Git；仓库只保存源码、配置模板、提示词、文档和测试。
 
 ---
 
@@ -46,7 +50,7 @@
 Zensers 编排一支专业 Agent 团队，每个 Agent 负责研究流程中的关键环节：
 
 ```
-需求解析 → 智能澄清 → 意图分析 → 任务分解 → 并行执行 → 结果聚合 → 质量校准 → 文档生成
+需求解析 → 智能澄清 → 意图分析 → 任务分解 → 并行执行 → 结果聚合 → 报告生成 → L0-L5 审计/修订 → 文档生成
 ```
 
 | Agent | 职责 |
@@ -64,6 +68,8 @@ Zensers 编排一支专业 Agent 团队，每个 Agent 负责研究流程中的�
 | DataRepairAgent | 数据缺陷检测与修复 |
 | GlobalReviewAgent | 全局报告审阅与一致性检查 |
 | SurveyAnalysisAgent | 问卷数据分析与可视化 |
+
+报告修订阶段由 ReportAgent/ReportOrchestrator 直接调用搜索网关补充证据；L0-L5 只负责发现并输出结构化 issue，不直接改写报告。每条来源在最终装配阶段统一生成 `evidence_id` 和 `provenance_id`，便于断点恢复和审计追踪。
 
 ### 七层架构
 

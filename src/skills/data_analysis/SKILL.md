@@ -5,7 +5,18 @@ version: "1.0"
 categories:
   - analysis
 priority: llm
-keywords: []
+keywords:
+  - data analysis
+  - statistical analysis
+  - quantitative analysis
+  - cagr
+  - cr3
+  - hhi
+  - descriptive statistics
+  - 统计分析
+  - 定量分析
+  - 集中度
+  - 描述性统计
 aliases: []
 capabilities:
   - analyze
