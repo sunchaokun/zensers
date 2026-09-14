@@ -1,12 +1,14 @@
 // hooks/useResearch.ts
 
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useResearchStore } from '@/store/useResearchStore';
 import { useChatStore } from '@/store/useChatStore';
 import { useSettingsStore } from '@/store/useSettingsStore';
 import { useSessionStore } from '@/store/useSessionStore';
 import { api, ApiError } from '@/lib/api';
 import { collectTemplateContext } from '@/lib/templates';
+import { normalizeChatMessage } from '@/lib/normalize-message';
+import { withSelectedConfig } from '@/lib/mimo-config';
 import { nanoid } from 'nanoid';
 
 /**
@@ -33,6 +35,22 @@ export function useResearch() {
   const [isWaitingForReply, setIsWaitingForReply] = useState(false);
   const isProcessing = isNetworkBusy || isWaitingForReply; // backward compat
   const [error, setError] = useState<ApiError | null>(null);
+  const currentRequestRef = useRef<AbortController | null>(null);
+
+  useEffect(() => () => {
+    currentRequestRef.current?.abort();
+    currentRequestRef.current = null;
+  }, []);
+
+  const stopCurrentResponse = useCallback(() => {
+    currentRequestRef.current?.abort();
+    currentRequestRef.current = null;
+    setIsNetworkBusy(false);
+    setIsWaitingForReply(false);
+  }, []);
+
+  const isActiveSession = (expectedId: string | null) =>
+    !!expectedId && useSessionStore.getState().activeId === expectedId;
 
   /**
    * Quick start research (using preset template)
@@ -47,9 +65,10 @@ export function useResearch() {
   ) => {
     setIsNetworkBusy(true);
     setError(null);
+    const originSessionId = useSessionStore.getState().activeId;
 
     try {
-      const llmConfig = {
+      const llmConfig = withSelectedConfig({
         provider: llm.provider,
         model: selectedModel || llm.model,
         apiKey: llm.apiKey,
@@ -59,7 +78,7 @@ export function useResearch() {
         topP: llm.topP,
         frequencyPenalty: llm.frequencyPenalty,
         presencePenalty: llm.presencePenalty,
-      };
+      });
 
       // S14: strip control/context fields from parameters
       const { autoConfirm: _flag, templateContext: _ctx, ...paramValues } = customParams || {};
@@ -71,15 +90,12 @@ export function useResearch() {
         autoConfirm,
       });
 
-      // I8: exclude __pending__ session from message merge
-      const prevId = useSessionStore.getState().activeId;
-      const isPending = prevId === '__pending__';
-      const prevMessages = (!isPending && prevId)
-        ? useSessionStore.getState().sessions[prevId]?.messages || []
-        : [];
+      if (useSessionStore.getState().activeId !== originSessionId) return null;
 
       useResearchStore.getState().setSessionId(data.session_id);
-      useSessionStore.getState().createSession(data.session_id, input, prevMessages);
+      // Quick start creates a new research session; never inherit the active
+      // conversation. Only the current request's own messages are eligible.
+      useSessionStore.getState().createSession(data.session_id, input, []);
 
       setTaskId(data.task_id);
 
@@ -101,7 +117,7 @@ export function useResearch() {
         addMessage({
           id: nanoid(),
           role: 'assistant',
-          content: data.message || `Template loaded. Configure parameters to continue.`,
+          content: normalizeChatMessage(data.message) || `Template loaded. Configure parameters to continue.`,
           timestamp: new Date().toISOString(),
         });
       } else {
@@ -110,7 +126,7 @@ export function useResearch() {
         addMessage({
           id: nanoid(),
           role: 'assistant',
-          content: data.message || `Quick start successful.`,
+          content: normalizeChatMessage(data.message) || `Quick start successful.`,
           timestamp: new Date().toISOString(),
         });
       }
@@ -135,6 +151,7 @@ export function useResearch() {
   ) => {
     setIsNetworkBusy(true);
     setError(null);
+    const originSessionId = useSessionStore.getState().activeId;
 
     try {
       // If there are files, upload first
@@ -145,7 +162,7 @@ export function useResearch() {
       }
 
       // Build LLM config
-      const llmConfig = {
+      const llmConfig = withSelectedConfig({
         provider: llm.provider,
         model: selectedModel || llm.model,
         apiKey: llm.apiKey,
@@ -155,12 +172,17 @@ export function useResearch() {
         topP: llm.topP,
         frequencyPenalty: llm.frequencyPenalty,
         presencePenalty: llm.presencePenalty,
-      };
+      });
 
       const data = await api.startResearch(input, undefined, llmConfig, fileIds);
 
-      const existingMsgs = useChatStore.getState().messages;
-      const initialMsgs = existingMsgs.length > 0 ? existingMsgs : [
+      if (useSessionStore.getState().activeId !== originSessionId) return null;
+
+      const sessionStore = useSessionStore.getState();
+      const pendingMessages = sessionStore.activeId === '__pending__'
+        ? sessionStore.sessions.__pending__?.messages || []
+        : [];
+      const initialMsgs = pendingMessages.length > 0 ? pendingMessages : [
         { id: nanoid(), role: 'user' as const, content: input, timestamp: new Date().toISOString() },
       ];
 
@@ -182,7 +204,7 @@ export function useResearch() {
       addMessage({
         id: nanoid(),
         role: 'assistant',
-        content: data.message,
+        content: normalizeChatMessage(data.message),
         ...(data.thinking_content ? { thinkingContent: data.thinking_content } : {}),
         timestamp: respTimestamp,
       });
@@ -208,6 +230,7 @@ export function useResearch() {
 
     try {
       const data = await api.selectOutputType(sessionId, outputType);
+      if (!isActiveSession(sessionId)) return null;
       setStep(
         data.step,
         data.options ||
@@ -222,7 +245,7 @@ export function useResearch() {
         addMessage({
           id: nanoid(),
           role: 'assistant',
-          content: data.message,
+          content: normalizeChatMessage(data.message),
           timestamp: new Date().toISOString(),
         });
       }
@@ -247,6 +270,7 @@ export function useResearch() {
 
     try {
       const data = await api.selectTemplate(sessionId, templateId);
+      if (!isActiveSession(sessionId)) return null;
       // Preserve required field for SectionSelector
       setStep(
         data.step,
@@ -264,7 +288,7 @@ export function useResearch() {
         addMessage({
           id: nanoid(),
           role: 'assistant',
-          content: data.message,
+          content: normalizeChatMessage(data.message),
           timestamp: new Date().toISOString(),
         });
       }
@@ -289,6 +313,7 @@ export function useResearch() {
 
     try {
       const data = await api.selectSections(sessionId, sectionIds);
+      if (!isActiveSession(sessionId)) return null;
 
       if (data.parameters) {
         setStep(data.step, undefined);
@@ -301,7 +326,7 @@ export function useResearch() {
         addMessage({
           id: nanoid(),
           role: 'assistant',
-          content: data.message,
+          content: normalizeChatMessage(data.message),
           timestamp: new Date().toISOString(),
         });
       }
@@ -326,7 +351,8 @@ export function useResearch() {
       setError(null);
 
       try {
-        const data = await api.setParameters(sessionId, params);
+      const data = await api.setParameters(sessionId, params);
+      if (!isActiveSession(sessionId)) return null;
 
         if (data.summary) {
           setSummary(data.summary);
@@ -341,7 +367,7 @@ export function useResearch() {
           addMessage({
             id: nanoid(),
             role: 'assistant',
-            content: data.message,
+            content: normalizeChatMessage(data.message),
             timestamp: new Date().toISOString(),
           });
         }
@@ -368,6 +394,7 @@ export function useResearch() {
 
     try {
       const data = await api.confirmResearch(sessionId, confirmed);
+      if (!isActiveSession(sessionId)) return null;
 
       if (confirmed && data.step === 6 && data.status === 'running') {
         setTaskId(data.session_id);
@@ -386,7 +413,7 @@ export function useResearch() {
         addMessage({
           id: nanoid(),
           role: 'assistant',
-          content: data.message,
+          content: normalizeChatMessage(data.message),
           timestamp: new Date().toISOString(),
         });
       }
@@ -439,24 +466,22 @@ export function useResearch() {
    */
   const sendMessage = useCallback(async (text: string) => {
     const currentSessionId = useResearchStore.getState().sessionId;
-    const { status: rsStatus, taskId: rsTaskId } = useResearchStore.getState();
+    const { taskId: rsTaskId } = useResearchStore.getState();
 
     if (!currentSessionId) {
       if (rsTaskId) {
-        try {
-          const resumeResult = await api.resumeResearch(rsTaskId);
-          if (resumeResult.status === 'resumed') {
-            useResearchStore.getState().setStatus('running');
-            useResearchStore.getState().setSessionId(rsTaskId);
-          }
-        } catch (e) {
-          console.error('Failed to resume by taskId:', e);
-        }
-        const recoveredSessionId = useResearchStore.getState().sessionId || rsTaskId;
+        // A task id can recover the session identity, but must not implicitly
+        // resume the task. The user's message must first go through the
+        // backend intent router (resume / modify / re-plan / chat).
+        useResearchStore.getState().setSessionId(rsTaskId);
+        const recoveredSessionId = rsTaskId;
         if (recoveredSessionId) {
           try {
             setIsNetworkBusy(true);
-            const data = await api.sendChatMessage(recoveredSessionId, text, {
+            const requestController = new AbortController();
+            currentRequestRef.current?.abort();
+            currentRequestRef.current = requestController;
+            const data = await api.sendChatMessage(recoveredSessionId, text, withSelectedConfig({
               provider: llm.provider,
               model: llm.model,
               apiKey: llm.apiKey,
@@ -466,7 +491,8 @@ export function useResearch() {
               topP: llm.topP,
               frequencyPenalty: llm.frequencyPenalty,
               presencePenalty: llm.presencePenalty,
-            });
+            }), requestController.signal);
+            if (!isActiveSession(recoveredSessionId)) return null;
             if ((data as any).status === 'processing') {
               setStep(0, undefined);
               setIsNetworkBusy(false);
@@ -474,6 +500,15 @@ export function useResearch() {
               return data;
             }
             const mode = data.mode || 'chat';
+        const controlStatus = (data as any).status;
+        if (controlStatus === 'resumed' || controlStatus === 'running') {
+          setStatus('running');
+          setStep(6, undefined);
+        } else if (controlStatus === 'paused') {
+          setStatus('paused');
+        } else if (controlStatus === 'cancelled') {
+          setStatus('cancelled');
+        }
         if (mode === 'framework') {
           setStatus('idle');
           setStep(0, data.suggestions || data.options);
@@ -493,7 +528,7 @@ export function useResearch() {
             addMessage({
               id: nanoid(),
               role: 'assistant',
-              content: data.message,
+              content: normalizeChatMessage(data.message),
               ...(data.thinking_content ? { thinkingContent: data.thinking_content } : {}),
               timestamp: (data as any).timestamp || new Date().toISOString(),
             });
@@ -506,15 +541,6 @@ export function useResearch() {
         }
       }
       return startResearch(text);
-    }
-
-    if (rsStatus === 'paused' && rsTaskId) {
-      try {
-        await api.resumeResearch(rsTaskId);
-        useResearchStore.getState().setStatus('running');
-      } catch (e) {
-        console.error('Failed to resume research:', e);
-      }
     }
 
     if (!currentSessionId) {
@@ -534,7 +560,10 @@ export function useResearch() {
       // Chat mode: send message
       try {
         setIsNetworkBusy(true);
-        const data = await api.sendChatMessage(currentSessionId, text, {
+         const requestController = new AbortController();
+         currentRequestRef.current?.abort();
+         currentRequestRef.current = requestController;
+         const data = await api.sendChatMessage(currentSessionId, text, withSelectedConfig({
           provider: llm.provider,
           model: llm.model,
           apiKey: llm.apiKey,
@@ -544,7 +573,8 @@ export function useResearch() {
           topP: llm.topP,
           frequencyPenalty: llm.frequencyPenalty,
           presencePenalty: llm.presencePenalty,
-        });
+         }), requestController.signal);
+        if (!isActiveSession(currentSessionId)) return null;
         
       // Async tool execution path: returns processing status, SSE pushes results later
         if ((data as any).status === 'processing') {
@@ -556,6 +586,15 @@ export function useResearch() {
 
         // Update state based on returned mode
         const mode = data.mode || 'chat';
+        const controlStatus = (data as any).status;
+        if (controlStatus === 'resumed' || controlStatus === 'running') {
+          setStatus('running');
+          setStep(6, undefined);
+        } else if (controlStatus === 'paused') {
+          setStatus('paused');
+        } else if (controlStatus === 'cancelled') {
+          setStatus('cancelled');
+        }
         
         if (mode === 'framework') {
           setStatus('idle');
@@ -580,16 +619,20 @@ export function useResearch() {
         addMessage({
           id: nanoid(),
           role: 'assistant',
-          content: data.message,
+          content: normalizeChatMessage(data.message),
           ...(data.thinking_content ? { thinkingContent: data.thinking_content } : {}),
           timestamp: (data as any).timestamp || new Date().toISOString(),
         });
         
         return data;
       } catch (e) {
+        if ((e as any)?.code === 'ERR_CANCELED' || (e as any)?.name === 'CanceledError' || (e as any)?.name === 'AbortError') {
+          return null;
+        }
         setError(e as ApiError);
         throw e;
       } finally {
+        currentRequestRef.current = null;
         setIsNetworkBusy(false);
       }
     }
@@ -625,7 +668,8 @@ export function useResearch() {
     if (currentStep === null || currentStep === 0) {
       try {
         setIsNetworkBusy(true);
-        const data = await api.clickSuggestion(sessionId!, optionId, exampleText, {
+        const targetSessionId = sessionId!;
+        const data = await api.clickSuggestion(targetSessionId, optionId, exampleText, withSelectedConfig({
           provider: llm.provider,
           model: llm.model,
           apiKey: llm.apiKey,
@@ -635,7 +679,8 @@ export function useResearch() {
           topP: llm.topP,
           frequencyPenalty: llm.frequencyPenalty,
           presencePenalty: llm.presencePenalty,
-        });
+        }));
+        if (!isActiveSession(targetSessionId)) return null;
         
         // Update state based on returned mode
         const mode = data.mode || 'chat';
@@ -658,7 +703,7 @@ export function useResearch() {
           addMessage({
             id: nanoid(),
             role: 'assistant',
-            content: data.message,
+            content: normalizeChatMessage(data.message),
             ...(data.thinking_content ? { thinkingContent: data.thinking_content } : {}),
             timestamp: new Date().toISOString(),
           });
@@ -703,6 +748,7 @@ export function useResearch() {
     isNetworkBusy,
     isWaitingForReply,
     setIsWaitingForReply,
+    stopCurrentResponse,
     error,
     sessionId,
     currentStep,

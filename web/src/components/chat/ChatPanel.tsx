@@ -21,9 +21,44 @@ import { ResearchStatusBar } from './ResearchStatusBar';
 import { VirtualMessageList } from './VirtualMessageList';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
-import { ArrowDown, Brain } from 'lucide-react';
+import { ArrowDown, Brain, CheckCircle2, Loader2, XCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { parseTemplateCommand, RESEARCH_TEMPLATES, formatTemplateMessage, formatTemplateList, formatTemplateNotFound, extractTemplateKeyword } from '@/lib/templates';
+import { normalizeChatMessage, isStructuredMessagePrefix } from '@/lib/normalize-message';
+import { isInternalChatMessage } from '@/lib/chat-message-utils';
+import { hasMeaningfulChatResponse, shouldClearWaitingForStatus, shouldTrackResponseId } from '@/lib/chat-response-utils';
+
+type AgentActivity = AgentMessageData & { completedCount?: number; totalCount?: number };
+
+function cleanAgentActivityText(content: string) {
+  return content
+    .replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCodePoint(parseInt(code, 16)))
+    .replace(/^\*\*[^*]+\*\*:?\s*/i, '')
+    .trim();
+}
+
+function AgentActivityBar({ activities }: { activities: AgentActivity[] }) {
+  if (activities.length === 0) return null;
+  return (
+    <div className="mx-4 mt-2 space-y-1.5" aria-live="polite" aria-label="Agent activity">
+      {activities.map((activity) => {
+        const Icon = activity.action === 'completed' ? CheckCircle2 : activity.action === 'error' ? XCircle : Loader2;
+        const tone = activity.action === 'completed'
+          ? 'text-green-600 border-green-200 bg-green-50'
+          : activity.action === 'error'
+            ? 'text-red-600 border-red-200 bg-red-50'
+            : 'text-blue-600 border-blue-200 bg-blue-50';
+        return (
+          <div key={activity.agent_id} className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-xs ${tone}`}>
+            <Icon className={`h-3.5 w-3.5 shrink-0 ${activity.action === 'searching' || activity.action === 'analyzing' ? 'animate-spin' : ''}`} />
+            <span className="font-medium whitespace-nowrap">{activity.agent_name}：</span>
+            <span className="min-w-0 truncate">{cleanAgentActivityText(activity.content)}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
 export function ChatPanel() {
   const { messages, addMessage, updateMessage, appendStreamToken } = useChatStore();
@@ -36,7 +71,6 @@ export function ChatPanel() {
     summary,
     framework,
     reset,
-    clearResearch,
     phases,
     progress,
   } = useResearchStore();
@@ -53,7 +87,15 @@ export function ChatPanel() {
     isNetworkBusy,
     isWaitingForReply,
     setIsWaitingForReply,
+    stopCurrentResponse,
   } = useResearch();
+  const activeSessionLanguage = useSessionStore((s) =>
+    s.activeId ? s.sessions[s.activeId]?.language : undefined
+  );
+  const reportContext = useSessionStore((s) =>
+    s.activeId ? s.sessions[s.activeId]?.reportContext : null
+  );
+  const isRestoringSession = useSessionStore((s) => s.isRestoring);
 
   // Research progress stream (closes on task complete)
   const sseId = sessionId || taskId;
@@ -62,22 +104,25 @@ export function ChatPanel() {
   // Tracks the currently streaming message ID for token-by-token updates
   const streamingMsgIdRef = useRef<string | null>(null);
   const streamingDoneRef = useRef(false);
-  const sessionIdRef = useRef(sessionId);
-  sessionIdRef.current = sessionId;
+  const streamingTokenBufferRef = useRef('');
+  const handledResponseIdsRef = useRef<Set<string>>(new Set());
 
   const searchStateTimerRef = useRef<ReturnType<typeof setTimeout>>();
-  const waitingTimeoutRef = useRef<ReturnType<typeof setTimeout>>();
+  const [agentActivities, setAgentActivities] = useState<AgentActivity[]>([]);
+  const [controlBusy, setControlBusy] = useState(false);
 
   // Persistent session stream (stays alive, unaffected by task complete)
   // Receives chat_response + chat_token + agent_message events
   useSessionStream(sessionId, {
     onChatToken: (data: ChatTokenData) => {
       const storeSessionId = useSessionStore.getState().activeId;
-      const matches = data.session_id === sessionIdRef.current
-        || data.session_id === taskId
-        || data.session_id === storeSessionId;
+      const matches = !!storeSessionId && data.session_id === storeSessionId;
       if (!matches) return;
       if (streamingDoneRef.current) return;
+
+      streamingTokenBufferRef.current += data.token;
+      const tokenText = streamingTokenBufferRef.current.trimStart();
+      if (isStructuredMessagePrefix(tokenText)) return;
 
       if (!streamingMsgIdRef.current) {
         streamingMsgIdRef.current = nanoid();
@@ -98,9 +143,7 @@ export function ChatPanel() {
     },
     onChatThinking: (data: ChatThinkingData) => {
       const storeSessionId = useSessionStore.getState().activeId;
-      const matches = data.session_id === sessionIdRef.current
-        || data.session_id === taskId
-        || data.session_id === storeSessionId;
+      const matches = !!storeSessionId && data.session_id === storeSessionId;
       if (!matches) return;
       if (streamingDoneRef.current) return;
 
@@ -124,9 +167,7 @@ export function ChatPanel() {
     },
     onChatResponse: (data) => {
       const storeSessionId = useSessionStore.getState().activeId;
-      const matches = data.session_id === sessionIdRef.current
-        || data.session_id === taskId
-        || data.session_id === storeSessionId;
+      const matches = !!storeSessionId && data.session_id === storeSessionId;
       if (!matches) return;
 
       if (streamingDoneRef.current) return;
@@ -136,24 +177,42 @@ export function ChatPanel() {
       );
       if (existingAssistantMsg) return;
 
-      let finalContent = data.message;
+      const finalContent = normalizeChatMessage(data.message);
       let finalThinking: string | undefined = data.thinking_content;
 
-      const trimmed = finalContent.trim();
-      if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
-        try {
-          const parsed = JSON.parse(trimmed);
-          if (parsed.message && typeof parsed.message === 'string') {
-            finalContent = parsed.message;
-          }
-        } catch {}
+      // A transport/ack event can be labelled chat_response while carrying no
+      // LLM text. It must not end the waiting indicator or finalize an empty
+      // assistant bubble; keep the request visibly pending until real text,
+      // an error, cancellation, or the existing timeout arrives.
+      const currentStreamingMessage = streamingMsgIdRef.current
+        ? useChatStore.getState().messages.find((message) => message.id === streamingMsgIdRef.current)
+        : undefined;
+      if (!hasMeaningfulChatResponse(finalContent)
+        && !hasMeaningfulChatResponse(currentStreamingMessage?.content)) {
+        useResearchStore.getState().setSearchState('searching');
+        return;
       }
+
+      // Do not let an empty transport acknowledgement reserve the id of the
+      // real response that follows it.
+      if (shouldTrackResponseId(data.response_id, finalContent, finalThinking, currentStreamingMessage?.content)) {
+        if (handledResponseIdsRef.current.has(data.response_id)) return;
+        handledResponseIdsRef.current.add(data.response_id);
+      }
+
+      // Do not replace a valid streamed answer with an empty terminal event.
+      const resolvedContent = hasMeaningfulChatResponse(finalContent)
+        ? finalContent
+        : currentStreamingMessage?.content || '';
 
       if (streamingMsgIdRef.current) {
         updateMessage(streamingMsgIdRef.current, {
-          content: finalContent,
+          content: resolvedContent,
           ...(finalThinking !== undefined ? { thinkingContent: finalThinking } : {}),
-          metadata: { status: 'done' },
+          metadata: {
+            status: 'done',
+            ...(data.response_id ? { responseId: data.response_id } : {}),
+          },
         });
         streamingMsgIdRef.current = null;
         streamingDoneRef.current = true;
@@ -164,9 +223,15 @@ export function ChatPanel() {
           content: finalContent,
           ...(finalThinking !== undefined ? { thinkingContent: finalThinking } : {}),
           timestamp: data.timestamp || new Date().toISOString(),
+          ...(data.response_id ? { metadata: { responseId: data.response_id, status: 'done' } } : {}),
         });
         streamingDoneRef.current = true;
       }
+      streamingTokenBufferRef.current = '';
+
+      // Agent/tool notifications are transient UI state. They must never be
+      // inserted into the persisted conversation timeline.
+      setAgentActivities([]);
 
       setIsWaitingForReply(false);
 
@@ -214,7 +279,6 @@ export function ChatPanel() {
       const rs = useResearchStore.getState();
       if (rs.status !== 'running') {
         setIsWaitingForReply(false);
-        clearTimeout(waitingTimeoutRef.current);
       }
       clearTimeout(searchStateTimerRef.current);
       searchStateTimerRef.current = setTimeout(() => {
@@ -223,7 +287,7 @@ export function ChatPanel() {
     },
     onAgentMessage: (data: AgentMessageData) => {
       const storeSessionId = useSessionStore.getState().activeId;
-      if (data.session_id === sessionId || data.session_id === storeSessionId) {
+      if (storeSessionId && data.session_id === storeSessionId) {
         if (data.action === 'heartbeat') {
           const progressMatch = data.content.match(/\((\d+)%\s*complete\)/);
           if (progressMatch) {
@@ -235,74 +299,32 @@ export function ChatPanel() {
           }
           return;
         }
-        const MERGEABLE_IDS = ['web_search', 'news_search', 'scrape_url'];
-        if (MERGEABLE_IDS.includes(data.agent_id) && data.action !== 'error') {
-          const msgs = useChatStore.getState().messages;
-          const existing = [...msgs].reverse().find(
-            m => m.role === 'agent' && m.agent?.id === data.agent_id && m.agent?.action !== 'heartbeat' && m.agent?.action !== 'error'
-          );
-          if (existing) {
-            const prevCompleted = existing.agent?.completedCount || 0;
-            const prevTotal = existing.agent?.totalCount || 0;
-            const isCompleted = data.action === 'completed';
-            const newCompleted = isCompleted ? prevCompleted + 1 : prevCompleted;
-            const newTotal = isCompleted ? Math.max(prevTotal, newCompleted) : prevTotal;
-            const displayAction = (isCompleted && newCompleted < newTotal) ? existing.agent!.action : data.action;
-            updateMessage(existing.id, {
-              content: data.content,
-              timestamp: data.timestamp,
-              agent: {
-                ...existing.agent!,
-                action: displayAction,
-                completedCount: newCompleted,
-                totalCount: newTotal,
-              },
-            });
-            return;
-          }
+        setAgentActivities((current) => {
           const isCompleted = data.action === 'completed';
-          addMessage({
-            id: nanoid(),
-            role: 'agent',
-            content: data.content,
-            timestamp: data.timestamp,
-            agent: {
-              id: data.agent_id,
-              name: data.agent_name,
-              action: data.action,
-              completedCount: isCompleted ? 1 : 0,
-              totalCount: isCompleted ? 1 : 0,
-            },
-          });
-          return;
-        }
-        const updatableActions = ['searching', 'writing'] as const;
-        if (updatableActions.includes(data.action as any)) {
-          const msgs = useChatStore.getState().messages;
-          const lastSame = [...msgs].reverse().find(
-            m => m.role === 'agent' && m.agent?.id === data.agent_id && m.agent?.action === data.action
-          );
-          if (lastSame) {
-            updateMessage(lastSame.id, { content: data.content, timestamp: data.timestamp });
-            return;
-          }
-        }
-        addMessage({
-          id: nanoid(),
-          role: 'agent',
-          content: data.content,
-          timestamp: data.timestamp,
-          agent: { id: data.agent_id, name: data.agent_name, action: data.action },
+          const existing = current.find((item) => item.agent_id === data.agent_id);
+          const completedCount = (existing?.completedCount || 0) + (isCompleted ? 1 : 0);
+          const totalCount = Math.max(existing?.totalCount || 0, completedCount);
+          const next: AgentActivity = {
+            ...data,
+            completedCount,
+            totalCount,
+          };
+          return existing
+            ? current.map((item) => item.agent_id === data.agent_id ? next : item)
+            : [...current, next];
         });
       }
     },
   });
 
+  useEffect(() => {
+    setAgentActivities([]);
+  }, [sessionId]);
+
   // Cleanup timer on unmount (Oracle MAJOR)
   useEffect(() => {
     return () => {
       clearTimeout(searchStateTimerRef.current);
-      clearTimeout(waitingTimeoutRef.current);
     };
   }, []);
 
@@ -326,14 +348,15 @@ export function ChatPanel() {
         const currentIds = new Set(useChatStore.getState().messages.map(m => m.id));
           const olderMsgs: ChatMessageType[] = result.messages
             .filter((m: any) => !currentIds.has(m.id))
-            .filter((m: any) => !(m.role === 'agent' && m.action === 'heartbeat'))
+            .filter((m: any) => !isInternalChatMessage(m))
             .map((m: any) => ({
             id: m.id || nanoid(),
             role: (m.role === 'user' || m.role === 'assistant' || m.role === 'agent'
               ? m.role
               : 'system') as ChatMessageType['role'],
-            content: m.content,
+            content: normalizeChatMessage(m.content),
             timestamp: m.timestamp || new Date().toISOString(),
+            ...(m.response_id ? { metadata: { responseId: m.response_id } } : {}),
             ...(m.agent_id || m.agent_name || m.action ? {
               agent: {
                 id: m.agent_id || '',
@@ -341,6 +364,10 @@ export function ChatPanel() {
                 action: m.action || '',
                 completedCount: m.completedCount,
                 totalCount: m.totalCount,
+                provider: m.provider,
+                quality_score: m.quality_score,
+                cache_hit: m.cache_hit,
+                stop_reason: m.stop_reason,
               },
             } : {}),
           }));
@@ -364,6 +391,10 @@ export function ChatPanel() {
   useEffect(() => {
     streamingMsgIdRef.current = null;
     streamingDoneRef.current = false;
+    streamingTokenBufferRef.current = '';
+    // Response ids are scoped to a session; do not carry dedup state across
+    // conversations and suppress a valid response in the new session.
+    handledResponseIdsRef.current.clear();
   }, [activeSessionId]);
 
   useEffect(() => {
@@ -381,7 +412,10 @@ export function ChatPanel() {
       if (!hasAssistant) {
         setIsWaitingForReply(true);
       }
-    } else if (status !== 'running') {
+    } else if (shouldClearWaitingForStatus(status)) {
+      // `idle` is also the normal chat-mode status. Do not hide the waiting
+      // indicator merely because the research state is idle while the LLM
+      // response is still pending.
       setIsWaitingForReply(false);
     }
   }, [status, activeSessionId, messages.length]);
@@ -427,9 +461,14 @@ export function ChatPanel() {
   const isChatMode = currentStep === null || currentStep === 0;
 
   const handleSend = async (text: string, attachments?: File[], selectedModel?: string) => {
+    // The visual input may not have re-rendered yet after a sidebar click.
+    // Guard the command path with the authoritative store state as well.
+    if (useSessionStore.getState().isRestoring) return;
+
     // Reset streaming state for new user message
     streamingMsgIdRef.current = null;
     streamingDoneRef.current = false;
+    streamingTokenBufferRef.current = '';
     addMessage({
       id: nanoid(),
       role: 'user',
@@ -505,25 +544,13 @@ export function ChatPanel() {
             addMessage({
               id: msgId,
               role: 'assistant',
-              content: processingMsg || '',
+              content: normalizeChatMessage(processingMsg || ''),
               ...(thinkingContent ? { thinkingContent } : {}),
               timestamp: new Date().toISOString(),
               metadata: { status: thinkingContent ? 'thinking' : 'streaming' },
             });
           }
           useResearchStore.getState().setSearchState('searching');
-          clearTimeout(waitingTimeoutRef.current);
-          waitingTimeoutRef.current = setTimeout(() => {
-            setIsWaitingForReply(false);
-            useResearchStore.getState().setSearchState('idle');
-            if (streamingMsgIdRef.current) {
-              updateMessage(streamingMsgIdRef.current, {
-                metadata: { status: 'done' },
-              });
-              streamingMsgIdRef.current = null;
-              streamingDoneRef.current = true;
-            }
-          }, 300000);
           return;
         }
       } else {
@@ -537,32 +564,19 @@ export function ChatPanel() {
             addMessage({
               id: msgId,
               role: 'assistant',
-              content: processingMsg || '',
+              content: normalizeChatMessage(processingMsg || ''),
               ...(thinkingContent ? { thinkingContent } : {}),
               timestamp: new Date().toISOString(),
               metadata: { status: thinkingContent ? 'thinking' : 'streaming' },
             });
           }
           useResearchStore.getState().setSearchState('searching');
-          clearTimeout(waitingTimeoutRef.current);
-          waitingTimeoutRef.current = setTimeout(() => {
-            setIsWaitingForReply(false);
-            useResearchStore.getState().setSearchState('idle');
-            if (streamingMsgIdRef.current) {
-              updateMessage(streamingMsgIdRef.current, {
-                metadata: { status: 'done' },
-              });
-              streamingMsgIdRef.current = null;
-              streamingDoneRef.current = true;
-            }
-          }, 300000);
           return;
         }
       }
     } catch (error) {
       console.error('Failed to send message:', error);
       setIsWaitingForReply(false);
-      clearTimeout(waitingTimeoutRef.current);
       addMessage({
         id: nanoid(),
         role: 'assistant',
@@ -572,74 +586,49 @@ export function ChatPanel() {
     }
   };
 
-  const handleResume = async () => {
-    if (!taskId) return;
+  const handlePauseResearch = async () => {
+    if (!taskId || status !== 'running' || controlBusy) return;
+    setControlBusy(true);
     try {
-      const result = await api.resumeResearch(taskId);
-      if (result.status === 'resumed') {
-        useResearchStore.getState().setStatus('running');
-        if (!sessionId) {
-          useResearchStore.getState().setSessionId(taskId);
+      const result = await api.pauseResearch(taskId);
+      if (result.status === 'paused' || result.status === 'pausing') {
+        // Preserve the server's intermediate state. Mapping `pausing` back to
+        // `running` makes the UI suggest that the pause failed or never began.
+        // Keep the public UI state deliberately binary: pausing is shown as
+        // paused until the backend confirms the checkpoint is available.
+        useResearchStore.getState().setStatus('paused');
+        setIsWaitingForReply(false);
+        if (result.status === 'paused') {
+          addMessage({
+            id: nanoid(),
+            role: 'assistant',
+            content: result.message || 'Research paused. Progress has been saved.',
+            timestamp: new Date().toISOString(),
+          });
         }
-      } else if (result.status === 'paused' || result.status === 'failed') {
-        useResearchStore.getState().setStatus('idle');
-        addMessage({
-          id: nanoid(),
-          role: 'assistant',
-          content: result.message || 'Research engine has stopped. You can start a new task or continue chatting.',
-          timestamp: new Date().toISOString(),
-        });
-      } else if (result.status === 'cancelled') {
-        useResearchStore.getState().clearResearch();
-        addMessage({
-          id: nanoid(),
-          role: 'assistant',
-          content: result.message || 'Research was cancelled.',
-          timestamp: new Date().toISOString(),
-        });
+      } else {
+        throw new Error(result.message || 'Pause request was not accepted');
       }
     } catch (e) {
-      console.error('Failed to resume research:', e);
+      console.error('Failed to pause research:', e);
+      addMessage({
+        id: nanoid(),
+        role: 'assistant',
+        content: '暂停研究失败，任务仍在原状态运行，请稍后重试。',
+        timestamp: new Date().toISOString(),
+      });
+    } finally {
+      setControlBusy(false);
     }
   };
 
-  const handleCancel = async () => {
-    if (taskId && status === 'running') {
-      try { await api.pauseResearch(taskId); } catch {}
-      useResearchStore.getState().setStatus('paused');
-      setIsWaitingForReply(false);
-      clearTimeout(waitingTimeoutRef.current);
-      addMessage({
-        id: nanoid(),
-        role: 'assistant',
-        content: 'Research paused. Progress has been saved. You can resume later or continue chatting.',
-        timestamp: new Date().toISOString(),
-      });
-      return;
-    }
-    if (sessionId && isWaitingForReply) {
-      try { await api.cancelResearch(sessionId); } catch {}
-      setIsWaitingForReply(false);
-      clearTimeout(waitingTimeoutRef.current);
-      useResearchStore.getState().setSearchState('idle');
-      addMessage({
-        id: nanoid(),
-        role: 'assistant',
-        content: 'Search cancelled.',
-        timestamp: new Date().toISOString(),
-      });
-      return;
-    }
-    if (taskId) {
-      try { await api.cancelResearch(taskId); } catch {}
-      clearResearch();
-    }
-    setIsWaitingForReply(false);
-    clearTimeout(waitingTimeoutRef.current);
+  const handleStopCurrentResponse = () => {
+    stopCurrentResponse();
+    useResearchStore.getState().setSearchState('idle');
     addMessage({
       id: nanoid(),
       role: 'assistant',
-      content: 'Task cancelled. You can continue with new requests.',
+      content: '当前回复已停止。研究任务状态未改变。',
       timestamp: new Date().toISOString(),
     });
   };
@@ -661,7 +650,9 @@ export function ChatPanel() {
       const tpl = useResearchStore.getState().activeTemplate;
       const topic = useResearchStore.getState().researchTopic;
       const baseOptions = stepOptions || [];
-      const isZh = (topic || framework?.topic) ? /[\u4e00-\u9fff]/.test(topic || framework?.topic || '') : false;
+      const isZh = activeSessionLanguage
+        ? activeSessionLanguage.toLowerCase().startsWith('zh')
+        : /[\u4e00-\u9fff]/.test(topic || framework?.topic || '');
 
       if (framework && framework.sections && framework.sections.length > 0 && status === 'idle') {
         const frameworkOptions: SelectOption[] = framework.sections.map((s, i) => ({
@@ -843,6 +834,29 @@ export function ChatPanel() {
           <>
             <SearchIndicator isWaitingForReply={isWaitingForReply} />
             <ResearchStatusBar />
+            <AgentActivityBar activities={agentActivities} />
+            {reportContext && (
+              <div className="mx-4 mt-2 rounded-lg border border-border/60 bg-card/80 px-3 py-2 text-xs">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-medium">报告状态：{reportContext.report_phase}</span>
+                  <span className="text-muted-foreground">v{reportContext.report_version}</span>
+                </div>
+                <div className="mt-1 text-muted-foreground">
+                  {reportContext.sections.length} 个章节 · 质检 {reportContext.quality.overall_status}
+                  {reportContext.quality.open_issue_count > 0
+                    ? ` · ${reportContext.quality.open_issue_count} 个待处理问题`
+                    : ''}
+                </div>
+                {reportContext.pending_decision && (
+                  <div className="mt-1 text-amber-600 dark:text-amber-400">等待你的报告决策</div>
+                )}
+                {Boolean(reportContext.last_revision?.status) && reportContext.last_revision.status !== 'none' && (
+                  <div className="mt-1 text-muted-foreground">
+                    最近修订：{String(reportContext.last_revision.status)}
+                  </div>
+                )}
+              </div>
+            )}
           </>
         }
       />
@@ -859,29 +873,15 @@ export function ChatPanel() {
         ) : null;
       })()}
 
-      {status === 'paused' && taskId && (
+      {(status === 'paused' || status === 'cancelled') && taskId && (
         <div className="px-4 pb-2">
           <div className="space-y-3 p-4 bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-800 rounded-xl mt-2">
             <p className="text-sm font-medium text-amber-800 dark:text-amber-200">
-              研究已暂停
+              {status === 'cancelled' ? '研究已停止' : '研究已暂停'}
             </p>
             <p className="text-xs text-amber-600 dark:text-amber-400">
-              研究任务已暂停，已采集的数据已缓存。您可以恢复研究或取消。
+              已采集的数据和检查点已保留。您可以恢复研究，或直接输入新的要求让系统重新规划方向。
             </p>
-            <div className="flex gap-2">
-              <button
-                onClick={handleResume}
-                className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm font-medium hover:bg-primary/90"
-              >
-                恢复研究
-              </button>
-              <button
-                onClick={handleCancel}
-                className="px-4 py-2 bg-secondary text-secondary-foreground rounded-lg text-sm font-medium hover:bg-secondary/90"
-              >
-                取消
-              </button>
-            </div>
           </div>
         </div>
       )}
@@ -903,13 +903,13 @@ export function ChatPanel() {
       <div className="border-t border-border/50 p-3 pb-5 bg-background">
         <ChatInput
           onSend={handleSend}
-          onCancel={handleCancel}
-          disabled={false}
+          onCancel={isProcessing ? handleStopCurrentResponse : handlePauseResearch}
+          disabled={controlBusy || isRestoringSession}
           isLoading={isProcessing}
           isNetworkBusy={isNetworkBusy}
           isWaitingForReply={isWaitingForReply}
-          isRunning={status === 'running'}
-          isPaused={status === 'paused'}
+          isRunning={status === 'running' || status === 'pausing' || status === 'cancelling'}
+          isPaused={status === 'paused' || status === 'cancelled'}
           placeholder="Describe research needs or /template &lt;name&gt;"
         />
       </div>

@@ -82,10 +82,10 @@ export interface AppSettings {
  */
 export const DEFAULT_SETTINGS: AppSettings = {
   llm: {
-    provider: 'openai',
+    provider: 'mimo',
     apiKey: '',
-    apiEndpoint: 'https://api.openai.com/v1',
-    model: 'gpt-4o',
+    apiEndpoint: 'https://token-plan-cn.xiaomimimo.com/v1',
+    model: 'mimo-v2.5',
     temperature: 0.7,
     maxTokens: 4096,
     topP: 1,

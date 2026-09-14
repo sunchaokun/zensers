@@ -17,7 +17,11 @@ import type {
   ResearchResult,
   ResearchFramework,
   QualityStateData,
+  ReportContextSnapshot,
 } from '@/types/api';
+import { normalizeStepOptions } from '@/lib/normalize-options';
+import { normalizeChatMessage } from '@/lib/normalize-message';
+import { normalizeProgress } from '@/lib/progress';
 
 export interface SessionCache {
   id: string;
@@ -43,10 +47,12 @@ export interface SessionCache {
   language: string;
   mode: string;
   qualityState: QualityStateData | null;
+  reportContext: ReportContextSnapshot | null;
 }
 
 interface SessionRegistry {
   activeId: string | null;
+  isRestoring: boolean;
   sessions: Record<string, SessionCache>;
 
   switchTo: (id: string) => void;
@@ -55,19 +61,41 @@ interface SessionRegistry {
 
   /** Sync state back to cache from Research/Chat store */
   syncActive: (patch: Partial<SessionCache>) => void;
+  applyReportContext: (context: ReportContextSnapshot) => void;
 }
+
+let restoreGeneration = 0;
 
 /**
  * Restore session: fetch details from backend and switch to it.
  * Now preserves execution state instead of resetting to idle.
  */
 export async function restoreSession(id: string): Promise<void> {
+  const generation = ++restoreGeneration;
   const store = useSessionStore.getState();
+  useSessionStore.setState({ isRestoring: true });
+  const finishRestore = () => {
+    if (generation === restoreGeneration) {
+      useSessionStore.setState({ isRestoring: false });
+    }
+  };
 
-  // Cache hit with terminal status → switch directly (no need to re-fetch)
+  // A terminal cache is only a fast first paint. Report context must still be
+  // reconciled with the backend because revisions can finish after the cache.
   const cached = store.sessions[id];
   if (cached && (cached.status === 'completed' || cached.status === 'error')) {
     store.switchTo(id);
+    try {
+      const context = await api.getReportContext(id);
+      if (generation !== restoreGeneration || useSessionStore.getState().activeId !== id) {
+        finishRestore();
+        return;
+      }
+      useSessionStore.getState().applyReportContext(context);
+    } catch (e) {
+      console.warn('Failed to refresh terminal report context:', e);
+    }
+    finishRestore();
     return;
   }
 
@@ -77,16 +105,21 @@ export async function restoreSession(id: string): Promise<void> {
 
   try {
     const detail: any = await api.getResearchDetail(id);
+    if (generation !== restoreGeneration || useSessionStore.getState().activeId !== id) {
+      finishRestore();
+      return;
+    }
 
     const msgs: ChatMessage[] = (detail.messages || [])
       .filter((m: any) => m._type !== 'processing_ack')
       .map((m: any) => ({
       id: m.id || nanoid(),
       role: (m.role === 'user' || m.role === 'assistant' || m.role === 'agent'
-        ? m.role
+      ? m.role
         : 'system') as ChatMessage['role'],
-      content: m.content,
+      content: normalizeChatMessage(m.content),
       timestamp: m.timestamp || new Date().toISOString(),
+      ...(m.response_id ? { metadata: { responseId: m.response_id } } : {}),
       ...(m.agent_id || m.agent_name || m.action ? {
         agent: {
           id: m.agent_id || '',
@@ -94,6 +127,10 @@ export async function restoreSession(id: string): Promise<void> {
           action: m.action || '',
           completedCount: m.completedCount,
           totalCount: m.totalCount,
+          provider: m.provider,
+          quality_score: m.quality_score,
+          cache_hit: m.cache_hit,
+          stop_reason: m.stop_reason,
         },
       } : {}),
     }));
@@ -102,7 +139,7 @@ export async function restoreSession(id: string): Promise<void> {
 
     if (status === 'completed') {
       const framework = detail.framework || cached?.framework || null;
-      const stepOptions = detail.suggestions?.length ? detail.suggestions : cached?.stepOptions || null;
+      const stepOptions = normalizeStepOptions(detail.suggestions?.length ? detail.suggestions : cached?.stepOptions);
       const currentStep = detail.step ?? cached?.currentStep ?? 6;
       const parameterConfig = cached?.parameterConfig || null;
       const activeTemplateId = cached?.activeTemplateId || null;
@@ -118,12 +155,13 @@ export async function restoreSession(id: string): Promise<void> {
         parameterConfig,
         activeTemplateId,
         researchTopic,
-        phases: detail.phases || [],
-        progress: detail.progress || 100,
+        phases: (detail.phases || []).map((phase: any) => ({ ...phase, progress: normalizeProgress(phase.progress) })),
+        progress: normalizeProgress(detail.progress ?? 100),
         previewUrl: detail.preview_url || null,
         downloadUrl: detail.download_url || null,
         result: detail.result || null,
         agentMessages: detail.agent_messages || [],
+        reportContext: detail.report_context || null,
         language: detail.language || 'zh',
         mode: detail.mode || 'chat',
         summary: detail.topic ? {
@@ -138,7 +176,7 @@ export async function restoreSession(id: string): Promise<void> {
     } else if (status === 'running' || status === 'reporting') {
       const interrupted = detail.interrupted;
       const framework = detail.framework || cached?.framework || null;
-      const stepOptions = detail.suggestions?.length ? detail.suggestions : cached?.stepOptions || null;
+      const stepOptions = normalizeStepOptions(detail.suggestions?.length ? detail.suggestions : cached?.stepOptions);
       const currentStep = detail.step ?? cached?.currentStep ?? 6;
       const parameterConfig = cached?.parameterConfig || null;
       const activeTemplateId = cached?.activeTemplateId || null;
@@ -154,16 +192,17 @@ export async function restoreSession(id: string): Promise<void> {
         parameterConfig,
         activeTemplateId,
         researchTopic,
-        phases: detail.phases || [],
-        progress: detail.progress || 0,
+        phases: (detail.phases || []).map((phase: any) => ({ ...phase, progress: normalizeProgress(phase.progress) })),
+        progress: normalizeProgress(detail.progress ?? 0),
         agentMessages: detail.agent_messages || [],
+        reportContext: detail.report_context || null,
         interrupted: !!interrupted,
         language: detail.language || 'zh',
         mode: detail.mode || 'research',
       });
     } else {
       const framework = detail.framework || cached?.framework || null;
-      const stepOptions = detail.suggestions?.length ? detail.suggestions : cached?.stepOptions || null;
+      const stepOptions = normalizeStepOptions(detail.suggestions?.length ? detail.suggestions : cached?.stepOptions);
       const currentStep = detail.step ?? cached?.currentStep ?? 0;
       const parameterConfig = cached?.parameterConfig || null;
       const activeTemplateId = cached?.activeTemplateId || null;
@@ -172,23 +211,31 @@ export async function restoreSession(id: string): Promise<void> {
         title: detail.title || detail.topic || 'Untitled',
         taskId: id,
         messages: msgs,
-        status: 'idle',
+        status: detail.status === 'paused' ? 'paused'
+          : detail.status === 'cancelled' ? 'paused'
+          : detail.status === 'error' ? 'error'
+          : 'idle',
         currentStep,
         stepOptions,
         framework,
         parameterConfig,
         activeTemplateId,
         researchTopic,
-        phases: detail.phases || [],
-        progress: detail.progress || 0,
+        phases: (detail.phases || []).map((phase: any) => ({ ...phase, progress: normalizeProgress(phase.progress) })),
+        progress: normalizeProgress(detail.progress ?? 0),
         agentMessages: detail.agent_messages || [],
         previewUrl: detail.preview_url || null,
         result: detail.result || null,
+        reportContext: detail.report_context || null,
         language: detail.language || 'zh',
         mode: detail.mode || 'chat',
       });
     }
   } catch (e) {
+    if (generation !== restoreGeneration || useSessionStore.getState().activeId !== id) {
+      finishRestore();
+      return;
+    }
     console.error('Failed to restore session:', e);
     useSessionStore.getState().syncActive({
       title: 'Restore Failed',
@@ -198,6 +245,8 @@ export async function restoreSession(id: string): Promise<void> {
         timestamp: new Date().toISOString(),
       }],
     });
+  } finally {
+    finishRestore();
   }
 }
 
@@ -226,6 +275,7 @@ function emptyCache(id: string, title?: string): SessionCache {
     language: 'zh',
     mode: 'chat',
     qualityState: null,
+    reportContext: null,
   };
 }
 
@@ -233,6 +283,7 @@ export const useSessionStore = create<SessionRegistry>()(
   persist(
     (set, get) => ({
       activeId: null,
+      isRestoring: false,
       sessions: {},
 
       switchTo: (id: string) => {
@@ -274,6 +325,18 @@ export const useSessionStore = create<SessionRegistry>()(
           : { ...emptyCache(activeId, cleanPatch.title), ...cleanPatch };
         set({ sessions: { ...sessions, [activeId]: merged } });
       },
+
+      applyReportContext: (context: ReportContextSnapshot) => {
+        const { activeId, sessions } = get();
+        if (!activeId || context.session_id !== activeId) return;
+        const existing = sessions[activeId];
+        const current = existing?.reportContext;
+        if (current && current.context_revision > context.context_revision) return;
+        const merged = existing
+          ? { ...existing, reportContext: context }
+          : { ...emptyCache(activeId), reportContext: context };
+        set({ sessions: { ...sessions, [activeId]: merged } });
+      },
     }),
     {
       name: 'Zensers-sessions',
@@ -281,7 +344,7 @@ export const useSessionStore = create<SessionRegistry>()(
       partialize: (state) => ({
         activeId: (!state.activeId || state.activeId === '__pending__')
           ? null
-          : (state.sessions[state.activeId]?.status === 'running' || state.sessions[state.activeId]?.status === 'paused')
+          : state.sessions[state.activeId]?.taskId
             ? state.activeId
             : null,
         sessions: Object.fromEntries(
@@ -301,7 +364,7 @@ export const useSessionStore = create<SessionRegistry>()(
                ...v,
                messages: (v as any).messages?.filter((m: any) => !(m.role === 'agent' && (m.agent?.action === 'heartbeat' || m.action === 'heartbeat'))) || [],
                result: undefined,
-                qualityState: undefined,
+               qualityState: undefined,
               }])
         ),
       }),

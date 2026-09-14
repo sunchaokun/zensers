@@ -52,6 +52,22 @@ describe('VirtualMessageList', () => {
     expect(innerDiv).toBeTruthy();
   });
 
+  it('keeps the status header outside the message scroll layer', () => {
+    const messages = [makeMsg({ id: 'm1', content: 'Message 1' })];
+    const { container } = render(
+      <VirtualMessageList
+        messages={messages}
+        stickyHeader={<div data-testid="status-header">Status</div>}
+      />
+    );
+
+    const scrollEl = container.querySelector('.overflow-y-auto');
+    expect(scrollEl?.querySelector('[data-testid="status-header"]')).toBeFalsy();
+    expect(container.querySelector('[data-testid="status-header"]')).toBeTruthy();
+    expect(container.querySelector('.sticky')).toBeFalsy();
+    expect(container.querySelector('.absolute.top-0')).toBeNull();
+  });
+
   it('exposes scrollToBottom via ref', () => {
     const scrollToBottomRef = { current: null as (() => void) | null };
     const messages = [makeMsg({ id: 'm1', content: 'Hello' })];

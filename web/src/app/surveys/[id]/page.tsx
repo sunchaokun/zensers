@@ -18,7 +18,7 @@ export default function SurveyDetailPage() {
   const [loading, setLoading] = useState(true);
 
   // Simulation form
-  const [template, setTemplate] = useState('white_collar');
+  const [template, setTemplate] = useState('一线白领');
   const [count, setCount] = useState(50);
   const [simulating, setSimulating] = useState(false);
   const [simResult, setSimResult] = useState<SimulateResponse | null>(null);
@@ -143,7 +143,7 @@ export default function SurveyDetailPage() {
                 <div key={i} className="text-sm p-2 bg-muted/30 rounded-lg">
                   <span className="text-muted-foreground mr-2">Q{i + 1}.</span>
                   <span>{q.text}</span>
-                  <span className="text-xs text-muted-foreground ml-2">({q.type})</span>
+                  <span className="text-xs text-muted-foreground ml-2">({q.type || q.question_type})</span>
                 </div>
               ))}
             </div>

@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { useSessionStore, type SessionCache } from '../useSessionStore';
 import { useResearchStore } from '../useResearchStore';
 import { useChatStore } from '../useChatStore';
+import { api } from '@/lib/api';
 import type { ResearchFramework, ChatMessage } from '@/types/api';
 
 const mockFramework: ResearchFramework = {
@@ -38,6 +39,7 @@ function makeSession(id: string, overrides: Partial<SessionCache> = {}): Session
     language: 'zh',
     mode: 'chat',
     qualityState: null,
+    reportContext: null,
     ...overrides,
   };
 }
@@ -119,6 +121,58 @@ describe('framework persistence across research lifecycle', () => {
 });
 
 describe('restoreSession preserves cached fields', () => {
+  it('locks input while the selected session is being restored', async () => {
+    const sid = 'ses-restore-lock';
+    let resolveDetail!: (value: any) => void;
+    const detailPromise = new Promise((resolve) => { resolveDetail = resolve; });
+    const detailSpy = vi.spyOn(api, 'getResearchDetail').mockReturnValue(detailPromise as any);
+
+    useSessionStore.setState({ activeId: '__pending__', sessions: {}, isRestoring: false });
+    const { restoreSession } = await import('../useSessionStore');
+    const restoring = restoreSession(sid);
+    expect(useSessionStore.getState().isRestoring).toBe(true);
+
+    resolveDetail({
+      task_id: sid,
+      status: 'paused',
+      messages: [],
+      step: 6,
+      progress: 42,
+    });
+    await restoring;
+
+    expect(useSessionStore.getState().isRestoring).toBe(false);
+    expect(useSessionStore.getState().activeId).toBe(sid);
+    expect(useSessionStore.getState().sessions[sid]?.status).toBe('paused');
+    detailSpy.mockRestore();
+  });
+
+  it('does not let an older restore clear the newer restore lock', async () => {
+    const first = 'ses-restore-first';
+    const second = 'ses-restore-second';
+    let resolveFirst!: (value: any) => void;
+    let resolveSecond!: (value: any) => void;
+    const firstPromise = new Promise((resolve) => { resolveFirst = resolve; });
+    const secondPromise = new Promise((resolve) => { resolveSecond = resolve; });
+    const detailSpy = vi.spyOn(api, 'getResearchDetail')
+      .mockReturnValueOnce(firstPromise as any)
+      .mockReturnValueOnce(secondPromise as any);
+    const { restoreSession } = await import('../useSessionStore');
+
+    const firstRestore = restoreSession(first);
+    const secondRestore = restoreSession(second);
+    resolveFirst({ task_id: first, status: 'paused', messages: [] });
+    await firstRestore;
+    expect(useSessionStore.getState().isRestoring).toBe(true);
+    expect(useSessionStore.getState().activeId).toBe(second);
+
+    resolveSecond({ task_id: second, status: 'paused', messages: [] });
+    await secondRestore;
+    expect(useSessionStore.getState().isRestoring).toBe(false);
+    expect(useSessionStore.getState().activeId).toBe(second);
+    detailSpy.mockRestore();
+  });
+
   it('restoreSession idle branch preserves parameterConfig from cache', () => {
     const sid = 'ses-restore1';
     const paramConfig = [{ id: 'region', type: 'select', label: 'Region', default: 'China', options: [] }];

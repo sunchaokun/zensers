@@ -14,6 +14,7 @@ import type {
   Phase,
   AgentMessageEvent,
   ResearchResult,
+  ReportContextSnapshot,
 } from '@/types/api';
 import type { VersionInfo } from '@/types/version';
 import type {
@@ -276,7 +277,7 @@ class ApiClient {
     topP?: number;
     frequencyPenalty?: number;
     presencePenalty?: number;
-  }): Promise<InteractResponse> {
+  }, signal?: AbortSignal): Promise<InteractResponse> {
     const formData = new FormData();
     formData.append('session_id', sessionId);
     formData.append('step', '0');
@@ -293,6 +294,7 @@ class ApiClient {
 
     const { data } = await this.client.post('/api/v1/research/interact', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
+      signal,
     });
     return data;
   }
@@ -426,6 +428,11 @@ class ApiClient {
     return data;
   }
 
+  async confirmPptExport(taskId: string): Promise<ExportResponse> {
+    const { data } = await this.client.post(`/api/v1/research/ppt/${taskId}/confirm-export`);
+    return data;
+  }
+
   // ============ History ============
 
   async listCompletedResearch(limit = 50): Promise<ResearchResultMeta[]> {
@@ -472,8 +479,14 @@ class ApiClient {
     current_step?: number;
     language?: string;
     framework?: any;
+    report_context?: ReportContextSnapshot | null;
   }> {
     const { data } = await this.client.get(`/api/v1/research/${taskId}`);
+    return data;
+  }
+
+  async getReportContext(sessionId: string): Promise<ReportContextSnapshot> {
+    const { data } = await this.client.get(`/api/v1/research/${sessionId}/report-context`);
     return data;
   }
 
@@ -609,12 +622,16 @@ class ApiClient {
   async reviseSections(
     taskId: string,
     aspects: string[],
-    adjustment?: string
+    adjustment?: string,
+    baseReportVersion?: number,
   ): Promise<RevisionResult> {
     const formData = new FormData();
     formData.append('task_id', taskId);
     formData.append('aspects', JSON.stringify(aspects));
     if (adjustment) formData.append('adjustment', adjustment);
+    if (baseReportVersion !== undefined) {
+      formData.append('base_report_version', String(baseReportVersion));
+    }
 
     const { data } = await this.client.post('/api/v1/research/revise', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },

@@ -430,7 +430,9 @@ function FinalizeToolbar({ taskId }: { taskId: string | null }) {
     setError(null);
     setInfo(null);
     try {
-      const res = await api.exportDocument(taskId, 'latest', exportFormat);
+      const res = exportFormat === 'pptx'
+        ? await api.confirmPptExport(taskId)
+        : await api.exportDocument(taskId, 'latest', exportFormat);
       if (res.status === 'success') {
         setFinalized(true);
         setDownloadUrl(res.download_url ?? null);

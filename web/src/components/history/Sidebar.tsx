@@ -7,7 +7,7 @@ import { useRouter } from 'next/navigation';
 import { useResearchStore } from '@/store/useResearchStore';
 import { useChatStore } from '@/store/useChatStore';
 import { useHistorySessions } from '@/hooks/useHistorySessions';
-import { restoreSession } from '@/store/useSessionStore';
+import { restoreSession, useSessionStore } from '@/store/useSessionStore';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
@@ -48,6 +48,10 @@ export function Sidebar({ isOpen, onClose, onViewResearch }: SidebarProps) {
   const handleNewResearch = () => {
     reset();
     clearMessages();
+    // Reset the active identity as well. Otherwise the next first message
+    // is routed into the previous backend session instead of a new pending
+    // conversation.
+    useSessionStore.getState().switchTo('__pending__');
     onClose();
     router.push('/');
   };
@@ -179,14 +183,16 @@ export function Sidebar({ isOpen, onClose, onViewResearch }: SidebarProps) {
                       </p>
                     </div>
                     {(() => {
-                      const dispStatus = session.task_id === sessionId ? 'active' : session.status;
+                      // Selection and execution are independent. The active
+                      // row is highlighted by the container above; its badge
+                      // must still reflect the server task status.
+                      const dispStatus = session.status;
                       return (
                         <Badge
                           variant={dispStatus === 'completed' ? 'success' : 'secondary'}
                           className="shrink-0 text-xs"
                         >
-                          {dispStatus === 'active' ? 'Active'
-                            : dispStatus === 'completed' ? 'Completed'
+                          {dispStatus === 'completed' ? 'Completed'
                             : dispStatus === 'reporting' ? 'Running'
                             : dispStatus === 'collecting' ? 'Collecting'
                             : dispStatus === 'analyzing' ? 'Configuring'

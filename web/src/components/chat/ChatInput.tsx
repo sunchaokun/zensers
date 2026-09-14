@@ -85,7 +85,7 @@ export function ChatInput({
     if (isBusy && !isRunning) return;
     if (isWaitingForReply && !isRunning) return;
     const trimmed = text.trim();
-    if ((trimmed || attachments.length > 0) && !disabled) {
+    if ((trimmed || attachments.length > 0) && !disabled && settingsReady) {
       onSend(trimmed, attachments, llm.model);
       setText('');
       setAttachments([]);
@@ -129,7 +129,12 @@ export function ChatInput({
 
   // show stop when API loading, or research running with no input
   const showStop = isLoading || isWaitingForReply || (isRunning && !text.trim() && attachments.length === 0);
-  const canSend = (text.trim() || attachments.length > 0) && !disabled;
+  // Production chat is pinned to Mimo. Do not let the initial fallback
+  // provider (often OpenAI while settings are loading) receive the first turn.
+  const settingsReady = mounted
+    && llm.provider === 'mimo'
+    && availableModels.some((model) => model.id === llm.model);
+  const canSend = (text.trim() || attachments.length > 0) && !disabled && settingsReady;
   const currentModelName = availableModels.find(m => m.id === llm.model)?.name || llm.model;
   const currentProviderName = availableProviders.find(p => p.id === llm.provider)?.name || llm.provider;
 
@@ -274,7 +279,7 @@ export function ChatInput({
             onKeyDown={handleKeyDown}
             onFocus={() => setIsFocused(true)}
             onBlur={() => setIsFocused(false)}
-            placeholder={isPaused ? 'Type "继续" to resume research, or ask a new question' : isLoading ? 'Processing...' : isWaitingForReply ? 'Searching... please wait for results' : isRunning ? 'Type query or click ■ to pause' : placeholder}
+            placeholder={!settingsReady ? '正在加载 Mimo 模型，请稍候...' : isPaused ? 'Type "继续" to resume research, or ask a new question' : isLoading ? 'Processing...' : isWaitingForReply ? 'Searching... please wait for results' : isRunning ? 'Type query or click ■ to pause' : placeholder}
             disabled={disabled}
             className="min-h-[80px] max-h-[180px] resize-none border-0 focus-visible:ring-0 p-4 pr-14 text-sm leading-relaxed"
             rows={3}
@@ -283,7 +288,7 @@ export function ChatInput({
           {/* Send/Cancel button */}
           <Button
              onClick={showStop ? onCancel : handleSend}
-            disabled={disabled || (!showStop && !text.trim() && attachments.length === 0)}
+            disabled={disabled || (!showStop && (!settingsReady || (!text.trim() && attachments.length === 0)))}
             size="icon"
             className={cn(
               "absolute right-3 bottom-3 transition-all",

@@ -4,7 +4,46 @@
 // ============ Shared State Types ============
 
 /** 统一的研究状态类型 — 所有 store 和组件共用 */
-export type ResearchStatus = 'idle' | 'running' | 'completed' | 'error' | 'paused';
+export type ResearchStatus = 'idle' | 'running' | 'pausing' | 'paused' | 'cancelling' | 'cancelled' | 'completed' | 'error' | 'reporting';
+
+export type ReportPhase =
+  | 'researching' | 'report_generating' | 'preview_ready'
+  | 'awaiting_user_decision' | 'quality_checking' | 'revising'
+  | 'completed' | 'failed';
+
+export interface ReportSectionContext {
+  id: string;
+  title: string;
+  order: number;
+  status: string;
+  word_count: number;
+  source_count: number;
+  quality_status: string;
+  summary?: string | null;
+}
+
+export interface ReportContextSnapshot {
+  schema_version: number;
+  session_id: string;
+  report_id: string;
+  report_version: number;
+  report_phase: ReportPhase;
+  document_type?: string | null;
+  document_version?: string | null;
+  preview_url?: string | null;
+  download_url?: string | null;
+  topic?: string | null;
+  sections: ReportSectionContext[];
+  quality: {
+    overall_score?: number | null;
+    overall_status: string;
+    open_issue_count: number;
+  };
+  pending_decision?: Record<string, unknown> | null;
+  last_revision: Record<string, unknown>;
+  updated_at: string;
+  context_revision: number;
+}
 
 export interface AgentMessageEvent {
   event: string;
@@ -68,7 +107,7 @@ export interface StartResearchResponse {
   message: string;
   instruction: string;
   options?: SelectOption[];
-  suggestions?: Suggestion[];
+  suggestions?: Array<Suggestion | string>;
   clarification_questions?: string[];
   framework?: ResearchFramework;
   next_step: string;
@@ -84,7 +123,7 @@ export interface InteractResponse {
   instruction: string;
   next_step: string;
   options?: SelectOption[];
-  suggestions?: Suggestion[];
+  suggestions?: Array<Suggestion | string>;
   clarification_questions?: string[];
   templates?: Template[];
   sections?: Section[];
@@ -213,8 +252,17 @@ export interface Phase {
 // ============ SSE Types ============
 
 export interface SSEMessage {
-  event: 'progress' | 'phase_start' | 'phase_complete' | 'error' | 'complete' | 'chat_response' | 'chat_token' | 'chat_thinking' | 'agent_message' | 'heartbeat' | 'connected' | 'message' | 'cancelled' | 'paused' | 'resumed' | 'quality_result' | 'section_quality' | 'preview_refresh' | 'quality_confirmed';
-  data: ProgressData | PhaseData | ErrorData | CompleteData | ChatResponseData | ChatTokenData | ChatThinkingData | AgentMessageData | QualityResultEventData | SectionQualityEventData | PreviewRefreshEventData | QualityConfirmedEventData;
+  event: 'progress' | 'phase_start' | 'phase_complete' | 'error' | 'complete' | 'chat_response' | 'chat_token' | 'chat_thinking' | 'agent_message' | 'heartbeat' | 'connected' | 'message' | 'cancelled' | 'paused' | 'resumed' | 'quality_result' | 'section_quality' | 'preview_refresh' | 'quality_confirmed' | 'report_context';
+  data: ProgressData | PhaseData | ErrorData | CompleteData | ChatResponseData | ChatTokenData | ChatThinkingData | AgentMessageData | QualityResultEventData | SectionQualityEventData | PreviewRefreshEventData | QualityConfirmedEventData | ReportContextEventData;
+}
+
+export interface ReportContextEventData {
+  event_id: string;
+  session_id: string;
+  context_revision: number;
+  report_version: number;
+  snapshot: ReportContextSnapshot;
+  timestamp: string;
 }
 
 export interface AgentMessageData {
@@ -225,15 +273,20 @@ export interface AgentMessageData {
   content: string;
   progress?: number;
   timestamp: string;
+  provider?: string;
+  quality_score?: number;
+  cache_hit?: boolean;
+  stop_reason?: string;
 }
 
 export interface ChatResponseData {
   session_id: string;
+  response_id?: string;
   message: string;
   action: string;
   topic?: string;
   directions?: string[];
-  suggestions?: Array<{ id: string; label: string; example: string }>;
+  suggestions?: Array<{ id: string; label: string; example?: string } | string>;
   timestamp: string;
   thinking_content?: string;
   mode?: 'chat' | 'framework' | 'research';
@@ -418,5 +471,9 @@ export interface ChatMessage {
     action: string;
     completedCount?: number;
     totalCount?: number;
+    provider?: string;
+    quality_score?: number;
+    cache_hit?: boolean;
+    stop_reason?: string;
   };
 }

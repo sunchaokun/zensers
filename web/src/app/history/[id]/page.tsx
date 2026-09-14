@@ -10,14 +10,18 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { useRouter, useParams } from 'next/navigation';
-import type { ResearchResultMeta } from '@/types/api';
-import { ArrowLeft, FileText, Download, Calendar, Clock, Edit3, ExternalLink } from 'lucide-react';
+import type { ResearchResultMeta, ReportContextSnapshot } from '@/types/api';
+import { ArrowLeft, FileText, Download, Calendar, Clock, Edit3 } from 'lucide-react';
+
+type HistoryDetail = ResearchResultMeta & {
+  report_context?: ReportContextSnapshot | null;
+};
 
 export default function HistoryDetailPage() {
   const params = useParams();
   const id = params?.id as string;
   const router = useRouter();
-  const [meta, setMeta] = useState<ResearchResultMeta | null>(null);
+  const [meta, setMeta] = useState<HistoryDetail | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isRevisionPanelOpen, setIsRevisionPanelOpen] = useState(false);
@@ -67,11 +71,16 @@ export default function HistoryDetailPage() {
     }
   };
 
-  // 恢复研究状态到聊天页面
-  const handleResumeResearch = () => {
-    if (!meta) return;
-    sessionStorage.setItem('resume-session', meta.task_id);
-    router.push('/');
+  const reportContext = meta?.report_context;
+  const reportPhaseLabel: Record<string, string> = {
+    researching: 'Researching',
+    report_generating: 'Generating report',
+    preview_ready: 'Preview ready',
+    awaiting_user_decision: 'Waiting for your decision',
+    quality_checking: 'Quality checking',
+    revising: 'Revising',
+    completed: 'Completed',
+    failed: 'Failed',
   };
 
   if (isLoading) {
@@ -155,15 +164,6 @@ export default function HistoryDetailPage() {
                 variant="outline"
                 size="sm"
                 className="gap-2"
-                onClick={handleResumeResearch}
-              >
-                <ExternalLink className="h-4 w-4" />
-                Continue Research
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                className="gap-2"
                 onClick={() => setIsRevisionPanelOpen(true)}
               >
                 <Edit3 className="h-4 w-4" />
@@ -208,6 +208,39 @@ export default function HistoryDetailPage() {
         </div>
       </div>
 
+      {reportContext && (
+        <section className="border-b bg-background">
+          <div className="mx-auto max-w-7xl px-6 py-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold text-foreground">Report context</p>
+                <p className="text-xs text-muted-foreground">
+                  {reportPhaseLabel[reportContext.report_phase] || reportContext.report_phase}
+                  {' · '}Version {reportContext.report_version}
+                  {' · '}Revision {reportContext.context_revision}
+                </p>
+              </div>
+              <div className="text-xs text-muted-foreground">
+                {reportContext.sections.length} sections
+                {' · '}Quality: {reportContext.quality.overall_status}
+                {reportContext.quality.open_issue_count > 0 &&
+                  ` · ${reportContext.quality.open_issue_count} open issues`}
+              </div>
+            </div>
+            {Boolean(reportContext.pending_decision) && (
+              <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/20 dark:text-amber-200">
+                User decision required before the report can continue.
+              </div>
+            )}
+            {Boolean(reportContext.last_revision?.status && reportContext.last_revision.status !== 'none') && (
+              <p className="mt-2 text-xs text-muted-foreground">
+                Last revision: {String(reportContext.last_revision.status)}
+              </p>
+            )}
+          </div>
+        </section>
+      )}
+
       {/* Preview */}
       <div className="h-[calc(100vh-140px)]">
         <DocumentPreview key={previewKey} taskIdOverride={id} />
@@ -216,6 +249,7 @@ export default function HistoryDetailPage() {
       {/* Revision Panel */}
       <RevisionPanel
         taskId={id}
+        baseReportVersion={meta.report_context?.report_version}
         isOpen={isRevisionPanelOpen}
         onClose={() => setIsRevisionPanelOpen(false)}
         onRevisionComplete={handleRevisionComplete}

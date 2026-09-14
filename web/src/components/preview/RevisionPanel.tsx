@@ -12,6 +12,7 @@ import { api, SectionInfo } from '@/lib/api';
 
 interface RevisionPanelProps {
   taskId: string;
+  baseReportVersion?: number;
   isOpen: boolean;
   onClose: () => void;
   onRevisionComplete: () => void;
@@ -24,6 +25,7 @@ interface RevisionPanelProps {
  */
 export function RevisionPanel({
   taskId,
+  baseReportVersion,
   isOpen,
   onClose,
   onRevisionComplete,
@@ -79,7 +81,7 @@ export function RevisionPanel({
         .filter((s) => selectedSections.includes(s.id))
         .map((s) => s.title);
 
-      const result = await api.reviseSections(taskId, selectedTitles, adjustment || undefined);
+      const result = await api.reviseSections(taskId, selectedTitles, adjustment || undefined, baseReportVersion);
 
       if (result.status === 'completed') {
         onRevisionComplete();

@@ -9,6 +9,7 @@ import { Button } from '@/components/ui/button';
 import { useResearchStore } from '@/store/useResearchStore';
 import { useChatStore } from '@/store/useChatStore';
 import { useSettingsStore } from '@/store/useSettingsStore';
+import { useSessionStore } from '@/store/useSessionStore';
 import { UpdateBadge } from '@/components/layout/UpdateBadge';
 import { Sidebar } from '@/components/history/Sidebar';
 import { MCPSelector } from '@/components/mcp';
@@ -36,11 +37,13 @@ export function Header({ onTogglePreview, previewVisible }: HeaderProps) {
       if (confirm('A research task is currently running. Are you sure you want to start a new one?')) {
         reset();
         clearMessages();
+        useSessionStore.getState().switchTo('__pending__');
         router.push('/');
       }
     } else {
       reset();
       clearMessages();
+      useSessionStore.getState().switchTo('__pending__');
       router.push('/');
     }
   }, [status, reset, clearMessages, router]);
@@ -69,10 +72,12 @@ export function Header({ onTogglePreview, previewVisible }: HeaderProps) {
           </Link>
 
           {/* 当前会话指示器 */}
-          {sessionId && (
+          {sessionId && (status === 'running' || status === 'pausing' || status === 'paused') && (
             <div className="hidden md:flex items-center gap-2 ml-3 pl-3 border-l border-border/50">
-              <div className="h-2 w-2 rounded-full bg-primary animate-pulse" />
-              <span className="text-xs text-muted-foreground">Researching</span>
+              <div className={`h-2 w-2 rounded-full ${status === 'paused' ? 'bg-amber-500' : 'bg-primary animate-pulse'}`} />
+              <span className="text-xs text-muted-foreground">
+                {status === 'paused' ? 'Paused' : 'Researching'}
+              </span>
             </div>
           )}
         </div>

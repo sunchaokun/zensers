@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import type { ChatMessage } from '@/types/api';
 import { useSessionStore } from './useSessionStore';
+import { isInternalChatMessage, upsertChatMessage, visibleChatMessages } from '@/lib/chat-message-utils';
 
 interface ChatState {
   messages: ChatMessage[];
@@ -79,9 +80,7 @@ function flushTokenBuffer() {
 }
 
 function filterHeartbeats(msgs: ChatMessage[]): ChatMessage[] {
-  const hasHeartbeat = msgs.some((m: any) => m.role === 'agent' && (m.agent?.action === 'heartbeat' || m.action === 'heartbeat'));
-  if (!hasHeartbeat) return msgs;
-  return msgs.filter((m: any) => !(m.role === 'agent' && (m.agent?.action === 'heartbeat' || m.action === 'heartbeat')));
+  return visibleChatMessages(msgs).filter((m) => !isInternalChatMessage(m));
 }
 
 let _sessionSubUnsub: (() => void) | null = null;
@@ -118,14 +117,8 @@ export const useChatStore = create<ChatState>()((set, get) => {
     messages: [],
 
     addMessage: (msg) => {
-      const current = get().messages;
-      const isDuplicate = current.some(m =>
-        m.role === msg.role
-        && m.content === msg.content
-        && m.timestamp === msg.timestamp
-      );
-      if (isDuplicate) return;
-      const messages = [...current, msg];
+      const messages = upsertChatMessage(get().messages, msg);
+      if (messages === get().messages) return;
       set({ messages });
       flushSyncNowInternal(messages);
     },
@@ -158,15 +151,14 @@ export const useChatStore = create<ChatState>()((set, get) => {
 
     prependMessages: (msgs) => {
       if (tokenBuffer) flushTokenBuffer();
-      const messages = [...msgs, ...get().messages];
-      const seen = new Set<string>();
-      const deduped = messages.filter(m => {
-        if (seen.has(m.id)) return false;
-        seen.add(m.id);
-        return true;
-      });
-      set({ messages: deduped });
-      flushSyncNowInternal(deduped);
+      // Use the same identity/merge rules as live messages. A paged response
+      // can have a different local id for an already-loaded message.
+      let merged: ChatMessage[] = [];
+      for (const message of [...msgs, ...get().messages]) {
+        merged = upsertChatMessage(merged, message);
+      }
+      set({ messages: merged });
+      flushSyncNowInternal(merged);
     },
 
     clearMessages: () => {

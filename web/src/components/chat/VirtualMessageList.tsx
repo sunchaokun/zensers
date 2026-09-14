@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useRef, useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useRef, useCallback, useEffect, useMemo } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { ChatMessage } from './ChatMessage';
 import type { ChatMessage as ChatMessageType } from '@/types/api';
@@ -30,13 +30,11 @@ export function VirtualMessageList({
   stickyHeader,
 }: VirtualMessageListProps) {
   const parentRef = useRef<HTMLDivElement>(null);
-  const stickyHeaderRef = useRef<HTMLDivElement>(null);
   const isUserScrollingRef = useRef(false);
   const prevScrollTopRef = useRef(0);
   const isLoadingOlderRef = useRef(false);
   const lastAtBottomRef = useRef(true);
   const prevMsgCountRef = useRef(0);
-  const [stickyHeaderHeight, setStickyHeaderHeight] = useState(0);
 
   const visibleMessages = useMemo(
     () => messages.filter(m => !(m.role === 'agent' && (m.agent?.action === 'heartbeat' || (m as any).action === 'heartbeat'))),
@@ -46,6 +44,9 @@ export function VirtualMessageList({
   const virtualizer = useVirtualizer({
     count: visibleMessages.length,
     getScrollElement: () => parentRef.current,
+    // Virtual measurements must follow the message identity, not its array
+    // index. Older-message loading and heartbeat filtering can shift indexes.
+    getItemKey: (index) => visibleMessages[index]?.id ?? index,
     estimateSize: (index) => {
       const msg = visibleMessages[index];
       if (!msg) return ESTIMATED_ITEM_SIZE;
@@ -57,21 +58,6 @@ export function VirtualMessageList({
     overscan: OVERSCAN,
     measureElement: (el) => el?.getBoundingClientRect().height ?? ESTIMATED_ITEM_SIZE,
   });
-
-  useEffect(() => {
-    if (!stickyHeader) {
-      setStickyHeaderHeight(0);
-      return;
-    }
-    const el = stickyHeaderRef.current;
-    if (!el) return;
-    setStickyHeaderHeight(el.getBoundingClientRect().height);
-    const ro = new ResizeObserver(([entry]) => {
-      setStickyHeaderHeight(entry.contentRect.height);
-    });
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [stickyHeader]);
 
   const checkAtBottom = useCallback(() => {
     const el = parentRef.current;
@@ -162,11 +148,10 @@ export function VirtualMessageList({
 
   if (visibleMessages.length === 0) {
     return (
-      <div className="relative flex-1 min-h-0">
-        {stickyHeader && (
-          <div ref={stickyHeaderRef} className="absolute top-0 inset-x-0 z-10">{stickyHeader}</div>
-        )}
-        <div ref={parentRef} className="h-full overflow-y-auto preview-scrollbar" />
+      <div className="relative flex-1 min-h-0 flex flex-col">
+        {stickyHeader && <div className="shrink-0">{stickyHeader}</div>}
+        <div ref={parentRef} className="flex-1 min-h-0 overflow-y-auto preview-scrollbar">
+        </div>
       </div>
     );
   }
@@ -174,16 +159,13 @@ export function VirtualMessageList({
   const virtualItems = virtualizer.getVirtualItems();
 
   return (
-    <div className="relative flex-1 min-h-0">
-      {stickyHeader && (
-        <div ref={stickyHeaderRef} className="absolute top-0 inset-x-0 z-10">{stickyHeader}</div>
-      )}
+    <div className="relative flex-1 min-h-0 flex flex-col">
+      {stickyHeader && <div className="shrink-0">{stickyHeader}</div>}
       <div
         ref={parentRef}
         onScroll={handleScroll}
-        className="h-full overflow-y-auto preview-scrollbar"
+        className="flex-1 min-h-0 overflow-y-auto preview-scrollbar"
       >
-        <div style={{ height: stickyHeaderHeight }} />
         <div className="px-4 py-4">
           {isLoadingMessages && (
             <div className="flex justify-center py-2">

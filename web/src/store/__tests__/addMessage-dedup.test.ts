@@ -92,4 +92,40 @@ describe('addMessage deduplication', () => {
     store.addMessage(sseMsg);
     expect(useChatStore.getState().messages).toHaveLength(1);
   });
+
+  it('deduplicates paged messages when the backend changes the local id', () => {
+    const store = useChatStore.getState();
+    store.addMessage({
+      id: 'live-1', role: 'assistant', content: 'Paged answer',
+      timestamp: '2026-01-01T00:00:00.000Z',
+    });
+
+    store.prependMessages([{
+      id: 'history-99', role: 'assistant', content: 'Paged answer',
+      timestamp: '2026-01-01T00:00:00.000Z',
+    }]);
+
+    expect(useChatStore.getState().messages).toHaveLength(1);
+    expect(useChatStore.getState().messages[0].id).toBe('live-1');
+  });
+
+  it('deduplicates paged messages by response id', () => {
+    const store = useChatStore.getState();
+    store.addMessage({
+      id: 'live-2', role: 'assistant', content: 'Old answer',
+      timestamp: '2026-01-01T00:00:00.000Z',
+      metadata: { responseId: 'response-1', status: 'streaming' },
+    });
+
+    store.prependMessages([{
+      id: 'history-100', role: 'assistant', content: 'Final answer',
+      timestamp: '2026-01-01T00:00:01.000Z',
+      metadata: { responseId: 'response-1', status: 'done' },
+    }]);
+
+    expect(useChatStore.getState().messages).toHaveLength(1);
+    expect(useChatStore.getState().messages[0]).toMatchObject({
+      id: 'live-2', content: 'Old answer', metadata: { responseId: 'response-1' },
+    });
+  });
 });

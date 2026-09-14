@@ -16,6 +16,7 @@ import type {
 import type { ResearchTemplate } from '@/lib/templates';
 import { useSessionStore, type SessionCache } from './useSessionStore';
 import { nanoid } from 'nanoid';
+import { normalizeStepOptions } from '@/lib/normalize-options';
 
 export type SearchState = 'idle' | 'searching' | 'completed' | 'error';
 
@@ -55,7 +56,7 @@ interface ResearchState {
   setPhases: (phases: Phase[]) => void;
   updatePhase: (id: string, updates: Partial<Phase>) => void;
   setStatus: (status: ResearchStatus) => void;
-  setStep: (step: number | null, options?: SelectOption[]) => void;
+  setStep: (step: number | null, options?: Array<SelectOption | string>) => void;
   setParameterConfig: (config: ParameterConfig | null) => void;
   setSummary: (summary: ResearchSummary | null) => void;
   setStatistics: (statistics: ResearchStatistics | null) => void;
@@ -215,8 +216,9 @@ export const useResearchStore = create<ResearchState>()(
       },
       setStatus: (status) => { set({ status }); useSessionStore.getState().syncActive({ status }); },
       setStep: (step, options) => {
-        set({ currentStep: step, stepOptions: options || null });
-        useSessionStore.getState().syncActive({ currentStep: step, stepOptions: options || null });
+        const normalizedOptions = normalizeStepOptions(options);
+        set({ currentStep: step, stepOptions: normalizedOptions });
+        useSessionStore.getState().syncActive({ currentStep: step, stepOptions: normalizedOptions });
       },
       setParameterConfig: (config) => { set({ parameterConfig: config }); useSessionStore.getState().syncActive({ parameterConfig: config } as any); },
       setSummary: (summary) => { set({ summary }); useSessionStore.getState().syncActive({ summary }); },

@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import type { LLMConfig, ThemeConfig, UploadedFile, LLMModel, LLMProviderInfo, AppSettings, LLMProfile, RoutingConfig } from '@/types/settings';
 import { DEFAULT_SETTINGS, DEFAULT_LLM_PROFILE, normalizeProfileResponse, profileToLLMConfig, migrateLlmToProfile } from '@/types/settings';
+import { MIMO_ENDPOINT, MIMO_MODEL, MIMO_PROVIDER } from '@/lib/mimo-config';
 
 const STORAGE_KEY = 'Zensers-settings-v3';
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
@@ -25,6 +26,8 @@ function saveToStorage(state: SettingsState & SettingsMethods) {
         activeProfileName: state.activeProfileName,
         defaultProfileName: state.defaultProfileName,
         routingConfig: state.routingConfig,
+        llm: state.llm,
+        savedLlm: state.savedLlm,
         theme: state.theme,
         language: state.language,
         sendOnEnter: state.sendOnEnter,
@@ -88,6 +91,18 @@ interface SettingsState {
 
 const INITIAL_PROFILES: Record<string, LLMProfile> = {};
 const INITIAL_ROUTING: RoutingConfig = { fixed_agent_routing: {}, action_routing: {}, fallback_chain: [] };
+const INITIAL_MIMO_MODELS: LLMModel[] = [{
+  id: MIMO_MODEL,
+  name: MIMO_MODEL,
+  provider: MIMO_PROVIDER,
+  maxTokens: 128000,
+}];
+const INITIAL_MIMO_PROVIDERS: LLMProviderInfo[] = [{
+  id: MIMO_PROVIDER,
+  name: MIMO_PROVIDER,
+  description: '',
+  defaultEndpoint: MIMO_ENDPOINT,
+}];
 
 function getInitialState(): Omit<SettingsState, keyof SettingsMethods> {
   if (typeof window === 'undefined') {
@@ -108,8 +123,8 @@ function getInitialState(): Omit<SettingsState, keyof SettingsMethods> {
       showTokenCount: DEFAULT_SETTINGS.showTokenCount,
       autoSaveDraft: DEFAULT_SETTINGS.autoSaveDraft,
       uploadedFiles: [],
-      availableModels: [],
-      availableProviders: [],
+      availableModels: INITIAL_MIMO_MODELS,
+      availableProviders: INITIAL_MIMO_PROVIDERS,
     };
   }
 
@@ -119,12 +134,12 @@ function getInitialState(): Omit<SettingsState, keyof SettingsMethods> {
     return {
       profiles: INITIAL_PROFILES,
       savedProfiles: INITIAL_PROFILES,
-      activeProfileName: '',
+      activeProfileName: st.activeProfileName ?? '',
       defaultProfileName: '',
       routingConfig: INITIAL_ROUTING,
       isLoadingProfiles: false,
-      llm: { ...DEFAULT_SETTINGS.llm },
-      savedLlm: { ...DEFAULT_SETTINGS.llm },
+      llm: { ...DEFAULT_SETTINGS.llm, ...(st.llm || {}) },
+      savedLlm: { ...DEFAULT_SETTINGS.llm, ...(st.savedLlm || st.llm || {}) },
       isSaving: false,
       saveError: null,
       theme: { ...DEFAULT_SETTINGS.theme, ...(st.theme || {}) },
@@ -133,8 +148,8 @@ function getInitialState(): Omit<SettingsState, keyof SettingsMethods> {
       showTokenCount: st.showTokenCount ?? DEFAULT_SETTINGS.showTokenCount,
       autoSaveDraft: st.autoSaveDraft ?? DEFAULT_SETTINGS.autoSaveDraft,
       uploadedFiles: [],
-      availableModels: [],
-      availableProviders: [],
+      availableModels: INITIAL_MIMO_MODELS,
+      availableProviders: INITIAL_MIMO_PROVIDERS,
     };
   }
 
@@ -155,8 +170,8 @@ function getInitialState(): Omit<SettingsState, keyof SettingsMethods> {
     showTokenCount: DEFAULT_SETTINGS.showTokenCount,
     autoSaveDraft: DEFAULT_SETTINGS.autoSaveDraft,
     uploadedFiles: [],
-    availableModels: [],
-    availableProviders: [],
+    availableModels: INITIAL_MIMO_MODELS,
+    availableProviders: INITIAL_MIMO_PROVIDERS,
   };
 }
 
@@ -528,7 +543,10 @@ export const useSettingsStore = create<SettingsState & SettingsMethods>()((set, 
           maxTokens: m.max_tokens ?? 128000,
           supportsVision: m.supports_vision ?? false,
         }));
-        set({ availableModels: models, availableProviders: providers });
+        set((state) => ({
+          availableModels: models,
+          availableProviders: providers,
+        }));
       }
     } catch {}
   },

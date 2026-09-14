@@ -26,7 +26,7 @@ function createResearchStore() {
         if (idx >= 0) listeners.splice(idx, 1);
       };
     },
-    setStep: (step: number | null, options?: SelectOption[] | null) => {
+    setStep: (step: number | null, options?: Array<SelectOption | string> | null) => {
       state = { ...state, currentStep: step, stepOptions: options ?? null };
     },
     setStatus: (s: string) => {

@@ -45,6 +45,10 @@ function AgentMessage({ message }: { message: ChatMessageType }) {
     }
   }
 
+  const searchMeta = message.agent?.provider
+    ? ` · ${message.agent.provider}${message.agent.quality_score != null ? ` · quality ${message.agent.quality_score}` : ''}${message.agent.cache_hit ? ' · cache' : ''}`
+    : '';
+
   return (
     <div className="flex w-full gap-2 animate-slide-up">
       <div className={cn(
@@ -58,7 +62,7 @@ function AgentMessage({ message }: { message: ChatMessageType }) {
               {message.agent.name}:
             </span>
           )}
-          <span className="text-muted-foreground truncate">{displayText}</span>
+          <span className="text-muted-foreground truncate">{displayText}{searchMeta}</span>
         </div>
       </div>
     </div>
