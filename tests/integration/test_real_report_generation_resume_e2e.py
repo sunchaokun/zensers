@@ -16,7 +16,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 
-RUN_ID = os.environ.get("REAL_REPORT_E2E_RUN_ID", "research_da60aa74")
+RUN_ID = os.environ.get(
+    "REAL_REPORT_E2E_RUN_ID", "e2e_smartphone6_56e991bf"
+)
 DATA_DIR = Path("data")
 
 
@@ -94,8 +96,8 @@ async def test_resume_real_report_generation_to_final_report():
             f"task={task_path.exists()} checkpoints={checkpoint_dir.exists()}"
         )
         logger.error("E2E BLOCKED %s", details)
-        pytest.skip(
-            "Real report-resume E2E requires a completed prerequisite run; "
+        pytest.fail(
+            "Real report-resume E2E prerequisite_missing: "
             f"{details}. Set REAL_REPORT_E2E_RUN_ID to an available run."
         )
 
