@@ -760,9 +760,9 @@ def get_coordinator() -> TaskCoordinator:
     """获取全局协调器"""
     global _coordinator
     if _coordinator is None:
-        from src.core.communication import SharedMemory, MessageBus
+        from src.core.communication import resolve_shared_memory, MessageBus
         _coordinator = TaskCoordinator(
-            shared_memory=SharedMemory(),
+            shared_memory=resolve_shared_memory(),
             message_bus=MessageBus(),
             persistence=None,
         )

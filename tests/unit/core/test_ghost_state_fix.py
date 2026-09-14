@@ -212,7 +212,7 @@ def _mock_deps():
 class TestSSEDisconnectDeadExecutor:
     @pytest.mark.asyncio
     async def test_dead_executor_marked_failed_on_sse_disconnect(self):
-        """Bug 4: If executor task is dead but status not terminal, mark as failed"""
+        """Transport loss must not infer executor failure."""
         from src.api.research_api import ResearchAPI
 
         api = ResearchAPI()
@@ -233,22 +233,13 @@ class TestSSEDisconnectDeadExecutor:
                 with patch("src.api.research_api.safe_create_task") as create_task:
                     api._on_sse_disconnect(task_id)
 
-                    create_task.assert_called_once()
-                    coro = create_task.call_args[0][0]
-
-                    with patch("src.core.task_persistence.TaskPersistenceManager") as tpm_cls:
-                        tpm_instance = MagicMock()
-                        tpm_cls.return_value = tpm_instance
-                        tpm_instance.load_task.return_value = None
-
-                        await coro
-
-                    assert session["research_result"]["status"] == "failed"
-                    mock_fail.assert_called_once_with(task_id, "Executor task died unexpectedly")
+                    create_task.assert_not_called()
+                    mock_fail.assert_not_called()
+                    assert session["research_result"]["status"] == "running"
 
     @pytest.mark.asyncio
     async def test_popped_executor_marked_failed_on_sse_disconnect(self):
-        """Bug 4: If executor task was already popped from dict, treat as dead"""
+        """A missing executor is diagnosed by recovery, not SSE disconnect."""
         from src.api.research_api import ResearchAPI
 
         api = ResearchAPI()
@@ -264,22 +255,13 @@ class TestSSEDisconnectDeadExecutor:
                 with patch("src.api.research_api.safe_create_task") as create_task:
                     api._on_sse_disconnect(task_id)
 
-                    create_task.assert_called_once()
-                    coro = create_task.call_args[0][0]
-
-                    with patch("src.core.task_persistence.TaskPersistenceManager") as tpm_cls:
-                        tpm_instance = MagicMock()
-                        tpm_cls.return_value = tpm_instance
-                        tpm_instance.load_task.return_value = None
-
-                        await coro
-
-                    assert session["research_result"]["status"] == "failed"
-                    mock_fail.assert_called_once_with(task_id, "Executor task died unexpectedly")
+                    create_task.assert_not_called()
+                    mock_fail.assert_not_called()
+                    assert session["research_result"]["status"] == "running"
 
     @pytest.mark.asyncio
     async def test_alive_executor_pauses_on_sse_disconnect(self):
-        """Bug 4: If executor task is still alive, pause normally"""
+        """An alive executor continues after the SSE client disconnects."""
         from src.api.research_api import ResearchAPI
 
         api = ResearchAPI()
@@ -302,13 +284,8 @@ class TestSSEDisconnectDeadExecutor:
 
                     api._on_sse_disconnect(task_id)
 
-                    create_task.assert_called_once()
-                    coro = create_task.call_args[0][0]
-
-                    with patch("src.api.research_api.asyncio.sleep", new_callable=AsyncMock):
-                        await coro
-
-                    mock_cm.pause.assert_called_once_with(task_id)
+                    create_task.assert_not_called()
+                    mock_cm.pause.assert_not_called()
                     assert session["research_result"]["status"] == "running"
 
         alive_task.cancel()

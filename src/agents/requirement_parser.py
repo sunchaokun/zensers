@@ -9,7 +9,7 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime
 import re
 
-from src.core.agents.base import BaseAgent, AgentState
+from src.core.agents.base import BaseAgent
 
 
 class RequirementParserAgent(BaseAgent):
@@ -31,7 +31,18 @@ class RequirementParserAgent(BaseAgent):
         name: str = "RequirementParser",
         description: str = "解析研究需求，生成研究计划"
     ):
-        super().__init__(agent_id, name, description)
+        # BaseAgent now accepts (agent_id, agent_type, config).  The old
+        # positional call passed ``description`` as config and caused every
+        # parser instance to fail at ``config.get(...)``.  Preserve the
+        # public name/description attributes for legacy callers while using
+        # the current base-class contract explicitly.
+        super().__init__(
+            agent_id,
+            agent_type="requirement_parser",
+            config={"name": name, "description": description, "context": {}},
+        )
+        self.name = name
+        self.description = description
         self.parsed_requirements: List[Dict[str, Any]] = []
     
     async def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -46,7 +57,7 @@ class RequirementParserAgent(BaseAgent):
         Returns:
             解析后的研究计划
         """
-        self.set_state(AgentState.RUNNING)
+        self.update_state(status="running")
         
         try:
             requirement_text = input_data.get("requirement", "")
@@ -69,7 +80,7 @@ class RequirementParserAgent(BaseAgent):
                 "timestamp": datetime.now().isoformat()
             })
             
-            self.set_state(AgentState.COMPLETED)
+            self.update_state(status="completed")
             
             return {
                 "status": "success",
@@ -79,7 +90,7 @@ class RequirementParserAgent(BaseAgent):
             }
             
         except Exception as e:
-            self.set_state(AgentState.ERROR)
+            self.update_state(status="error")
             return {
                 "status": "error",
                 "error": str(e),

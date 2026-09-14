@@ -61,6 +61,38 @@ class TestSectionsToChapters:
         result = sections_to_chapters([])
         assert result == []
 
+    def test_restores_data_points_and_evidence_identity(self):
+        from src.api.research_api_helpers import sections_to_chapters
+
+        sections = [{
+            "id": "ch1",
+            "title": "市场规模",
+            "content": "市场规模达2000亿元",
+            "data_points": [{
+                "metric": "市场规模",
+                "value": "2000",
+                "unit": "亿元",
+                "source": "官方年报",
+                "source_url": "https://example.test/report",
+                "evidence_id": "ev-1",
+                "provenance_id": "prov-1",
+                "geographic_scope": "中国",
+                "period": "2025年",
+                "population": "行业市场",
+                "epistemic_level": "factual",
+                "evidence_status": "verified",
+            }],
+        }]
+
+        result = sections_to_chapters(sections)
+        point = result[0].data_points_used[0]
+
+        assert point.chapter_id == "ch1"
+        assert point.evidence_id == "ev-1"
+        assert point.provenance_id == "prov-1"
+        assert point.source_url == "https://example.test/report"
+        assert point.evidence_status == "verified"
+
 
 class TestRestoreDataRegistry:
     def test_restores_from_snapshot(self):
@@ -134,3 +166,38 @@ class TestApplyRevisionToSession:
         assert session["research_result"]["report"]["sections"][0]["key_conclusions"] == ["结论1"]
         assert "_data_registry_snapshot" in session
         assert "_revision_history" in session
+
+
+class TestReportDefenseRecheck:
+    def test_rechecks_current_report_and_marks_unresolved_l5_as_blocked(self):
+        from src.api.research_api import ResearchAPI
+        from src.agents.fixed_agents.report_upgrade.data_registry import DataRegistry
+
+        registry = DataRegistry()
+        registry.register("市场规模", "2000", "亿元", "ch1", "来源A")
+        registry.register("市场规模", "2500", "亿元", "ch2", "来源B")
+        session = _make_session(sections=[{
+            "id": "ch1",
+            "title": "市场规模",
+            "content": "市场规模达2000亿元。",
+            "data_points": [{
+                "metric": "市场规模", "value": "2000", "unit": "亿元",
+                "source": "来源A", "chapter_id": "ch1",
+                "source_url": "https://example.test/a",
+                "evidence_id": "ev-a", "provenance_id": "prov-a",
+                "evidence_excerpt": "市场规模达2000亿元。",
+                "geographic_scope": "中国", "period": "2025年",
+                "population": "行业市场", "epistemic_level": "factual",
+                "evidence_status": "verified",
+            }],
+        }])
+        session["_data_registry_snapshot"] = registry.to_snapshot()
+
+        audit = ResearchAPI._recheck_report_defense_audit(session)
+
+        assert audit["passed"] is False
+        assert audit["layers"]["L5"] is True
+        assert session["research_result"]["report"]["defense_audit"] == audit
+        assert session["research_result"]["quality_gate_status"] == "blocked"
+        assert session["research_result"]["status"] == "completed_with_warnings"
+        assert session["l1_l5_recheck"]["status"] == "failed"

@@ -176,6 +176,10 @@ class FixedAgent(
             ... })
         """
         pass
+
+    async def execute_async(self, task_input: Dict[str, Any]) -> Dict[str, Any]:
+        """Backward-compatible alias for callers using the legacy API name."""
+        return await self.execute(task_input)
     
     async def run(self, task_input: Dict[str, Any]) -> Dict[str, Any]:
         """

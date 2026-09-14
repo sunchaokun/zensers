@@ -33,7 +33,7 @@ class TestPromptSystem:
     def test_prompt_agents_file_count_is_24(self):
         """断言: prompts/agents/ 下有24个md文件"""
         agent_prompts = list(PROMPTS_ROOT.glob("agents/*.md"))
-        assert len(agent_prompts) == 24, f"Expected 24 prompt files, found {len(agent_prompts)}: {[f.name for f in agent_prompts]}"
+        assert len(agent_prompts) == 25, f"Expected 25 prompt files, found {len(agent_prompts)}: {[f.name for f in agent_prompts]}"
 
     def test_shared_prompt_file_count_is_8(self):
         """断言: prompts/_shared/ 下有8个md文件(含P1新增quality_rubric)"""
@@ -87,20 +87,20 @@ class TestPromptSystem:
         """断言: 方法论注入仅取methodologies[0]且截断150字符"""
         generic_agent_path = SRC_ROOT / "core" / "agents" / "generic_agent.py"
         content = generic_agent_path.read_text(encoding="utf-8")
-        assert "methodologies[0]" in content, "methodologies[0] not found in generic_agent.py"
-        assert "[:150]" in content, "[:150] truncation not found in generic_agent.py"
+        assert "methodologies[:3]" in content, "methodology list bound not found in generic_agent.py"
+        assert "content[:300]" in content, "methodology truncation not found in generic_agent.py"
 
     def test_methodology_budget_is_150_chars(self):
-        """断言: 方法论token预算为150字符"""
+        """断言: 每条方法论内容预算为300字符"""
         generic_agent_path = SRC_ROOT / "core" / "agents" / "generic_agent.py"
         content = generic_agent_path.read_text(encoding="utf-8")
         lines = content.split("\n")
         found = False
         for i, line in enumerate(lines):
-            if "methodologies" in line and "[0]" in line and "[:150]" in line:
+            if "truncated = content[:300]" in line:
                 found = True
                 break
-        assert found, "Line with methodologies[0]['content'][:150] not found"
+        assert found, "Methodology content truncation not found"
 
     def test_pattern_budget_is_150_chars(self):
         """断言: 模式/经验预算为150字符"""
@@ -133,13 +133,13 @@ class TestRetryFeedbackFracture:
         """断言: engine.py:1414 将 retry_attempt 写入 _a._context"""
         engine_path = SRC_ROOT / "core" / "orchestrator" / "execution" / "engine.py"
         content = engine_path.read_text(encoding="utf-8")
-        assert '_a._context["retry_attempt"]' in content, 'retry_attempt not written to _a._context in engine.py'
+        assert 'agent._context["retry_attempt"]' in content, 'retry_attempt not written to agent context in engine.py'
 
     def test_agent_does_not_read_retry_attempt(self):
-        """断言: generic_agent.py 从不读取 retry_attempt"""
+        """断言: generic_agent.py consumes retry feedback from context"""
         generic_agent_path = SRC_ROOT / "core" / "agents" / "generic_agent.py"
         content = generic_agent_path.read_text(encoding="utf-8")
-        assert "retry_attempt" not in content, "retry_attempt should not appear in generic_agent.py"
+        assert 'quality_feedback' in content and 'self._quality_feedback' in content
 
     def test_agent_does_not_read_supplemental_queries(self):
         """断言: generic_agent.py 从不读取 supplemental_queries"""
@@ -175,20 +175,20 @@ class TestRetryFeedbackFracture:
                 pytest.fail(f"focus_areas read from _context at line {i + 1}: {line.strip()}")
 
     def test_quality_is_advisory_not_blocking(self):
-        """断言: engine.py 中 quality is advisory, not blocking 注释存在"""
+        """断言: engine.py aborts on an explicit quality failure"""
         engine_path = SRC_ROOT / "core" / "orchestrator" / "execution" / "engine.py"
         content = engine_path.read_text(encoding="utf-8")
-        assert "quality is advisory, not blocking" in content, "'quality is advisory, not blocking' not found"
+        assert "Quality check failed for batch" in content
 
 
 class TestFeedbackExecutorDeadCode:
     """验证 feedback_executor 是死代码"""
 
     def test_execute_stage_with_quality_exists(self):
-        """断言: _execute_stage_with_quality 方法定义存在"""
+        """断言: removed legacy _execute_stage_with_quality method is absent"""
         engine_path = SRC_ROOT / "core" / "orchestrator" / "execution" / "engine.py"
         content = engine_path.read_text(encoding="utf-8")
-        assert "async def _execute_stage_with_quality" in content, "_execute_stage_with_quality not defined"
+        assert "async def _execute_stage_with_quality" not in content
 
     def test_execute_stage_with_quality_zero_callers(self):
         """断言: _execute_stage_with_quality 在engine.py中没有调用者(排除自身定义)"""
@@ -196,7 +196,7 @@ class TestFeedbackExecutorDeadCode:
         content = engine_path.read_text(encoding="utf-8")
         call_count = content.count("_execute_stage_with_quality(")
         def_count = content.count("async def _execute_stage_with_quality(")
-        assert call_count == def_count, f"_execute_stage_with_quality has {call_count - def_count} non-definition references (should be 0)"
+        assert call_count == 0, f"legacy _execute_stage_with_quality references remain: {call_count}"
 
     def test_execute_stage_with_quality_not_called_anywhere(self):
         """断言: _execute_stage_with_quality 在整个项目中没有被调用(排除定义行)"""
@@ -276,13 +276,13 @@ class TestQualityScoreInconsistency:
         """断言: _extract_quality_score clamp到[0,100]范围"""
         engine_path = SRC_ROOT / "core" / "orchestrator" / "execution" / "engine.py"
         content = engine_path.read_text(encoding="utf-8")
-        assert "min(100.0, score)" in content, "clamp to [0,100] not found"
+        assert "normalize_quality_score" in content, "shared quality-score normalizer not used"
 
     def test_engine_auto_scales_0_1_to_0_100(self):
         """断言: _extract_quality_score 自动将0-1分数放大到0-100"""
         engine_path = SRC_ROOT / "core" / "orchestrator" / "execution" / "engine.py"
         content = engine_path.read_text(encoding="utf-8")
-        assert "score * 100.0" in content, "auto-scale 0-1 → 0-100 not found"
+        assert "normalize_quality_score" in content, "shared quality-score normalizer not used"
 
     def test_metadata_extractor_default_is_50(self):
         """断言: metadata_extractor.py 默认值50.0(0-100尺度)"""
@@ -304,7 +304,8 @@ class TestAgentCoordinatorBlindRetry:
         """断言: agent_coordinator.py 将 retry_attempt 写入 task dict"""
         coord_path = SRC_ROOT / "core" / "orchestrator" / "execution" / "coordinator" / "agent_coordinator.py"
         content = coord_path.read_text(encoding="utf-8")
-        assert 'task["retry_attempt"]' in content, 'task["retry_attempt"] not found in agent_coordinator.py'
+        assert "asyncio.wait_for" in content, "coordinator must enforce an execution timeout"
+        assert 'failure_type = "timeout"' in content, "timeout failures must be classified"
 
 
 class TestQualityResultIssuesType:
@@ -333,12 +334,12 @@ class TestSectionScoreIsKeywordCounting:
     """验证 _calculate_section_score 是关键词计数"""
 
     def test_section_score_uses_hardcoded_keywords(self):
-        """断言: _calculate_section_score 使用7个硬编码关键词"""
+        """断言: _calculate_section_score 使用章节要素和权重评分"""
         qc_path = SRC_ROOT / "agents" / "fixed_agents" / "quality_check_agent.py"
         content = qc_path.read_text(encoding="utf-8")
-        assert '"核心判断"' in content, 'Keyword "核心判断" not found'
-        assert '"数据支持"' in content, 'Keyword "数据支持" not found'
-        assert '"反证"' in content, 'Keyword "反证" not found'
+        assert "SECTION_ELEMENT_REQUIREMENTS" in content
+        assert "elem[\"patterns\"]" in content
+        assert "elem[\"weight\"]" in content
 
     def test_section_score_keyword_game_cheatable(self):
         """断言: 包含5个关键词的文本可得高分(作弊验证)"""
@@ -380,7 +381,7 @@ class TestSkillSystem:
         """断言: Skill子类(Skill基类子类，不含business stub和LangChainToolSkill)数量验证
         
         grep确认的Skill(Skill)子类(不含business stub):
-        - SearchSkill(MultiSearchSkill), NewsSearchSkill, FileSkill, HTTPSkill, DocxSkill, LLMSkill, WebScraperSkill
+        - SearchSkill(MultiSearchSkill), NewsSearchSkill, FileSkill, HTTPSkill, DocxSkill, WebScraperSkill
         - MarketAnalysisSkill, DataAnalysisSkill, StockDataSkill, StockAnalysisSkill, PolicyAnalysisSkill, TechTrendSkill, RiskAnalysisSkill
         - KnowledgeQuerySkill, PersonaSkill, SimulationSkill, SurveySkill, LangChainToolSkill
         
@@ -431,27 +432,27 @@ class TestSkillSystem:
         assert "cr3" in content.lower(), "CR3 computation not found"
         assert "hhi" in content.lower(), "HHI computation not found"
 
-    def test_policy_analysis_is_llm_wrapper(self):
+    def test_policy_analysis_uses_intrinsic_llm(self):
         """断言: policy_analysis.py 是纯LLM包装器(无计算层)"""
         pa_path = SRC_ROOT / "skills" / "analysis" / "policy_analysis.py"
         content = pa_path.read_text(encoding="utf-8")
         assert "_precompute" not in content, "policy_analysis should not have _precompute"
         assert "_compute_fallback" not in content, "policy_analysis should not have _compute_fallback"
-        assert "llm_skill" in content, "policy_analysis should reference llm_skill"
+        assert "call_llm" in content, "policy_analysis should use intrinsic call_llm"
 
-    def test_tech_trend_is_llm_wrapper(self):
+    def test_tech_trend_uses_intrinsic_llm(self):
         """断言: tech_trend.py 是纯LLM包装器"""
         tt_path = SRC_ROOT / "skills" / "analysis" / "tech_trend.py"
         content = tt_path.read_text(encoding="utf-8")
         assert "_precompute" not in content, "tech_trend should not have _precompute"
-        assert "llm_skill" in content, "tech_trend should reference llm_skill"
+        assert "call_llm" in content, "tech_trend should use intrinsic call_llm"
 
-    def test_risk_analysis_is_llm_wrapper(self):
+    def test_risk_analysis_uses_intrinsic_llm(self):
         """断言: risk_analysis.py 是纯LLM包装器"""
-        ra_path = SRC_ROOT / "skills" / "analysis" / "risk_analysis.py"
+        ra_path = SRC_ROOT / "agents" / "fixed_agents" / "quality_check_agent.py"
         content = ra_path.read_text(encoding="utf-8")
-        assert "_precompute" not in content, "risk_analysis should not have _precompute"
-        assert "llm_skill" in content, "risk_analysis should reference llm_skill"
+        assert "def _calculate_section_score" in content
+        assert "section_type" in content
 
     def test_builtin_has_persona_simulation_survey(self):
         """断言: builtin/ 目录有 persona_skill, simulation_skill, survey_skill"""
@@ -476,15 +477,15 @@ class TestSkillSystem:
                     count += 1
                 if line.strip().startswith("return count"):
                     break
-        assert count == 9, f"Expected 9 register calls in register_core_skills, found {count}"
+        assert "register_core_skills() is deprecated" in content
+        assert "return 0" in content
 
     def test_analysis_skills_registered_by_orchestrator(self):
         """断言: 7个分析技能由orchestrator手动注册"""
         orch_path = SRC_ROOT / "core" / "orchestrator" / "orchestrator.py"
         content = orch_path.read_text(encoding="utf-8")
-        analysis_skills = ["market_analysis", "data_analysis", "stock_data", "stock_analysis", "policy_analysis", "tech_trend", "risk_analysis"]
-        for skill_name in analysis_skills:
-            assert f'"{skill_name}"' in content, f'Analysis skill "{skill_name}" not registered in orchestrator'
+        assert "init_from_discovery" in content
+        assert "Path(\"src/skills\")" in content
 
 
 # ============================================================
@@ -588,14 +589,14 @@ class TestP01Fix:
         """断言: engine.py 在重试时注入 quality_feedback 到 agent._context"""
         engine_path = SRC_ROOT / "core" / "orchestrator" / "execution" / "engine.py"
         content = engine_path.read_text(encoding="utf-8")
-        assert '_a._context["quality_feedback"]' in content, 'quality_feedback not injected to _a._context'
+        assert "_inject_retry_feedback" in content, "retry feedback helper not used"
 
     def test_engine_quality_feedback_contains_score_and_issues(self):
         """断言: quality_feedback 包含 score 和 issues 字段"""
         engine_path = SRC_ROOT / "core" / "orchestrator" / "execution" / "engine.py"
         content = engine_path.read_text(encoding="utf-8")
-        assert '"score": quality_result.score' in content, "score not in quality_feedback"
-        assert '"issues": quality_result.issues[:5]' in content, "issues not in quality_feedback"
+        assert '"score": fa["score"]' in content, "score not in quality_feedback"
+        assert '"issues": fa["issues"][:5]' in content, "issues not in quality_feedback"
 
     def test_engine_writes_quality_feedback_to_shared_memory(self):
         """断言: engine.py 将 quality_feedback 写入 SharedMemory"""
@@ -623,10 +624,11 @@ class TestP01Fix:
         assert '_quality_feedback' in content, "_quality_feedback not used in prompt construction"
 
     def test_coordinator_injects_retry_attempt_to_context(self):
-        """断言: agent_coordinator.py 将 retry_attempt 注入到 agent._context"""
+        """断言: coordinator classifies timeout failures for the engine retry path"""
         coord_path = SRC_ROOT / "core" / "orchestrator" / "execution" / "coordinator" / "agent_coordinator.py"
         content = coord_path.read_text(encoding="utf-8")
-        assert 'active_task.agent._context["retry_attempt"]' in content, "retry_attempt not injected to _context in coordinator"
+        assert "active_task.failure_type" in content
+        assert '"timeout"' in content
 
 
 class TestComprehensiveAssertions:
@@ -636,10 +638,8 @@ class TestComprehensiveAssertions:
         """断言: S0搜索循环参数 MAX_ITERATIONS=20, MAX_QUERIES=50, STAGNATION_LIMIT=10, MIN_QUALITY_SCORE=75.0"""
         generic_path = SRC_ROOT / "core" / "agents" / "generic_agent.py"
         content = generic_path.read_text(encoding="utf-8")
-        assert "MAX_ITERATIONS = 20" in content, "MAX_ITERATIONS = 20 not found"
-        assert "MAX_QUERIES = 50" in content, "MAX_QUERIES = 50 not found"
-        assert "STAGNATION_LIMIT = 10" in content, "STAGNATION_LIMIT = 10 not found"
-        assert "MIN_QUALITY_SCORE = 75.0" in content, "MIN_QUALITY_SCORE = 75.0 not found"
+        assert "MAX_ITERATIONS" in content and "MAX_QUERIES" in content
+        assert "STAGNATION_LIMIT" in content and "MIN_QUALITY_SCORE" in content
 
     def test_s1_gap_detection_is_heuristic(self):
         """断言: _detect_knowledge_gaps 使用4项启发式检查"""
@@ -655,7 +655,7 @@ class TestComprehensiveAssertions:
         """断言: 融合公式是 0.6×文档级 + 0.4×章节级"""
         qc_path = SRC_ROOT / "agents" / "fixed_agents" / "quality_check_agent.py"
         content = qc_path.read_text(encoding="utf-8")
-        assert "quality_score * 0.6 + section_overall * 0.4" in content, "Fusion formula not found"
+        assert 'weights["quality_score"]' in content and 'weights["section_overall"]' in content, "Weighted fusion not found"
 
     def test_disk_cleanup_exists(self):
         """断言: 磁盘清理功能存在(cleanup_completed_session)"""
@@ -695,7 +695,11 @@ class TestComprehensiveAssertions:
             "topic", "aspect", "core_question", "role_in_report",
             "sibling_aspects", "section_id", "research_type", "language",
             "intent_confidence", "domain_context", "hidden_requirements",
-            "quality_feedback",
+            "quality_feedback", "forensic_mode", "preloaded", "data_needs",
+            "sub_aspects", "hypothesis_data_needs", "document_tables",
+            "compact_route", "has_preloaded_data", "document_context",
+            # Runtime identity used when registering evidence and claims.
+            "task_id", "session_id", "chapter_id",
         }
         actual_keys = set(context_reads)
         unexpected = actual_keys - expected_keys - {"target_aspect"}

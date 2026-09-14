@@ -85,6 +85,40 @@ class TestB1GetPreviewStatusCheck:
 
 
 # ============================================================
+# Binary preview fallback regression
+# ============================================================
+
+class TestBinaryPreviewFallback:
+    @pytest.mark.asyncio
+    async def test_docx_fallback_never_reads_binary_as_html(self, tmp_path):
+        from types import SimpleNamespace
+        from src.api.research_api import ResearchAPI
+
+        api = ResearchAPI.__new__(ResearchAPI)
+        api._executor_tasks = {}
+        docx_file = tmp_path / "report.docx"
+        docx_file.write_bytes(b"PK\\x03\\x04not-html")
+        preview_file = tmp_path / "preview.html"
+        api._preview_generator = MagicMock()
+        api._preview_generator.generate_preview.return_value = SimpleNamespace(
+            preview_path=None, preview_format="png"
+        )
+        with patch("src.api.research_api.session_manager") as sm, \
+             patch("src.api.research_api.PreviewStorage") as ps:
+            sm.get.return_value = {
+                "research_result": _make_research_result(
+                    "completed_with_warnings",
+                    document_path=str(docx_file), output_path=str(docx_file),
+                ),
+            }
+            ps.path.return_value = preview_file
+            result = await api.get_preview("test_task_001")
+
+        assert result.get("html_content") is None
+        assert not preview_file.exists()
+
+
+# ============================================================
 # B2: get_research_detail (main.py:565)
 # ============================================================
 

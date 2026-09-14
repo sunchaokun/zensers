@@ -291,7 +291,9 @@ class TestResearchConvenienceFunction:
     async def test_research_function(self):
         """测试 research 便捷函数"""
         # 创建临时 Orchestrator
-        with patch('src.core.orchestrator.research_orchestrator.ResearchOrchestrator') as MockOrchestrator:
+        # The compatibility module re-exports the function, but the function
+        # resolves its class from the canonical orchestrator module.
+        with patch('src.core.orchestrator.orchestrator.ResearchOrchestrator') as MockOrchestrator:
             mock_instance = MockOrchestrator.return_value
             mock_result = ResearchResult(
                 task_id="test_001",

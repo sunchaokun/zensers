@@ -400,14 +400,14 @@ def get_recovery_manager() -> TaskRecoveryManager:
     """Get global recovery manager"""
     global _recovery_manager
     if _recovery_manager is None:
-        from src.core.communication import SharedMemory
+        from src.core.communication import resolve_shared_memory
         from src.core.coordination import TaskCoordinator
-        
+        shared_memory = resolve_shared_memory()
         _recovery_manager = TaskRecoveryManager(
             persistence=None,
-            shared_memory=SharedMemory(),
+            shared_memory=shared_memory,
             task_coordinator=TaskCoordinator(
-                shared_memory=SharedMemory(),
+                shared_memory=shared_memory,
                 message_bus=None,
                 persistence=None,
             ),

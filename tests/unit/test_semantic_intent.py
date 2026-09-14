@@ -48,7 +48,7 @@ class TestDeepIntentResult:
             intent_reasoning="用户明确要求分析市场",
             complexity=TaskComplexity.MULTI,
             aspect_count=3,
-            recommended_skills=["search_skill", "llm_skill"],
+            recommended_skills=["search_skill"],
         )
         
         intent_result = result.to_intent_analysis_result()
@@ -148,7 +148,6 @@ class TestSemanticIntentAnalyzer:
         # 研究型
         skills = analyzer._infer_skills_from_intent(IntentType.RESEARCH, [])
         assert "search_skill" in skills
-        assert "llm_skill" in skills
         
         # 带隐含需求
         skills = analyzer._infer_skills_from_intent(
@@ -190,9 +189,7 @@ class TestSemanticIntentAnalyzer:
         """测试 LLM 分析（mock）"""
         analyzer = SemanticIntentAnalyzer(use_llm=True, fallback_to_keyword=False)
         
-        # Mock LLM Skill
-        mock_llm_skill = AsyncMock()
-        mock_llm_skill.execute.return_value = {
+        mock_llm_result = {
             "success": True,
             "content": json.dumps({
                 "primary_intent": "research",
@@ -206,17 +203,18 @@ class TestSemanticIntentAnalyzer:
                 "hidden_requirements": ["收集行业规模数据", "分析竞争格局"],
                 "aspect_count": 3,
                 "execution_preference": "parallel",
-                "recommended_skills": ["search_skill", "llm_skill"],
+                "recommended_skills": ["search_skill"],
             }),
             "model": "gpt-4o",
         }
-        
-        analyzer._llm_skill = mock_llm_skill
-        
-        result = await analyzer.analyze_async(
-            user_request="分析新能源汽车市场规模和竞争格局",
-            requirement={"topic": "新能源汽车", "aspects": ["市场规模", "竞争格局"]}
-        )
+
+        # The current implementation calls the standalone OpenAI-compatible
+        # client; the old direct skill hook is no longer part of the contract.
+        with patch("src.core.llm_client.call_llm", new=AsyncMock(return_value=mock_llm_result)):
+            result = await analyzer.analyze_async(
+                user_request="分析新能源汽车市场规模和竞争格局",
+                requirement={"topic": "新能源汽车", "aspects": ["市场规模", "竞争格局"]}
+            )
         
         assert isinstance(result, DeepIntentResult)
         assert result.used_fallback is False

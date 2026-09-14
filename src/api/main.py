@@ -35,6 +35,8 @@ def _build_message_entry(msg: dict, fallback_id: str, fallback_ts: str = "") -> 
         "content": msg["content"],
         "timestamp": msg.get("timestamp", fallback_ts),
     }
+    if msg.get("response_id"):
+        entry["response_id"] = msg["response_id"]
     if msg.get("_type"):
         entry["_type"] = msg["_type"]
     if msg.get("agent_id") or msg.get("agent_name") or msg.get("action"):
@@ -77,36 +79,48 @@ def _parse_heartbeat(last_hb: str) -> datetime:
         hb_time = hb_time.astimezone(timezone.utc).replace(tzinfo=None)
     return hb_time
 
-# Recover ProgressStreamer states from persisted session data
+# Recover ProgressStreamer states from persisted session data.  A process
+# restart is an ownership event: unfinished work becomes recoverable
+# ``interrupted``.  Heartbeat age is telemetry only and is not a deadline.
 from src.core.progress_streamer import ProgressStreamer
+from src.core.task_persistence import TaskPersistenceManager, TaskState
+_task_persistence = TaskPersistenceManager()
 _recovered_tasks = 0
 for _sid, _session in list(_session_manager._sessions.items()):
     _task_state = ProgressStreamer._restore_from_session(_sid)
     if _task_state:
-        _tp = _session.get("task_progress", {})
-        _last_hb = _tp.get("last_heartbeat_at")
-        _is_stale = True
-        if _last_hb and _task_state.status == "running":
-            try:
-                _hb_time = _parse_heartbeat(_last_hb)
-                _is_stale = (datetime.now() - _hb_time).total_seconds() > 300
-            except (ValueError, TypeError):
-                pass
-        if _is_stale and _task_state.status == "running":
+        if _task_state.status == "running":
             _task_state.status = "paused"
             try:
                 _session["interrupted"] = True
                 _session["interrupted_reason"] = "Server restarted - background execution lost"
+                _persisted_task = _task_persistence.load_task(_sid)
+                if _persisted_task and _persisted_task.status and not _persisted_task.status.state.is_terminal():
+                    _task_persistence.mark_interrupted(_sid, "Server restarted - background execution lost")
             except Exception:
                 pass
         ProgressStreamer._task_states[_sid] = _task_state
         ProgressStreamer._subscribers[_sid] = set()
         _recovered_tasks += 1
 
+# Recover persisted tasks even when no ProgressStreamer snapshot exists.
+# This is keyed by process restart/ownership, never by elapsed time.
+try:
+    for _persisted_task in _task_persistence.recover_all_tasks():
+        if _persisted_task.status and _persisted_task.status.state in (
+            TaskState.RUNNING, TaskState.INITIALIZING,
+        ):
+            _task_persistence.mark_interrupted(
+                _persisted_task.task_id,
+                "Server restarted - execution owner lost",
+            )
+except Exception as _recovery_error:
+    logger.warning("Task persistence startup recovery failed: %s", type(_recovery_error).__name__)
+
 logger.info(f"ProgressStreamer recovered {_recovered_tasks} task states from disk")
 
 app = FastAPI(title="Zensers API", description="AI Market Research Platform RESTful API",
-              version="3.5.2", openapi_url="/api/v1/openapi.json",
+              version="3.6.0", openapi_url="/api/v1/openapi.json",
               docs_url="/api/v1/docs", redoc_url="/api/v1/redoc")
 
 _cors_origins = os.environ.get("CORS_ORIGINS", "http://localhost:3000,http://localhost:3001,http://127.0.0.1:3000,http://127.0.0.1:3001").split(",")
@@ -377,21 +391,12 @@ async def get_research_status(task_id: str):
             rr = session.get("research_result")
             rr_status = rr.get("status") if isinstance(rr, dict) else None
             _terminal_rr = ("completed", "completed_with_warnings", "failed", "cancelled", "error")
+            if session.get("interrupted") and response.get("status") == "running":
+                response["status"] = "paused"
+                response["interrupted"] = True
 
-            if rr_status not in _terminal_rr:
-                tp_data = session.get("task_progress", {})
-                if tp_data.get("status") == "running":
-                    last_hb = tp_data.get("last_heartbeat_at")
-                    is_stale = True
-                    if last_hb:
-                        try:
-                            hb_time = _parse_heartbeat(last_hb)
-                            is_stale = (datetime.now() - hb_time).total_seconds() > 300
-                        except (ValueError, TypeError):
-                            pass
-                    if is_stale:
-                        response["status"] = "paused"
-                        response["interrupted"] = True
+            # SSE/heartbeat age is transport telemetry, not a business
+            # deadline.  It must never pause or rewrite a running task.
 
             # Persisted agent messages (last 10)
             events = session.get("recent_events", [])
@@ -543,6 +548,18 @@ async def quality_action(request: dict):
     return await research_api.handle_quality_action(req)
 
 
+@app.post("/api/v1/research/ppt/revise")
+async def revise_ppt(request: dict):
+    from src.api.research_api import PptRevisionAPIRequest
+    req = PptRevisionAPIRequest(**request)
+    return await research_api.handle_ppt_revision(req)
+
+
+@app.post("/api/v1/research/ppt/{session_id}/confirm-export")
+async def confirm_ppt_export(session_id: str):
+    return await research_api.confirm_ppt_export(session_id)
+
+
 @app.get("/api/v1/research/quality/{session_id}")
 async def get_quality_state(session_id: str):
     return await research_api.get_quality_state(session_id)
@@ -566,7 +583,8 @@ async def get_sections(task_id: str):
 
 @app.post("/api/v1/research/revise")
 async def revise_sections(task_id: str = Form(...), aspects: str = Form(...),
-                           adjustment: Optional[str] = Form(None)):
+                           adjustment: Optional[str] = Form(None),
+                           base_report_version: Optional[int] = Form(None)):
     import json
     try:
         aspects_list = json.loads(aspects)
@@ -574,13 +592,58 @@ async def revise_sections(task_id: str = Form(...), aspects: str = Form(...),
             raise ValueError("aspects must be a list")
     except (json.JSONDecodeError, ValueError):
         raise HTTPException(status_code=400, detail="Invalid aspects format")
-    return await research_api.revise_sections(task_id, aspects_list, adjustment)
+    return await research_api.revise_sections(task_id, aspects_list, adjustment, base_report_version)
 
 
 @app.get("/api/v1/research/completed")
 async def list_completed_research(limit: int = 50):
     from src.api.document_api import DocumentAPI
     return await DocumentAPI().list_completed_research(limit)
+
+
+def _resolve_history_status(session: dict, task_id: str) -> str:
+    """Resolve one canonical status for both history list and detail views.
+
+    ProgressStreamer is the live/recovered execution source.  The persisted
+    state machine is only the fallback because it can lag behind a pause or a
+    process restart.  Keeping this in one helper prevents list/detail drift.
+    """
+    rr = session.get("research_result") or {}
+    rr_status = rr.get("status") if isinstance(rr, dict) else None
+    terminal_results = ("completed", "completed_with_warnings", "failed", "cancelled", "error")
+    if rr_status in terminal_results:
+        return "completed" if rr_status in ("completed", "completed_with_warnings") else "paused"
+
+    progress_state = ProgressStreamer.get_task_state(task_id)
+    progress_status = getattr(progress_state, "status", None)
+    if progress_status in ("paused", "error", "cancelled"):
+        return "paused"
+    if progress_status == "completed":
+        return "completed"
+    if progress_status in ("running", "reporting"):
+        phase = getattr(progress_state, "current_phase", None)
+        return "reporting" if phase in ("report_generation", "quality_check") else "analyzing"
+
+    state_machine = session.get("state_machine")
+    current_state = getattr(state_machine, "current_state", None)
+    if current_state is None and isinstance(state_machine, dict):
+        current_state = state_machine.get("current_state")
+    state_value = getattr(current_state, "value", current_state)
+    status_map = {
+        "understanding": "paused", "clarifying": "paused",
+        "framework_confirm": "analyzing", "executing": "reporting",
+        "paused": "paused", "previewing": "completed",
+        "completed": "completed", "cancelled": "paused",
+        "data_extracted": "analyzing", "requirement_confirm": "analyzing",
+        "data_supplement": "analyzing",
+    }
+    if state_value:
+        return status_map.get(state_value, "paused")
+
+    current_step = session.get("current_step", 0)
+    if current_step == 6:
+        return "reporting"
+    return "analyzing" if current_step and current_step > 0 else "paused"
 
 
 @app.get("/api/v1/research/sessions")
@@ -629,31 +692,7 @@ def list_all_sessions(limit: int = 20, offset: int = 0):
                 research_context = session.get("research_context", {})
                 topic = (research_context.get("topic") if isinstance(research_context, dict) else None) or session.get("user_input", "")
 
-                rr = session.get("research_result") or {}
-                rr_status = rr.get("status") if isinstance(rr, dict) else None
-                _terminal_rr = ("completed", "completed_with_warnings", "failed", "cancelled", "error")
-
-                state_machine = session.get("state_machine")
-                if rr_status in _terminal_rr:
-                    state = "completed" if rr_status in ("completed", "completed_with_warnings") else "paused"
-                elif state_machine and hasattr(state_machine, "current_state"):
-                    status_map = {
-                        "understanding": "paused", "clarifying": "paused",
-                        "framework_confirm": "analyzing", "executing": "reporting",
-                        "paused": "paused", "previewing": "completed",
-                        "completed": "completed", "cancelled": "paused",
-                        "data_extracted": "analyzing", "requirement_confirm": "analyzing",
-                        "data_supplement": "analyzing",
-                    }
-                    state = status_map.get(state_machine.current_state.value, "paused")
-                else:
-                    current_step = session.get("current_step", 0)
-                    if current_step == 6:
-                        state = "reporting"
-                    elif current_step and current_step > 0:
-                        state = "analyzing"
-                    else:
-                        state = "paused"
+                state = _resolve_history_status(session, sid)
 
                 all_results.append({
                     "task_id": sid, "title": topic or session.get("user_input", "Unnamed Research"),
@@ -691,32 +730,7 @@ async def get_research_detail(task_id: str):
     research_context = session.get("research_context", {})
     topic = research_context.get("topic") or session.get("user_input", "")
 
-    rr = session.get("research_result") or {}
-    rr_status = rr.get("status") if isinstance(rr, dict) else None
-    _terminal_rr = ("completed", "completed_with_warnings", "failed", "cancelled", "error")
-
-    state_machine = session.get("state_machine")
-    if rr_status in _terminal_rr:
-        state = "completed" if rr_status in ("completed", "completed_with_warnings") else "paused"
-    elif state_machine and hasattr(state_machine, "current_state"):
-        status_map = {
-            "understanding": "analyzing", "clarifying": "analyzing",
-            "framework_confirm": "analyzing", "executing": "reporting",
-            "paused": "paused", "previewing": "completed",
-            "completed": "completed", "cancelled": "paused",
-            "data_extracted": "analyzing", "requirement_confirm": "analyzing",
-            "data_supplement": "analyzing",
-        }
-        state = status_map.get(state_machine.current_state.value, "analyzing")
-        if state_machine.current_state.value == "executing":
-            from src.core.progress_streamer import ProgressStreamer
-            ps = ProgressStreamer.get_task_state(task_id)
-            if ps is None or ps.status == "completed":
-                state = "completed"
-            elif ps.status == "error":
-                state = "paused"
-    else:
-        state = "analyzing"
+    state = _resolve_history_status(session, task_id)
 
     # P1 fix: Include preview and download URLs for completed tasks
     preview_url = None
@@ -787,7 +801,22 @@ async def get_research_detail(task_id: str):
         if isinstance(msg, dict) and msg.get("type") != "context_summary" and ("role" in msg or "type" in msg) and "content" in msg:
             messages.append(_build_message_entry(msg, f"msg-{i}", created_at or ""))
 
-    return {**meta, "messages": messages, "config": {
+    report_context = session.get("report_context")
+    if not isinstance(report_context, dict):
+        try:
+            from src.core.report_context import update_report_context
+            report_context = update_report_context(task_id, session, publish=False)
+        except Exception:
+            report_context = None
+
+    agent_messages = [
+        event.get("data", {}) for event in session.get("recent_events", [])
+        if isinstance(event, dict) and event.get("event") == "agent_message"
+        and isinstance(event.get("data"), dict)
+    ]
+
+    return {**meta, "messages": messages, "agent_messages": agent_messages,
+            "report_context": report_context, "config": {
         "output_type": meta.get("output_type", "report"),
         "template": "consulting", "sections": [],
     }, "framework": research_context.get("framework"),
@@ -797,6 +826,21 @@ async def get_research_detail(task_id: str):
      "custom_params": session.get("custom_params"),
      "selected_sections": session.get("selected_sections"),
      "phases": phases, "progress": progress_val}
+
+
+@app.get("/api/v1/research/{task_id}/report-context")
+async def get_report_context(task_id: str):
+    """Return the latest durable, user-visible report context snapshot."""
+    from src.core.session_manager import SessionManager
+    from src.core.report_context import update_report_context
+
+    session = SessionManager.get_instance().get(task_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Research not found")
+    context = session.get("report_context")
+    if not isinstance(context, dict):
+        context = update_report_context(task_id, session, publish=False)
+    return context
 
 
 @app.get("/api/v1/research/{task_id}/messages")
@@ -1238,7 +1282,12 @@ async def changelog(
 # ============ Health ============
 @app.get("/api/v1/health")
 async def health():
-    return {"status": "ok", "version": get_local_version()}
+    return {"status": "ok", "version": get_local_version(),
+            "search": getattr(app.state, "search_provider_health", {
+                "healthy": False, "providers": {
+                    "anysearch": {"healthy": False, "provider": "anysearch", "error_class": "not_checked"}
+                }
+            })}
 
 @app.get("/")
 async def root():
@@ -1296,6 +1345,21 @@ def _repair_ghost_sessions():
 @app.on_event("startup")
 async def startup_event():
     logger.info("Zensers API started")
+
+    # Record safe search-provider health at startup.  The key and provider
+    # response body are intentionally never logged or attached to the state.
+    try:
+        from src.core.search import AnySearchProvider
+        app.state.search_provider_health = await AnySearchProvider(timeout=3).health_check()
+        logger.info("Search provider health checked: anysearch healthy=%s",
+                    app.state.search_provider_health.get("healthy", False))
+    except Exception as exc:
+        app.state.search_provider_health = {
+            "healthy": False, "providers": {
+                "anysearch": {"healthy": False, "provider": "anysearch", "error_class": "provider_error"}
+            }
+        }
+        logger.warning("Search provider health check failed: %s", type(exc).__name__)
 
     from src.core.orchestrator.execution.task_utils import register_global_exception_handler
     register_global_exception_handler()

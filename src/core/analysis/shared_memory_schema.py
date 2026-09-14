@@ -35,6 +35,14 @@ class DataPoint:
     unit: str = ""
     source: str = ""
     confidence: float = 1.0
+    source_url: str = ""
+    evidence_id: str = ""
+    provenance_id: str = ""
+    evidence_excerpt: str = ""
+    locator: str = ""
+    task_id: str = ""
+    request_id: str = ""
+    retrieved_at: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -43,6 +51,14 @@ class DataPoint:
             "unit": self.unit,
             "source": self.source,
             "confidence": self.confidence,
+            "source_url": self.source_url,
+            "evidence_id": self.evidence_id,
+            "provenance_id": self.provenance_id,
+            "evidence_excerpt": self.evidence_excerpt,
+            "locator": self.locator,
+            "task_id": self.task_id,
+            "request_id": self.request_id,
+            "retrieved_at": self.retrieved_at,
         }
 
     @classmethod
@@ -53,6 +69,14 @@ class DataPoint:
             unit=data.get("unit", ""),
             source=data.get("source", ""),
             confidence=data.get("confidence", 1.0),
+            source_url=data.get("source_url", ""),
+            evidence_id=data.get("evidence_id", ""),
+            provenance_id=data.get("provenance_id", ""),
+            evidence_excerpt=data.get("evidence_excerpt", ""),
+            locator=data.get("locator", ""),
+            task_id=data.get("task_id", ""),
+            request_id=data.get("request_id", ""),
+            retrieved_at=data.get("retrieved_at"),
         )
 
 

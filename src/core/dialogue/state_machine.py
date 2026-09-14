@@ -30,6 +30,8 @@ class ConversationState(Enum):
     DATA_EXTRACTED = "data_extracted"           # 数据已提取
     REQUIREMENT_CONFIRM = "requirement_confirm"  # 确认PPT需求
     DATA_SUPPLEMENT = "data_supplement"          # 补充数据缺口
+    PPT_GENERATING = "ppt_generating"
+    PPT_REVISING = "ppt_revising"
 
 
 class InvalidTransitionError(Exception):
@@ -82,10 +84,13 @@ class ConversationStateMachine:
             ConversationState.CANCELLED,    # 取消
         ],
         ConversationState.CANCELLED: [
-            ConversationState.CANCELLED,    # 终态
+            ConversationState.CANCELLED,
+            ConversationState.EXECUTING,    # 可恢复取消：由新执行代际继续
+            ConversationState.PAUSED,       # 恢复失败时保留可恢复停止态
         ],
         ConversationState.PREVIEWING: [
             ConversationState.PREVIEWING,
+            ConversationState.PPT_REVISING,
             ConversationState.PAUSED,       # 暂停
             ConversationState.COMPLETED,
             ConversationState.CANCELLED,
@@ -111,6 +116,19 @@ class ConversationStateMachine:
             ConversationState.DATA_SUPPLEMENT,
             ConversationState.FRAMEWORK_CONFIRM,
             ConversationState.CLARIFYING,
+            ConversationState.CANCELLED,
+        ],
+        ConversationState.PPT_GENERATING: [
+            ConversationState.PPT_GENERATING,
+            ConversationState.PREVIEWING,
+            ConversationState.PAUSED,
+            ConversationState.CANCELLED,
+        ],
+        ConversationState.PPT_REVISING: [
+            ConversationState.PPT_REVISING,
+            ConversationState.PREVIEWING,
+            ConversationState.PPT_GENERATING,
+            ConversationState.PAUSED,
             ConversationState.CANCELLED,
         ],
     }

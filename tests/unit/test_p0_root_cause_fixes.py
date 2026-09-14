@@ -418,8 +418,8 @@ class TestR1DContentDependency:
 
         assert len(synthesis) == 1
         assert len(analysis) == 2
-        assert synthesis[0]["section_id"] == "investment_summary"
-        assert set(synthesis[0]["content_dependency"]) == {"industry_overview", "market_size"}
+        assert synthesis[0]["section_id"] == "synthesis_0"
+        assert set(synthesis[0]["content_dependency"]) == {"section_0", "section_1"}
         assert len(deps) == 2
 
     def test_analysis_has_peers_dependency(self):
@@ -440,6 +440,31 @@ class TestR1DContentDependency:
             if s["section_role"] == "analysis":
                 peers = [a["section_id"] for a in sections if a["section_role"] == "analysis" and a["section_id"] != s["section_id"]]
                 assert len(s["content_dependency"]) <= 3
+
+    def test_chinese_summary_and_outlook_are_synthesis_sections(self):
+        from src.core.orchestrator.orchestrator import ResearchOrchestrator
+
+        structure = ResearchOrchestrator()._build_task_structure_from_section_details(
+            [
+                {"id": "summary", "name": "摘要与核心结论"},
+                {"id": "market_size", "name": "市场规模与增长"},
+                {"id": "outlook", "name": "总结与展望"},
+            ],
+            "锂电池行业", "synthesis-cn",
+        )
+
+        roles = {item["template_id"]: item["section_role"] for item in structure["sections"]}
+        assert roles["summary"] == "synthesis"
+        assert roles["outlook"] == "synthesis"
+        assert roles["market_size"] == "analysis"
+
+        synthesis_ids = [item["section_id"] for item in structure["sections"] if item["section_role"] == "synthesis"]
+        for item in structure["sections"]:
+            if item["section_role"] == "synthesis":
+                assert set(item["content_dependency"]) == {
+                    section["section_id"] for section in structure["sections"]
+                    if section["section_role"] == "analysis"
+                }
 
 
 # ============================================================
@@ -464,7 +489,7 @@ class TestR1EChineseSectionNames:
             "Test", "t3",
         )
         sections = ts["sections"]
-        name_map = {s["section_id"]: s["section_name"] for s in sections}
+        name_map = {s["template_id"]: s["section_name"] for s in sections}
 
         assert name_map["investment_summary"] == "投资摘要"
         assert name_map["market_size"] == "市场规模与增长"

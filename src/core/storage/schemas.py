@@ -46,6 +46,10 @@ __all__ = [
     "RAW_RESEARCH_DATA_SCHEMA",
     
     # 调研系统表（v2.0新增）
+    "SURVEY_STORAGE_META_SCHEMA",
+    "SURVEY_DEFINITIONS_SCHEMA",
+    "SURVEY_SIMULATION_RUNS_SCHEMA",
+    "SURVEY_SIMULATION_RUN_HISTORY_SCHEMA",
     "SURVEY_TASKS_SCHEMA",
     "SURVEY_RESPONSES_SCHEMA",
     "SURVEY_PERSONAS_SCHEMA",
@@ -432,6 +436,89 @@ RAW_RESEARCH_DATA_SCHEMA = TableSchema(
 # 调研系统表（v2.0新增）
 # ============================================================
 
+SURVEY_STORAGE_META_SCHEMA = TableSchema(
+    table_name="survey_storage_meta",
+    version=1,
+    description="问卷存储元数据和 Schema 版本",
+    columns=[
+        ColumnDef("component", "TEXT", primary_key=True),
+        ColumnDef("schema_version", "INTEGER", not_null=True),
+        ColumnDef("updated_at", "TEXT", not_null=True),
+    ],
+)
+
+SURVEY_DEFINITIONS_SCHEMA = TableSchema(
+    table_name="survey_definitions",
+    version=1,
+    description="问卷定义表 - 存储问卷结构和元数据",
+    columns=[
+        ColumnDef("survey_id", "TEXT", primary_key=True),
+        ColumnDef("title", "TEXT", not_null=True),
+        ColumnDef("description", "TEXT", not_null=True, default=""),
+        ColumnDef("questions_json", "TEXT", not_null=True),
+        ColumnDef("created_at", "TEXT", not_null=True),
+        ColumnDef("updated_at", "TEXT", not_null=True),
+        ColumnDef("metadata_json", "TEXT", not_null=True, default="{}"),
+    ],
+    indexes=[
+        IndexDef("idx_survey_definitions_created", "survey_definitions", ["created_at"]),
+    ],
+)
+
+SURVEY_SIMULATION_RUNS_SCHEMA = TableSchema(
+    table_name="survey_simulation_runs",
+    version=2,
+    description="问卷模拟当前运行快照",
+    columns=[
+        ColumnDef("survey_id", "TEXT", primary_key=True),
+        ColumnDef("run_id", "TEXT"),
+        ColumnDef("status", "TEXT", not_null=True),
+        ColumnDef("target_count", "INTEGER", not_null=True, default=0),
+        ColumnDef("responses_json", "TEXT", not_null=True, default="[]"),
+        ColumnDef("personas_json", "TEXT", not_null=True, default="[]"),
+        ColumnDef("result_json", "TEXT", not_null=True, default="{}"),
+        ColumnDef("updated_at", "TEXT", not_null=True),
+        ColumnDef("started_at", "TEXT"),
+        ColumnDef("finished_at", "TEXT"),
+        ColumnDef("error_message", "TEXT"),
+    ],
+    indexes=[
+        IndexDef("idx_survey_runs_status", "survey_simulation_runs", ["status"]),
+    ],
+    foreign_keys=[
+        ForeignKeyDef(["survey_id"], "survey_definitions", ["survey_id"], on_delete="CASCADE"),
+    ],
+)
+
+SURVEY_SIMULATION_RUN_HISTORY_SCHEMA = TableSchema(
+    table_name="survey_simulation_run_history",
+    version=2,
+    description="问卷模拟运行历史 - 用于审计和运行追踪",
+    columns=[
+        ColumnDef("run_id", "TEXT", primary_key=True),
+        ColumnDef("survey_id", "TEXT", not_null=True),
+        ColumnDef("status", "TEXT", not_null=True),
+        ColumnDef("target_count", "INTEGER", not_null=True, default=0),
+        ColumnDef("responses_json", "TEXT", not_null=True, default="[]"),
+        ColumnDef("personas_json", "TEXT", not_null=True, default="[]"),
+        ColumnDef("result_json", "TEXT", not_null=True, default="{}"),
+        ColumnDef("created_at", "TEXT", not_null=True),
+        ColumnDef("started_at", "TEXT"),
+        ColumnDef("finished_at", "TEXT"),
+        ColumnDef("error_message", "TEXT"),
+    ],
+    indexes=[
+        IndexDef(
+            "idx_survey_run_history_survey",
+            "survey_simulation_run_history",
+            ["survey_id", "created_at"],
+        ),
+    ],
+    foreign_keys=[
+        ForeignKeyDef(["survey_id"], "survey_definitions", ["survey_id"], on_delete="CASCADE"),
+    ],
+)
+
 SURVEY_TASKS_SCHEMA = TableSchema(
     table_name="survey_tasks",
     version=1,
@@ -592,6 +679,10 @@ def register_all_schemas() -> None:
         RAW_RESEARCH_DATA_SCHEMA,
         
         # 调研系统表（v2.0新增）
+        SURVEY_STORAGE_META_SCHEMA,
+        SURVEY_DEFINITIONS_SCHEMA,
+        SURVEY_SIMULATION_RUNS_SCHEMA,
+        SURVEY_SIMULATION_RUN_HISTORY_SCHEMA,
         SURVEY_TASKS_SCHEMA,
         SURVEY_RESPONSES_SCHEMA,
         SURVEY_PERSONAS_SCHEMA,

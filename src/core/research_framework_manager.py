@@ -35,10 +35,16 @@ FRAMEWORK_CONFIG_PATH = Path("config/research_frameworks.yaml")
 @dataclass
 class SearchConfig:
     """搜索配置"""
-    max_queries_per_section: int = 10
+    max_queries_per_section: int = 5
     max_results_per_query: int = 20
-    max_total_searches: int = 100  # P0-3新增：总搜索次数上限
+    max_total_searches: int = 30  # 总搜索次数上限
     priority_sources: List[str] = field(default_factory=list)
+
+    def __post_init__(self):
+        # Framework YAMLs are user-editable and historically contain larger
+        # values. Enforce the quota-safe ceiling at the runtime boundary.
+        self.max_queries_per_section = min(max(int(self.max_queries_per_section), 3), 5)
+        self.max_total_searches = min(max(int(self.max_total_searches), self.max_queries_per_section), 30)
 
 
 @dataclass

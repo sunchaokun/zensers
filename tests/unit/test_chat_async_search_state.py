@@ -118,6 +118,39 @@ class TestProgressStreamerSSEDataMissingModeStep:
         assert sse_data['step'] == 0
 
 
+class TestProgressStreamerChatReplay:
+    """Chat responses must replay even while the task remains pending."""
+
+    @pytest.mark.asyncio
+    async def test_pending_chat_response_replays_on_late_subscriber(self):
+        from src.core.progress_streamer import ProgressStreamer, SSEEventType
+
+        task_id = 'ses-pending-chat-replay'
+        ProgressStreamer._task_states.pop(task_id, None)
+        ProgressStreamer._subscribers.pop(task_id, None)
+        task = ProgressStreamer.get_or_create_task(task_id)
+        task.status = 'pending'
+        task.last_chat_response = {
+            'response_id': 'chat-stable-1',
+            'message': '中文回复',
+            'action': 'continue_chat',
+            'suggestions': ['继续分析'],
+        }
+
+        streamer = ProgressStreamer(task_id)
+        streamer.subscribe()
+        message = await asyncio.wait_for(streamer._queue.get(), timeout=2)
+
+        assert message.event == SSEEventType.CHAT_RESPONSE.value
+        assert message.data['response_id'] == 'chat-stable-1'
+        assert message.data['message'] == '中文回复'
+        assert message.data['suggestions'] == ['继续分析']
+
+        streamer.unsubscribe()
+        ProgressStreamer._task_states.pop(task_id, None)
+        ProgressStreamer._subscribers.pop(task_id, None)
+
+
 class TestSessionStreamerReplayDuplicates:
     """Bug B: SSE replay can deliver duplicate chat_response events."""
 

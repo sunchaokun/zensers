@@ -58,8 +58,33 @@ class TestSSEPersistsToConversationHistory:
             history = session.get("conversation_history", [])
             assert len(history) == 0
 
-    def test_sse_messages_also_sync_display_history(self):
-        """SSE messages written to conversation_history should sync to display_history"""
+    def test_agent_search_metadata_survives_persistence(self):
+        from src.core.session_manager import SessionManager
+        from src.core.session_streamer import SessionStreamer
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mgr = SessionManager(storage_dir=tmpdir)
+            mgr.create("sse-test-metadata", {"user_id": "u1", "conversation_history": []})
+            session = mgr.get("sse-test-metadata")
+            SessionStreamer.push_agent_message("sse-test-metadata", {
+                "agent_id": "web_search",
+                "agent_name": "Web Search Agent",
+                "action": "completed",
+                "content": "Completed: web_search",
+                "provider": "anysearch",
+                "quality_score": 82.5,
+                "cache_hit": False,
+                "stop_reason": "quality_reached",
+            })
+            history = session.get("conversation_history", [])
+            message = next(m for m in history if m.get("agent_id") == "web_search")
+            assert message["provider"] == "anysearch"
+            assert message["quality_score"] == 82.5
+            assert message["cache_hit"] is False
+            assert message["stop_reason"] == "quality_reached"
+
+    def test_sse_messages_use_conversation_history_as_display_source(self):
+        """The current history model has one append-only display source."""
         from src.core.session_manager import SessionManager
         from src.core.session_streamer import SessionStreamer
         import tempfile
@@ -72,6 +97,7 @@ class TestSSEPersistsToConversationHistory:
                 "message": "Test message",
                 "timestamp": "2026-01-01T12:00:00",
             })
-            display = session.get("display_history", [])
-            assert len(display) >= 1
-            assert any(m["content"] == "Test message" for m in display)
+            assert "display_history" not in session
+            history = session.get("conversation_history", [])
+            assert len(history) >= 1
+            assert any(m["content"] == "Test message" for m in history)

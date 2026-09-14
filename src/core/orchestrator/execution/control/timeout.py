@@ -14,10 +14,10 @@ logger = logging.getLogger(__name__)
 @dataclass
 class TimeoutConfig:
     """超时配置"""
-    default_timeout: float = 300.0    # 默认超时（秒）
-    agent_timeout: float = 300.0      # 单Agent超时
-    stage_timeout: float = 600.0      # 阶段超时
-    task_timeout: float = 1800.0      # 整体任务超时
+    default_timeout: Optional[float] = None  # 不设置隐式生命周期超时
+    agent_timeout: Optional[float] = None
+    stage_timeout: Optional[float] = None
+    task_timeout: Optional[float] = None
 
 
 class TimeoutController:
@@ -67,14 +67,13 @@ class TimeoutController:
         Returns:
             执行结果，超时时返回错误字典
         """
-        timeout = timeout or self.config.default_timeout
+        timeout = self.config.default_timeout if timeout is None else timeout
         
         try:
-            # 使用asyncio.wait_for实现超时
-            result = await asyncio.wait_for(
-                execute_func(),
-                timeout=timeout
-            )
+            if timeout is None:
+                result = await execute_func()
+            else:
+                result = await asyncio.wait_for(execute_func(), timeout=timeout)
             return result
             
         except asyncio.TimeoutError:
@@ -135,7 +134,7 @@ class TimeoutController:
             on_timeout=on_timeout,
         )
     
-    def get_timeout_for_stage(self, stage: str) -> float:
+    def get_timeout_for_stage(self, stage: str) -> Optional[float]:
         """
         获取指定阶段的超时时间
         

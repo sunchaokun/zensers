@@ -195,10 +195,10 @@ class TestFixD_BuildRunningContextModeGuard:
 
 
 class TestFixE_SseDisconnectProgressStreamer:
-    """Fix E: _on_sse_disconnect calls ProgressStreamer.pause_task."""
+    """SSE disconnect is transport-only and does not mutate task state."""
 
     @pytest.mark.asyncio
-    async def test_delayed_pause_calls_progress_streamer_pause_task(self):
+    async def test_disconnect_does_not_pause_progress_streamer(self):
         task_id = "ses_sse_disconnect_test"
         api = _make_api()
         mock_executor = MagicMock()
@@ -230,14 +230,13 @@ class TestFixE_SseDisconnectProgressStreamer:
                 if mock_pause.called:
                     break
 
-            assert mock_pause.called, "ProgressStreamer.pause_task was not called"
-            assert task_id in mock_pause.call_args[0][0]
+            assert not mock_pause.called
 
         sm._sessions.pop(task_id, None)
         cm.cleanup(task_id)
 
     @pytest.mark.asyncio
-    async def test_delayed_pause_calls_session_streamer_push(self):
+    async def test_disconnect_does_not_push_pause_message(self):
         task_id = "ses_sse_push_test"
         api = _make_api()
         mock_executor = MagicMock()
@@ -269,11 +268,7 @@ class TestFixE_SseDisconnectProgressStreamer:
                 if mock_push.called:
                     break
 
-            assert mock_push.called, "SessionStreamer.push_agent_message was not called"
-            call_args = mock_push.call_args
-            assert call_args[0][0] == task_id
-            agent_data = call_args[0][1]
-            assert agent_data["action"] == "paused"
+            assert not mock_push.called
 
         sm._sessions.pop(task_id, None)
         cm.cleanup(task_id)
@@ -525,7 +520,7 @@ class TestFixE_SseDisconnectStrictness:
     """Fix E strictness: _on_sse_disconnect edge cases and call order."""
 
     @pytest.mark.asyncio
-    async def test_cancel_manager_pause_called_before_progress_streamer(self):
+    async def test_sse_disconnect_does_not_pause_or_emit_business_event(self):
         task_id = "ses_order_test"
         api = _make_api()
         mock_executor = MagicMock()
@@ -569,11 +564,7 @@ class TestFixE_SseDisconnectStrictness:
                 if len(call_order) >= 3:
                     break
 
-        assert "cancel_manager.pause" in call_order, "cancel_manager.pause was not called"
-        assert "progress_streamer.pause_task" in call_order, "ProgressStreamer.pause_task was not called"
-        assert "session_streamer.push" in call_order, "SessionStreamer.push_agent_message was not called"
-        assert call_order.index("cancel_manager.pause") < call_order.index("progress_streamer.pause_task"), \
-            "cancel_manager.pause must be called before ProgressStreamer.pause_task"
+        assert call_order == []
 
         sm._sessions.pop(task_id, None)
         cm.cleanup(task_id)
@@ -618,7 +609,7 @@ class TestFixE_SseDisconnectStrictness:
         assert not mock_pause.called, "ProgressStreamer.pause_task should not be called for missing session"
 
     @pytest.mark.asyncio
-    async def test_sse_disconnect_executor_dead_marks_failed(self):
+    async def test_sse_disconnect_executor_dead_does_not_mark_failed(self):
         task_id = "ses_dead_executor"
         api = _make_api()
         mock_executor = MagicMock()
@@ -649,15 +640,15 @@ class TestFixE_SseDisconnectStrictness:
                 if mock_fail.called:
                     break
 
-        assert mock_fail.called, "ProgressStreamer.fail_task should be called when executor is dead"
-        assert not mock_pause.called, "ProgressStreamer.pause_task should NOT be called when executor is dead"
-        assert sm._sessions[task_id]["research_result"]["status"] == "failed"
+        assert not mock_fail.called
+        assert not mock_pause.called
+        assert sm._sessions[task_id]["research_result"]["status"] == "running"
 
         sm._sessions.pop(task_id, None)
         cm.cleanup(task_id)
 
     @pytest.mark.asyncio
-    async def test_session_streamer_push_content_contains_progress(self):
+    async def test_sse_disconnect_does_not_push_resume_message(self):
         task_id = "ses_push_content"
         api = _make_api()
         mock_executor = MagicMock()
@@ -688,10 +679,7 @@ class TestFixE_SseDisconnectStrictness:
                 if mock_push.called:
                     break
 
-            assert mock_push.called
-            agent_data = mock_push.call_args[0][1]
-            assert "75%" in agent_data["content"], "Progress percentage should be in push content"
-            assert "继续" in agent_data["content"], "Resume hint should be in push content"
+            assert not mock_push.called
 
         sm._sessions.pop(task_id, None)
         cm.cleanup(task_id)

@@ -21,13 +21,13 @@ class TestCancelResumeStateInconsistency:
         sm = ConversationStateMachine(research_id="test")
         assert sm.can_transition_to(ConversationState.CANCELLED)
 
-    def test_cancelled_is_terminal(self):
-        """验证: CANCELLED 状态只有 CANCELLED 自身是合法转移"""
+    def test_cancelled_is_resumable_stop_state(self):
+        """验证: 可恢复取消状态允许通过新执行代际继续"""
         sm = ConversationStateMachine(research_id="test")
         sm.transition(ConversationState.CANCELLED)
         allowed = sm.get_allowed_transitions()
-        assert allowed == [ConversationState.CANCELLED], \
-            f"CANCELLED 应只允许转移到自身，但允许: {allowed}"
+        assert ConversationState.EXECUTING in allowed
+        assert ConversationState.PAUSED in allowed
 
     def test_sync_state_machine_respects_cancelled_terminal(self):
         """

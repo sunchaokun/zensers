@@ -44,12 +44,21 @@ class TaskState(Enum):
     INITIALIZING = "initializing" # Initializing
     RUNNING = "running"           # Running
     PAUSED = "paused"             # Paused
+    CANCELLED = "cancelled"       # Stopped with checkpoint retained
+    INTERRUPTED = "interrupted"   # Worker interruption, recoverable
     COMPLETED = "completed"       # Completed
+    COMPLETED_WITH_WARNINGS = "completed_with_warnings"  # Delivered with quality warnings
     FAILED = "failed"             # Failed
+    DELETED = "deleted"           # Explicit deletion tombstone
     
     def is_terminal(self) -> bool:
         """Check if terminal state"""
-        return self in (TaskState.COMPLETED, TaskState.FAILED)
+        return self in (
+            TaskState.COMPLETED,
+            TaskState.COMPLETED_WITH_WARNINGS,
+            TaskState.FAILED,
+            TaskState.DELETED,
+        )
     
     def is_active(self) -> bool:
         """Check if active state"""
@@ -142,6 +151,11 @@ class PersistentTask:
     output_data: Optional[Dict[str, Any]] = None
     result: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
+    resumable: bool = True
+    stop_reason: Optional[str] = None
+    run_id: Optional[str] = None
+    execution_owner: Optional[str] = None
+    process_id: Optional[int] = None
     status: Optional[TaskStatus] = field(default=None)
     checkpoints: List[TaskCheckpoint] = field(default_factory=list)
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
@@ -182,6 +196,24 @@ class PersistentTask:
         status.state = TaskState.RUNNING
         status.updated_at = datetime.now().isoformat()
         self.updated_at = datetime.now().isoformat()
+
+    def claim_execution(
+        self, run_id: Optional[str] = None, owner: str = "research-worker",
+        process_id: Optional[int] = None,
+    ) -> str:
+        """Attach the current execution instance to this persisted task."""
+        self.run_id = run_id or f"run_{uuid.uuid4().hex[:12]}"
+        self.execution_owner = owner
+        self.process_id = process_id if process_id is not None else os.getpid()
+        self.updated_at = datetime.now().isoformat()
+        return self.run_id
+
+    def release_execution(self) -> None:
+        """Detach an execution instance without deleting task data."""
+        self.run_id = None
+        self.execution_owner = None
+        self.process_id = None
+        self.updated_at = datetime.now().isoformat()
     
     def complete(self, result: Dict[str, Any]) -> None:
         """Complete task"""
@@ -189,6 +221,7 @@ class PersistentTask:
         status.state = TaskState.COMPLETED
         status.progress = 1.0
         self.result = result
+        self.release_execution()
         status.updated_at = datetime.now().isoformat()
         self.updated_at = datetime.now().isoformat()
     
@@ -197,13 +230,56 @@ class PersistentTask:
         status = self._ensure_status()
         status.state = TaskState.FAILED
         self.error = error
+        self.release_execution()
+        status.updated_at = datetime.now().isoformat()
+        self.updated_at = datetime.now().isoformat()
+
+    def cancel(self, reason: str = "Cancelled by user") -> None:
+        """Stop execution while retaining checkpoints for a later resume."""
+        status = self._ensure_status()
+        status.state = TaskState.CANCELLED
+        status.message = reason
+        self.stop_reason = reason
+        self.error = None
+        self.resumable = True
+        self.release_execution()
+        status.updated_at = datetime.now().isoformat()
+        self.updated_at = datetime.now().isoformat()
+
+    def interrupt(self, reason: str = "Worker interrupted") -> None:
+        """Mark an unfinished task recoverable after worker/process interruption."""
+        status = self._ensure_status()
+        status.state = TaskState.INTERRUPTED
+        status.message = reason
+        self.stop_reason = reason
+        self.resumable = True
+        self.release_execution()
+        status.updated_at = datetime.now().isoformat()
+        self.updated_at = datetime.now().isoformat()
+
+    def can_resume(self) -> bool:
+        status = self._ensure_status()
+        return self.resumable and status.state in (
+            TaskState.CREATED, TaskState.INITIALIZING, TaskState.RUNNING,
+            TaskState.PAUSED, TaskState.CANCELLED, TaskState.INTERRUPTED,
+        )
+
+    def delete(self) -> None:
+        """Mark explicit deletion; callers perform physical resource cleanup."""
+        status = self._ensure_status()
+        status.state = TaskState.DELETED
+        self.resumable = False
+        self.release_execution()
         status.updated_at = datetime.now().isoformat()
         self.updated_at = datetime.now().isoformat()
     
-    def pause(self) -> None:
+    def pause(self, reason: str = "Paused by user") -> None:
         """Pause task"""
         status = self._ensure_status()
         status.state = TaskState.PAUSED
+        status.message = reason
+        self.stop_reason = reason
+        self.resumable = True
         status.updated_at = datetime.now().isoformat()
         self.updated_at = datetime.now().isoformat()
     
@@ -211,6 +287,7 @@ class PersistentTask:
         """Resume task"""
         status = self._ensure_status()
         status.state = TaskState.RUNNING
+        self.stop_reason = None
         status.updated_at = datetime.now().isoformat()
         self.updated_at = datetime.now().isoformat()
     
@@ -240,10 +317,16 @@ class PersistentTask:
             "output_data": self.output_data,
             "result": self.result,
             "error": self.error,
+            "resumable": self.resumable,
+            "stop_reason": self.stop_reason,
+            "run_id": self.run_id,
+            "execution_owner": self.execution_owner,
+            "process_id": self.process_id,
             "status": self.status.to_dict() if self.status else None,
             "checkpoints": [cp.to_dict() for cp in self.checkpoints],
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "execution_state": self.execution_state,
         }
     
     @classmethod
@@ -256,10 +339,19 @@ class PersistentTask:
             output_data=data.get("output_data"),
             result=data.get("result"),
             error=data.get("error"),
+            resumable=data.get("resumable", True),
+            stop_reason=data.get("stop_reason"),
+            run_id=data.get("run_id"),
+            execution_owner=data.get("execution_owner"),
+            process_id=data.get("process_id"),
             status=TaskStatus.from_dict(data["status"]) if data.get("status") else None,
             checkpoints=[TaskCheckpoint.from_dict(cp) for cp in data.get("checkpoints", [])],
             created_at=data.get("created_at", datetime.now().isoformat()),
             updated_at=data.get("updated_at", datetime.now().isoformat()),
+            execution_state=data.get("execution_state", {
+                "completed_agents": [], "completed_phases": [],
+                "current_phase": "", "failed_agents": [],
+            }),
         )
 
 
@@ -417,6 +509,17 @@ class TaskPersistenceManager:
         except json.JSONDecodeError as e:
             logger.error(f"Corrupted task file: {task_path}: {e}")
             return None
+
+    def mark_interrupted(self, task_id: str, reason: str = "Worker interrupted") -> Optional[PersistentTask]:
+        """Persist a recoverable interruption based on ownership/restart detection."""
+        task = self.load_task(task_id)
+        if task is None:
+            return None
+        if task.status and task.status.state.is_terminal():
+            return task
+        task.interrupt(reason)
+        self.save_task(task)
+        return task
     
     def update_task_state(
         self, 
@@ -556,6 +659,18 @@ class TaskPersistenceManager:
         
         # Save
         self.save_task(task)
+
+        try:
+            from src.core.diagnostics.phase_manifest import PhaseManifestStore
+            PhaseManifestStore(
+                task_id=task_id, session_id=task_id, root=self.tasks_dir.parent,
+                run_id=task.run_id,
+            ).record(
+                "CHECKPOINT_SAVED", phase=step_name,
+                checkpoint_id=checkpoint.checkpoint_id,
+            )
+        except Exception as exc:
+            logger.warning("Checkpoint manifest write failed for %s: %s", task_id, type(exc).__name__)
         
         logger.info(f"Created checkpoint: {task_id} - {step_name} ({step_index}/{total_steps})")
         return checkpoint
@@ -711,7 +826,9 @@ class TaskPersistenceManager:
         
         for task in self.recover_all_tasks():
             status = task._ensure_status()
-            if status.state in (TaskState.RUNNING, TaskState.INITIALIZING):
+            if status.state in (
+                TaskState.RUNNING, TaskState.INITIALIZING, TaskState.INTERRUPTED,
+            ):
                 interrupted.append(task)
         
         logger.info(f"Found {len(interrupted)} interrupted tasks")

@@ -83,6 +83,9 @@ class CancelManager:
         create_task 结果存入 _notify_tasks，防止 3.12+ GC。
         """
         self._paused[task_id] = False
+        # Resume is the explicit user acknowledgement that clears a prior
+        # recoverable cancel signal; checkpoints remain in persistence.
+        self._cancelled[task_id] = False
         logger.info(f"[CTRL] RESUME task={task_id}")
         cond = self._pause_conditions.get(task_id)
         if cond:
@@ -111,8 +114,7 @@ class CancelManager:
         - notify() 唤醒后重新获取锁
         - 不存在 Event.clear() 吞信号的竞态
 
-        加 asyncio.wait_for 超时兜底，防止 resume() 因 bug 未调用
-        导致 Engine 永久阻塞。超时 3600 秒后自动恢复。
+        不设置时间兜底：暂停是用户控制的业务状态，必须等待显式恢复或取消。
         """
         if task_id not in self._pause_conditions:
             self._pause_conditions[task_id] = Condition()
@@ -122,12 +124,7 @@ class CancelManager:
                 if self._cancelled.get(task_id, False):
                     logger.info(f"[CTRL] PAUSE_DONE task={task_id} result=cancelled")
                     return "cancelled"
-                try:
-                    await asyncio.wait_for(cond.wait(), timeout=3600)
-                except asyncio.TimeoutError:
-                    self._paused[task_id] = False
-                    logger.warning(f"[CTRL] PAUSE_TIMEOUT task={task_id}, auto-resuming")
-                    return "resumed"
+                await cond.wait()
         result = "cancelled" if self._cancelled.get(task_id, False) else "resumed"
         logger.info(f"[CTRL] PAUSE_DONE task={task_id} result={result}")
         return result

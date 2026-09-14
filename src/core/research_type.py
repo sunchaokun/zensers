@@ -65,6 +65,102 @@ class ResearchType(Enum):
         return not self.is_primary_research()
 
 
+def infer_research_composition(
+    requirement: Any,
+    intent_result: Any = None,
+    user_request: str = "",
+) -> "ResearchComposition":
+    """Build the runtime composition used by the two main execution chains.
+
+    The project has several historical entry points.  Some of them populate
+    the explicit ``include_survey`` flags while the intelligent router may
+    only return ``research_types``.  This adapter keeps those signals in one
+    place so a survey request cannot silently fall back to the industry-only
+    chain.
+    """
+    text = " ".join(
+        str(value or "")
+        for value in (
+            user_request,
+            getattr(requirement, "topic", ""),
+        )
+    ).casefold()
+
+    survey_terms = (
+        "survey", "questionnaire", "poll", "问卷", "调查", "调研问卷",
+        "用户调研", "消费者调研", "满意度调研", "满意度调查",
+    )
+    industry_terms = (
+        "industry research", "industry analysis", "行业研究", "行业分析",
+        "产业研究", "产业分析",
+    )
+    # Only explicit boolean flags should force the survey route.  Test
+    # doubles and partially populated requirement objects may expose
+    # truthy placeholder attributes (for example MagicMock), which must not
+    # silently turn an ordinary industry request into a pure survey.
+    survey_requested = (
+        getattr(requirement, "include_survey", False) is True
+        or getattr(requirement, "enable_questionnaire", False) is True
+        or any(term in text for term in survey_terms)
+    )
+
+    raw_types = list(getattr(intent_result, "research_types", None) or [])
+    types: List[ResearchType] = []
+    for item in raw_types:
+        if isinstance(item, ResearchType):
+            value = item
+        else:
+            value = ResearchType.from_string(str(item))
+        if value is not None and value not in types:
+            types.append(value)
+
+    industry_requested = any(term in text for term in industry_terms)
+    if survey_requested and ResearchType.SURVEY not in types:
+        types.append(ResearchType.SURVEY)
+    if industry_requested and ResearchType.INDUSTRY_RESEARCH not in types:
+        # A composite request often contains only natural-language signals;
+        # preserve both sides of "industry research + survey" explicitly.
+        types.insert(0, ResearchType.INDUSTRY_RESEARCH)
+
+    # Keyword fallback may not return a research type.  Preserve the pure
+    # survey route for explicit survey language and the regular research
+    # route for all other requests.
+    if not types:
+        types = [ResearchType.SURVEY] if survey_requested else [ResearchType.INDUSTRY_RESEARCH]
+    elif not survey_requested and industry_requested:
+        if ResearchType.INDUSTRY_RESEARCH not in types:
+            types.insert(0, ResearchType.INDUSTRY_RESEARCH)
+
+    requested_primary = getattr(intent_result, "primary_research_type", None)
+    if isinstance(requested_primary, str):
+        requested_primary = ResearchType.from_string(requested_primary)
+    non_survey = [item for item in types if item is not ResearchType.SURVEY]
+    if requested_primary in non_survey:
+        primary = requested_primary
+    elif non_survey:
+        primary = non_survey[0]
+    else:
+        primary = ResearchType.SURVEY
+
+    confidence = getattr(intent_result, "intent_confidence", None)
+    if confidence is None:
+        confidence = getattr(intent_result, "confidence", 0.0)
+    try:
+        confidence = max(0.0, min(1.0, float(confidence)))
+    except (TypeError, ValueError):
+        confidence = 0.0
+
+    return ResearchComposition(
+        types=types,
+        primary=primary,
+        secondary=[item for item in types if item is not primary],
+        sequence="sequential",
+        output_mode="complete" if primary is ResearchType.SURVEY and len(types) == 1 else "staged",
+        confidence=confidence,
+        detected_keywords=[term for term in (*survey_terms, *industry_terms) if term in text],
+    )
+
+
 @dataclass
 class ResearchComposition:
     """
@@ -272,5 +368,6 @@ COMMON_COMPOSITIONS: Dict[str, ResearchComposition] = {
 __all__ = [
     "ResearchType",
     "ResearchComposition",
+    "infer_research_composition",
     "COMMON_COMPOSITIONS",
 ]

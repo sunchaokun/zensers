@@ -126,28 +126,31 @@ class TestRegisterAllSchemas:
             db_path = Path(tmpdir) / "test.db"
             conn = sqlite3.connect(str(db_path))
             
-            register_all_schemas()
-            SchemaRegistry.create_all(conn)
-            
-            # 验证所有表都存在
-            cursor = conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-            )
-            tables = [row[0] for row in cursor.fetchall()]
-            
-            expected = sorted([
-                "entities", "relations", "data_points", "insights",
-                "research_history", "requirements", "frameworks",
-                "learnings", "errors", "feature_requests",
-                "knowledge_versions", "provenance", "contradictions",
-                "knowledge_pages", "session_snapshots", "raw_research_data",
-                "survey_tasks", "survey_responses", "survey_personas",
-                "survey_checkpoints",
-            ])
-            
-            assert sorted(tables) == sorted(expected), f"Tables mismatch. Got: {tables}, Expected: {expected}"
-            conn.close()
-            # Windows 文件锁：关闭连接后强制清理
+            try:
+                register_all_schemas()
+                SchemaRegistry.create_all(conn)
+
+                # 验证所有表都存在
+                cursor = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+                )
+                tables = [row[0] for row in cursor.fetchall()]
+
+                expected = sorted([
+                    "entities", "relations", "data_points", "insights",
+                    "research_history", "requirements", "frameworks",
+                    "learnings", "errors", "feature_requests",
+                    "knowledge_versions", "provenance", "contradictions",
+                    "knowledge_pages", "session_snapshots", "raw_research_data",
+                    "survey_storage_meta",
+                    "survey_definitions", "survey_simulation_runs",
+                    "survey_simulation_run_history", "survey_tasks",
+                    "survey_responses", "survey_personas", "survey_checkpoints",
+                ])
+
+                assert sorted(tables) == sorted(expected), f"Tables mismatch. Got: {tables}, Expected: {expected}"
+            finally:
+                conn.close()
     
     def test_create_all_with_indexes(self):
         """测试创建所有表和索引"""

@@ -303,7 +303,13 @@ async def _list_active_tasks_remote():
     table.add_column("Topic", style="yellow")
     table.add_column("Created At", style="dim")
     for s in active:
-        table.add_row(s.get("task_id", "N/A")[:12], s.get("status", "unknown"), s.get("topic", "")[:30], s.get("created_at", "")[:19])
+        # Persisted sessions may contain explicit null values.  ``dict.get``
+        # does not apply its default to null, so normalize before slicing.
+        task_id = str(s.get("task_id") or "N/A")
+        status = str(s.get("status") or "unknown")
+        topic = str(s.get("topic") or "")
+        created_at = str(s.get("created_at") or "")
+        table.add_row(task_id[:12], status, topic[:30], created_at[:19])
     console.print(table)
 
 

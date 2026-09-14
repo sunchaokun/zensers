@@ -22,12 +22,16 @@ Usage example:
 import asyncio
 import json
 import logging
+import uuid
+from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, AsyncGenerator
 from enum import Enum
 
 logger = logging.getLogger(__name__)
+
+from src.core.diagnostics.phase_manifest import PhaseManifestStore
 
 
 class SSEEventType(str, Enum):
@@ -270,14 +274,20 @@ class ProgressStreamer:
             message: Progress message
         """
         task = cls.get_or_create_task(task_id)
-        task.progress = progress
+        # Progress is a user-facing timeline.  Several independent producers
+        # (batch, agent-completion, and orchestration callbacks) can report the
+        # same task concurrently, so a late callback must not move the task
+        # backwards.  Terminal helpers remain responsible for explicit
+        # completion/failure transitions.
+        progress = max(0.0, min(1.0, progress))
+        task.progress = max(task.progress, progress)
         task.status = "running"
 
         if phase_id:
             task.current_phase = phase_id
             for phase in task.phases:
                 if phase.id == phase_id:
-                    phase.progress = progress
+                    phase.progress = max(phase.progress, progress)
                     phase.status = "running"
 
         # Notify all subscribers
@@ -317,6 +327,7 @@ class ProgressStreamer:
         phase.started_at = datetime.now()
         task.current_phase = phase_id
         task.status = "running"
+        cls._record_manifest("PHASE_START", task_id, phase_id)
 
         # Notify subscribers
         cls._notify_subscribers(task_id, SSEEventType.PHASE_START, {
@@ -358,6 +369,10 @@ class ProgressStreamer:
                 phase.progress = 1.0 if success else phase.progress
                 phase.completed_at = datetime.now()
                 break
+
+        cls._record_manifest(
+            "PHASE_COMPLETE" if success else "PHASE_FAILED", task_id, phase_id,
+        )
 
         # Notify subscribers
         cls._notify_subscribers(task_id, SSEEventType.PHASE_COMPLETE, {
@@ -418,6 +433,7 @@ class ProgressStreamer:
         task = cls.get_or_create_task(task_id)
         task.status = "error"
         task.error = error
+        cls._record_manifest("PHASE_FAILED", task_id, task.current_phase or "task", reason=error)
 
         # Notify subscribers
         cls._notify_subscribers(task_id, SSEEventType.ERROR, {
@@ -438,6 +454,7 @@ class ProgressStreamer:
         task.status = "cancelled"
         task.progress = 0.0
         task.completed_at = datetime.now()
+        cls._record_manifest("PHASE_FAILED", task_id, task.current_phase or "task", reason=reason)
 
         cls._notify_subscribers(task_id, SSEEventType.CANCELLED, {
             "task_id": task_id,
@@ -447,6 +464,22 @@ class ProgressStreamer:
 
         logger.info(f"Task cancelled: {task_id} - {reason}")
         cls._persist_to_session(task_id)
+
+    @classmethod
+    def _record_manifest(cls, event: str, task_id: str, phase: str, **details: Any) -> None:
+        """Mirror progress boundaries to the durable diagnostic manifest."""
+        try:
+            run_id = ""
+            from src.core.task_persistence import TaskPersistenceManager
+            persisted = TaskPersistenceManager().load_task(task_id)
+            if persisted:
+                run_id = persisted.run_id or ""
+            PhaseManifestStore(
+                task_id=task_id, session_id=task_id, root=Path("data"), run_id=run_id,
+            ).record(event, phase=phase, **details)
+        except Exception as exc:
+            # Diagnostics must never break user-visible progress delivery.
+            logger.warning("Manifest write failed for %s: %s", task_id, type(exc).__name__)
 
     @classmethod
     def pause_task(cls, task_id: str, message: str = "Task paused") -> None:
@@ -502,6 +535,24 @@ class ProgressStreamer:
 
         if self.task_id in self._task_states:
             task = self._task_states[self.task_id]
+            # Chat-mode tasks remain pending, but their final chat response
+            # still needs replay after a late connection or reconnect.
+            if task.last_chat_response:
+                cr = task.last_chat_response
+                self._queue.put_nowait(SSEMessage(
+                    event=SSEEventType.CHAT_RESPONSE.value,
+                    data={
+                        "session_id": self.task_id,
+                        "response_id": cr.get("response_id"),
+                        "message": cr.get("message", ""),
+                        "action": cr.get("action", "continue_chat"),
+                        "topic": cr.get("topic"),
+                        "directions": cr.get("directions", []),
+                        "suggestions": cr.get("suggestions", []),
+                        "timestamp": datetime.now().isoformat(),
+                    }
+                ))
+
             if task.status == "running":
                 self._queue.put_nowait(SSEMessage(
                     event=SSEEventType.PROGRESS.value,
@@ -513,21 +564,6 @@ class ProgressStreamer:
                         "timestamp": datetime.now().isoformat(),
                     }
                 ))
-                # Replay the last chat_response so late-connecting clients don't miss it
-                if task.last_chat_response:
-                    cr = task.last_chat_response
-                    self._queue.put_nowait(SSEMessage(
-                        event=SSEEventType.CHAT_RESPONSE.value,
-                        data={
-                            "session_id": self.task_id,
-                            "message": cr.get("message", ""),
-                            "action": cr.get("action", "continue_chat"),
-                            "topic": cr.get("topic"),
-                            "directions": cr.get("directions", []),
-                            "suggestions": cr.get("suggestions", []),
-                            "timestamp": datetime.now().isoformat(),
-                        }
-                    ))
             elif task.status == "completed":
                 self._queue.put_nowait(SSEMessage(
                     event=SSEEventType.COMPLETE.value,
@@ -655,9 +691,13 @@ class ProgressStreamer:
     def push_chat_response(cls, session_id: str, response_data: Dict[str, Any]):
         """推送对话工具执行结果（双写：ProgressStreamer + SessionStreamer）"""
         task = cls.get_or_create_task(session_id)
+        # One logical response must keep one ID across both SSE channels and
+        # reconnect replay; timestamps are regenerated during replay.
+        response_data.setdefault("response_id", f"chat_{uuid.uuid4().hex}")
         task.last_chat_response = response_data  # store for replay on reconnect
         cls._notify_subscribers(session_id, SSEEventType.CHAT_RESPONSE, {
             "session_id": session_id,
+            "response_id": response_data.get("response_id"),
             "message": response_data.get("message", ""),
             "action": response_data.get("action", "continue_chat"),
             "topic": response_data.get("topic"),

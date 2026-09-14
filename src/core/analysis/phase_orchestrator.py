@@ -1,6 +1,7 @@
 import json
 import asyncio
 import uuid
+import copy
 from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -115,7 +116,7 @@ class PhaseOrchestrator:
         checkpoint = Checkpoint(
             checkpoint_id=cp_id,
             created_at=datetime.now(),
-            phase_states={p.value: s.__dict__ for p, s in self._phase_states.items()},
+            phase_states={p.value: copy.deepcopy(s.__dict__) for p, s in self._phase_states.items()},
             shared_memory_snapshot=snapshot,
         )
         self._checkpoints.append(checkpoint)
@@ -125,7 +126,29 @@ class PhaseOrchestrator:
         return self._checkpoints
 
     def rollback(self, checkpoint_id: str) -> bool:
-        return any(cp.checkpoint_id == checkpoint_id for cp in self._checkpoints)
+        checkpoint = next(
+            (cp for cp in self._checkpoints if cp.checkpoint_id == checkpoint_id),
+            None,
+        )
+        if checkpoint is None:
+            return False
+
+        for phase in AnalysisPhase.get_order():
+            saved = checkpoint.phase_states.get(phase.value)
+            if not saved:
+                continue
+            state = StageContext(phase=phase)
+            for field_name in (
+                "status", "retry_count", "started_at", "completed_at",
+                "output_data", "error", "warnings",
+            ):
+                if field_name in saved:
+                    setattr(state, field_name, saved[field_name])
+            self._phase_states[phase] = state
+
+        if self._shared_memory is not None:
+            self._shared_memory.set_all(checkpoint.shared_memory_snapshot)
+        return True
 
     def reset(self):
         for phase in AnalysisPhase.get_order():
@@ -157,6 +180,39 @@ class PhaseOrchestrator:
                     progress_callback(progress)
                 except Exception:
                     pass
+
+        # The legacy implementation returned here without invoking the
+        # supplied executor, which meant phase output never reached
+        # SharedMemory.  Keep the existing lightweight API, but execute the
+        # phases serially when an executor is provided and publish each
+        # completed output under its phase key for downstream readers.
+        if phase_executor is not None:
+            for phase in AnalysisPhase.get_order():
+                state = self._phase_states[phase]
+                state.mark_started()
+                context = {
+                    "task_id": task_id,
+                    "phase": phase,
+                    "requirement": requirement,
+                    "previous_phase_output": self._phase_states[phase.get_previous()].output_data
+                    if phase.get_previous() else None,
+                }
+                try:
+                    timeout = self._phase_configs[phase].timeout_seconds
+                    output = await asyncio.wait_for(
+                        phase_executor(phase, context), timeout=timeout,
+                    )
+                    output = output if isinstance(output, dict) else {"value": output}
+                    state.mark_completed(output)
+                    if self._shared_memory:
+                        self._shared_memory.set(f"phase_output.{phase.value}", output)
+                except Exception as exc:
+                    state.mark_failed(str(exc))
+                    result["status"] = "failed"
+                    result.setdefault("errors", []).append(f"{phase.value}: {exc}")
+                    break
+
+            result["phase_statuses"] = self.get_all_statuses()
 
         return result
 

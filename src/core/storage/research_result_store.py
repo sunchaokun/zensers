@@ -42,8 +42,11 @@ class ResearchStatus(Enum):
     COLLECTING = "collecting"                   # 数据收集中
     REPORTING = "reporting"                     # 报告生成中
     COMPLETED = "completed"                     # 研究完成（可生成文档）
+    COMPLETED_WITH_WARNINGS = "completed_with_warnings"  # 已交付，但存在质量/覆盖警告
     DOCUMENT_PENDING = "document_pending"       # 文档待生成
     DOCUMENT_GENERATED = "document_generated"   # 文档已生成
+    FAILED = "failed"                            # 研究失败（可恢复/重试）
+    CANCELLED = "cancelled"                      # 研究被取消
 
 
 class ResearchResultError(Exception):
@@ -284,33 +287,47 @@ class ResearchResultStore:
         
             new_dps = result.get("data_points", [])
             new_srcs = result.get("sources", [])
+
+            def _merge_url_records(records: List[Any]) -> List[Any]:
+                """Merge same-URL records without discarding late evidence.
+
+                Collection is incremental: an early search result may only
+                contain a URL, while a later scrape adds the evidence and
+                provenance fields. URL deduplication must therefore merge
+                non-empty fields instead of keeping the first record.
+                """
+                merged: List[Any] = []
+                by_url: Dict[str, int] = {}
+                for record in records:
+                    if not isinstance(record, dict):
+                        merged.append(record)
+                        continue
+                    url = str(record.get("url", "") or record.get("href", "") or "").strip()
+                    if not url or url not in by_url:
+                        if url:
+                            by_url[url] = len(merged)
+                        merged.append(dict(record))
+                        continue
+                    existing_record = merged[by_url[url]]
+                    if not isinstance(existing_record, dict):
+                        merged[by_url[url]] = dict(record)
+                        continue
+                    combined = dict(existing_record)
+                    for key, value in record.items():
+                        if value not in (None, "", [], {}):
+                            combined[key] = value
+                    merged[by_url[url]] = combined
+                return merged
         
             if existing:
                 exist_dps = existing.get("data_points", [])
                 exist_srcs = existing.get("sources", [])
-            
-                seen_urls = set()
-                merged_dps = []
-                for dp in exist_dps + new_dps:
-                    url = dp.get("url", "") if isinstance(dp, dict) else ""
-                    if url and url in seen_urls:
-                        continue
-                    if url:
-                        seen_urls.add(url)
-                    merged_dps.append(dp)
-            
-                seen_urls = set()
-                merged_srcs = []
-                for src in exist_srcs + new_srcs:
-                    url = src.get("url", "") if isinstance(src, dict) else ""
-                    if url and url in seen_urls:
-                        continue
-                    if url:
-                        seen_urls.add(url)
-                    merged_srcs.append(src)
+
+                merged_dps = _merge_url_records(exist_dps + new_dps)
+                merged_srcs = _merge_url_records(exist_srcs + new_srcs)
             else:
-                merged_dps = new_dps
-                merged_srcs = new_srcs
+                merged_dps = _merge_url_records(new_dps)
+                merged_srcs = _merge_url_records(new_srcs)
         
             # R2-FIX: merge completed_agents and agent_contents instead of overwriting
             new_completed = result.get("completed_agents", [])
@@ -331,13 +348,69 @@ class ResearchResultStore:
         
             new_sections = result.get("sections", [])
             new_key_findings = result.get("key_findings", [])
+
+            def _section_key(section: Any, fallback: str) -> str:
+                """Return the stable identity used for checkpoint merging.
+
+                Incremental batches are allowed to contain only a subset of
+                sections.  Never use list position as identity: a later batch
+                may be reordered or may omit earlier chapters entirely.
+                """
+                if not isinstance(section, dict):
+                    return fallback
+                for field in ("section_id", "planned_id", "id", "canonical_id"):
+                    value = str(section.get(field) or "").strip()
+                    if value:
+                        return value
+                title = str(section.get("title") or section.get("name") or "").strip()
+                return f"title:{title}" if title else fallback
+
+            def _merge_sections(existing_sections: Any, incoming_sections: Any) -> List[Any]:
+                """Merge section checkpoints without losing completed chapters.
+
+                A partial/empty late result must not erase useful content.  At
+                the same time, non-empty fields from a newer revision should
+                win.  The merge is deterministic and keeps the original
+                ordering, appending genuinely new sections at the end.
+                """
+                old = list(existing_sections or []) if isinstance(existing_sections, list) else []
+                new = list(incoming_sections or []) if isinstance(incoming_sections, list) else []
+                merged: List[Any] = [dict(item) if isinstance(item, dict) else item for item in old]
+                positions = {
+                    _section_key(item, f"index:{index}"): index
+                    for index, item in enumerate(merged)
+                }
+                for incoming_index, item in enumerate(new):
+                    key = _section_key(item, f"incoming:{incoming_index}")
+                    position = positions.get(key)
+                    if position is None:
+                        merged.append(dict(item) if isinstance(item, dict) else item)
+                        positions[key] = len(merged) - 1
+                        continue
+                    current = merged[position]
+                    if not isinstance(current, dict) or not isinstance(item, dict):
+                        if item not in (None, "", [], {}):
+                            merged[position] = item
+                        continue
+                    combined = dict(current)
+                    for field, value in item.items():
+                        if value not in (None, "", [], {}):
+                            combined[field] = value
+                    merged[position] = combined
+                return merged
+
             if existing:
-                merged_sections = existing.get("sections", []) if not new_sections else new_sections
+                merged_sections = _merge_sections(existing.get("sections", []), new_sections)
                 merged_key_findings = existing.get("key_findings", []) if not new_key_findings else new_key_findings
             else:
-                merged_sections = new_sections
+                merged_sections = _merge_sections([], new_sections)
                 merged_key_findings = new_key_findings
-            result_data = {
+            # Preserve report-specific fields (coverage, quality, revisions,
+            # artifact manifest, etc.).  Rebuilding the JSON from a small
+            # whitelist silently discarded fields needed by replay and
+            # revision flows.
+            result_data = dict(existing or {})
+            result_data.update({
                 "task_id": task_id,
                 "title": result.get("title", "") or (existing.get("title", "") if existing else ""),
                 "topic": result.get("topic", "") or (existing.get("topic", "") if existing else ""),
@@ -349,7 +422,15 @@ class ResearchResultStore:
                 "completed_agents": merged_completed,
                 "agent_contents": merged_agent_contents,
                 "saved_at": datetime.now().isoformat()
-            }
+            })
+            for field in (
+                "output_path", "document_path", "artifacts", "artifact_manifest",
+                "coverage_warnings", "quality", "quality_metadata",
+                "report_version", "report_context", "defense_audit",
+                "quality_gate_status", "formal_complete", "l1_l5_recheck",
+            ):
+                if field in result:
+                    result_data[field] = result[field]
         
             self._atomic_write_json(result_path, result_data)
         

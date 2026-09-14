@@ -49,7 +49,10 @@ class TaskOptions:
         fallback_chain: 降级链
         metadata: 元数据
     """
-    timeout: float = 300.0
+    # Agent work has no implicit lifecycle deadline.  Cancellation is
+    # controlled by the task/session state machine; a caller may still pass
+    # an explicit timeout for a bounded control operation.
+    timeout: Optional[float] = None
     max_retries: int = 3
     priority: TaskPriority = TaskPriority.NORMAL
     fallback_chain: List[Dict[str, Any]] = field(default_factory=list)

@@ -42,7 +42,10 @@ logger = logging.getLogger(__name__)
 class CoordinatorConfig:
     """协调器配置"""
     max_concurrent: int = 20             # 最大并发数（增加到20以支持更多Agent并行）
-    default_timeout: float = 300.0       # 默认超时
+    # No implicit per-Agent deadline.  The lifecycle controller owns
+    # cancellation; this value is retained only for compatibility with
+    # explicitly bounded coordinator calls.
+    default_timeout: Optional[float] = None
     max_retries: int = 3                 # 最大重试次数
     heartbeat_interval: float = 5.0      # 心跳间隔
     heartbeat_timeout: float = 60.0      # 心跳超时（增加到60秒）
@@ -78,6 +81,38 @@ class ActiveTask:
     
     # 内部状态
     _async_task: Optional[asyncio.Task] = field(default=None, repr=False)
+
+
+def _extract_partial_output(active_task: ActiveTask) -> Optional[Dict[str, Any]]:
+    """Build a recoverable result from output produced before cancellation.
+
+    Timeout/cancellation paths may not populate ``result``.  Preserve the
+    latest agent output and any collected evidence so aggregation can still
+    produce a partial report instead of silently dropping the section.
+    """
+    if active_task is None:
+        return None
+    agent = getattr(active_task, "agent", None)
+    context = getattr(agent, "_context", {}) or {}
+    if not isinstance(context, dict):
+        context = {}
+    content = context.get("last_output") or getattr(active_task, "partial_output", "")
+    if not content:
+        return None
+    content = str(content)[:50000]
+    agent_id = getattr(agent, "agent_id", "")
+    section_id = getattr(agent, "section_id", "") or ""
+    return {
+        "success": False,
+        "content": content,
+        "agent_id": agent_id,
+        "section_id": section_id,
+        "_section_id": section_id,
+        "_partial": True,
+        "data_points": context.get("data_points", []) or [],
+        "sources": context.get("sources", []) or [],
+        "error": getattr(active_task, "error", "") or "partial output",
+    }
 
 
 class AgentCoordinator:
@@ -258,7 +293,11 @@ class AgentCoordinator:
         # 开始心跳追踪（使用异步回调）
         self.heartbeat_monitor.start_tracking(
             task_id=prepared.task_id,
-            timeout_callback=self._handle_task_timeout,
+            # Heartbeats are transport telemetry only.  A missing heartbeat
+            # must never cancel an Agent: long provider calls and event-loop
+            # backpressure are valid execution states.  User cancellation or
+            # an explicit task deadline is handled by the lifecycle manager.
+            timeout_callback=None,
         )
         
         # 记录分发
@@ -315,16 +354,20 @@ class AgentCoordinator:
                 name="agent_coordinator.send_periodic_heartbeats",
             )
             
-            # 执行任务（带超时）
-            timeout = active_task.options.timeout or self.config.default_timeout
-            
+            # Execute the Agent without an implicit timeout.  A fixed
+            # deadline here truncates normal long-running research and then
+            # incorrectly lets aggregation continue with missing chapters.
+            timeout = active_task.options.timeout
             try:
                 # 使用 agent.run() 而非 execute()，确保结果包含标准字段（success, agent_id等）
                 # run() 方法会进行状态管理和结果格式化
-                result = await asyncio.wait_for(
-                    active_task.agent.run(task),
-                    timeout=timeout
-                )
+                if timeout is None:
+                    result = await active_task.agent.run(task)
+                else:
+                    result = await asyncio.wait_for(
+                        active_task.agent.run(task),
+                        timeout=timeout
+                    )
                 
                 # 确保结果包含必需字段（双重保险）
                 if result is None:

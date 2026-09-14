@@ -244,6 +244,9 @@ class SemanticIntentAnalyzer:
                 asyncio.run,
                 self.analyze_async(user_request, requirement)
             )
+            # No hidden deadline: intent analysis is an Agent lifecycle
+            # operation.  A 120s bridge timeout used to convert a slow but
+            # valid analysis into conservative keyword routing.
             return future.result()
         except RuntimeError:
             # No running event loop
@@ -272,17 +275,66 @@ class SemanticIntentAnalyzer:
 
         system_prompt, user_template = self._load_intent_prompts()
         prompt = self._format_intent_prompt(user_template, user_request, requirement)
+        # Large reports do not need a full per-section data schema during the
+        # routing decision.  Generating it here makes MIMO truncate the
+        # intent JSON; the downstream framework already owns section details.
+        aspects = requirement.get("aspects", []) if isinstance(requirement, dict) else []
+        if len(aspects) > 8:
+            prompt += (
+                "\n\nRouting-only constraint: because this request has more than 8 "
+                "sections, set section_data_specs to [] and keep the JSON compact."
+            )
         result = await call_llm(
             prompt=prompt,
             system_prompt=system_prompt,
             model=self._llm_model or None,
-            max_tokens=self._max_tokens or None,
+            # Intent output is structured JSON.  1024 tokens is too small for
+            # MIMO's reasoning-first responses and caused truncated JSON,
+            # which incorrectly triggered conservative fallback routing.
+            max_tokens=max(self._max_tokens or 0, 2048),
             temperature=self._temperature or None,
             routing_hint=RoutingHint(action="intent_analysis"),
         )
-        if not result.get("success"):
-            raise ValueError(f"LLM call failed: {result.get('error', 'Unknown')}")
-        return self._build_result(llm_output=self._parse_llm_json(result["content"]),
+        # Some reasoning-first providers (including MIMO) can occasionally
+        # return an HTTP-success response with an empty ``content`` field.
+        # Retry this specific contract failure once with a larger completion
+        # budget before falling back to keyword routing.
+        if result is None:
+            raise ValueError("LLM intent call returned no response")
+        if result.get("success") and not str(result.get("content") or "").strip():
+            logger.warning("LLM intent response was empty; retrying with a larger output budget")
+            result = await call_llm(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                model=self._llm_model or None,
+                max_tokens=max(self._max_tokens * 2, 4096),
+                temperature=self._temperature or None,
+                routing_hint=RoutingHint(action="intent_analysis"),
+            )
+        if result is None:
+            raise ValueError("LLM intent retry returned no response")
+        if not isinstance(result, dict) or not result.get("success"):
+            result_info = result if isinstance(result, dict) else {}
+            raise ValueError(f"LLM call failed: {result_info.get('error') or result_info.get('message') or 'LLM returned no response'}")
+        try:
+            parsed_output = self._parse_llm_json(result["content"])
+        except json.JSONDecodeError:
+            # Reasoning-first providers can spend the initial completion
+            # budget before finishing structured JSON. Retry once with a
+            # compact-output constraint before falling back to keywords.
+            compact_result = await call_llm(
+                prompt=prompt + "\nReturn compact JSON only: omit explanations and limit arrays to 3 items.",
+                system_prompt=system_prompt,
+                model=self._llm_model or None,
+                max_tokens=3072,
+                temperature=0,
+                routing_hint=RoutingHint(action="intent_analysis"),
+            )
+            if not isinstance(compact_result, dict) or not compact_result.get("success"):
+                raise
+            parsed_output = self._parse_llm_json(compact_result["content"])
+
+        return self._build_result(llm_output=parsed_output,
                                    model_used=result.get("model", ""), raw_response=result["content"],
                                    used_fallback=False)
 
@@ -320,7 +372,7 @@ class SemanticIntentAnalyzer:
             temperature=temperature,
             routing_hint=RoutingHint(action="intent_analysis"),
         )
-        if not result.get("success"):
+        if not isinstance(result, dict) or not result.get("success"):
             return None
         return self._parse_llm_json(result.get("content", ""))
 
@@ -361,11 +413,19 @@ class SemanticIntentAnalyzer:
         )
 
     def _build_result(self, llm_output, model_used, raw_response, used_fallback):
-        intent_str = llm_output.get("primary_intent", "open_ended")
+        intent_str = str(llm_output.get("primary_intent", "open_ended") or "open_ended")
         try:
             primary_intent = IntentType(intent_str.lower())
         except ValueError:
-            primary_intent = IntentType.OPEN_ENDED
+            # Reasoning-first models occasionally return a descriptive intent
+            # sentence instead of the enum token.  Recover the high-signal
+            # forensic case instead of silently routing it as open-ended.
+            intent_lower = intent_str.casefold()
+            primary_intent = (
+                IntentType.FORENSIC_ANALYSIS
+                if any(token in intent_lower for token in ("forensic", "causal", "investigat", "因果", "取证"))
+                else IntentType.OPEN_ENDED
+            )
 
         complexity_str = llm_output.get("complexity", "single")
         try:
@@ -410,9 +470,24 @@ class SemanticIntentAnalyzer:
                 "sub_sections": sub_sections,
             })
 
-        data_preloaded = llm_output.get("data_preloaded", False)
+        data_preloaded = bool(llm_output.get("data_preloaded", False))
+        # LLMs can occasionally echo ``forensic_mode=true`` from the schema
+        # instructions for an ordinary research request.  Forensic routing is
+        # only valid when the model also identifies a forensic intent, reports
+        # preloaded evidence, or supplies causal hypotheses.
+        forensic_mode = bool(llm_output.get("forensic_mode", False)) and (
+            primary_intent == IntentType.FORENSIC_ANALYSIS
+            or data_preloaded
+            or bool(llm_output.get("causal_hypotheses"))
+        )
+        try:
+            intent_confidence = float(llm_output.get("confidence", 0.7))
+        except (TypeError, ValueError):
+            intent_confidence = 0.7
+        intent_confidence = max(0.0, min(1.0, intent_confidence))
+
         return DeepIntentResult(
-            primary_intent=primary_intent, intent_confidence=llm_output.get("confidence", 0.7),
+            primary_intent=primary_intent, intent_confidence=intent_confidence,
             intent_reasoning=llm_output.get("reasoning", ""),
             research_types=research_types, primary_research_type=primary_research_type,
             secondary_research_types=secondary_research_types,
@@ -442,7 +517,7 @@ class SemanticIntentAnalyzer:
             ],
             orchestration_strategy=llm_output.get("orchestration_strategy", "sequential"),
             section_data_specs=section_data_specs,
-            forensic_mode=llm_output.get("forensic_mode", False),
+            forensic_mode=forensic_mode,
             data_preloaded=data_preloaded,
             causal_hypotheses=llm_output.get("causal_hypotheses", []))
 
@@ -464,11 +539,32 @@ class SemanticIntentAnalyzer:
 
     def _analyze_with_keyword(self, user_request, requirement):
         """Keyword matching fallback for intent analysis."""
-        _survey_kw = ["survey", "questionnaire", "poll", "consumer research",
-                      "user research", "market research", "survey study"]
-        _has_survey = any(kw in user_request.lower() for kw in _survey_kw) if user_request else False
+        text = str(user_request or "").casefold()
+        _survey_kw = [
+            "survey", "questionnaire", "poll", "consumer research",
+            "user research", "survey study", "问卷", "调查", "调研问卷",
+            "用户调研", "消费者调研", "满意度调研", "满意度调查",
+        ]
+        _industry_kw = [
+            "industry research", "industry analysis", "market analysis",
+            "行业研究", "行业分析", "产业研究", "产业分析",
+        ]
+        _has_survey = any(kw in text for kw in _survey_kw)
+        _has_industry = any(kw in text for kw in _industry_kw)
+        research_types = []
+        if _has_industry:
+            research_types.append(ResearchType.INDUSTRY_RESEARCH)
+        if _has_survey:
+            research_types.append(ResearchType.SURVEY)
+        if not research_types:
+            research_types = [ResearchType.INDUSTRY_RESEARCH]
+        primary_research_type = research_types[0]
         return DeepIntentResult(
             primary_intent=IntentType.RESEARCH, intent_confidence=0.5,
             intent_reasoning="Keyword matching fallback",
+            research_types=research_types,
+            primary_research_type=primary_research_type,
+            secondary_research_types=research_types[1:],
             requires_primary_data=_has_survey, complexity=TaskComplexity.SINGLE,
+            is_composite=len(research_types) > 1,
             used_fallback=True, llm_model_used="keyword_matching")

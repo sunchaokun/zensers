@@ -22,6 +22,7 @@ Usage:
 import asyncio
 import json
 import logging
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, AsyncGenerator
@@ -42,6 +43,7 @@ class SessionSSEEventType(str, Enum):
     SECTION_QUALITY = "section_quality"
     PREVIEW_REFRESH = "preview_refresh"
     QUALITY_CONFIRMED = "quality_confirmed"
+    REPORT_CONTEXT = "report_context"
 
 
 @dataclass
@@ -144,7 +146,14 @@ class SessionStreamer:
                     history = session.get("conversation_history", [])
                     if event_type == "chat_response":
                         msg_content = data.get("message", "")
+                        response_id = data.get("response_id")
                         already_exists = any(
+                            isinstance(m, dict)
+                            and m.get("role") == "assistant"
+                            and response_id
+                            and m.get("response_id") == response_id
+                            for m in history
+                        ) if response_id else any(
                             isinstance(m, dict)
                             and m.get("role") == "assistant"
                             and m.get("content") == msg_content
@@ -155,6 +164,7 @@ class SessionStreamer:
                             history.append({
                                 "role": "assistant",
                                 "content": msg_content,
+                                **({"response_id": response_id} if response_id else {}),
                                 "timestamp": data.get("timestamp") or datetime.now().isoformat(),
                             })
                             session["conversation_history"] = history
@@ -166,6 +176,11 @@ class SessionStreamer:
                             "agent_name": data.get("agent_name", ""),
                             "action": data.get("action", ""),
                             "timestamp": data.get("timestamp", datetime.now().isoformat()),
+                            **{
+                                key: data[key]
+                                for key in ("provider", "quality_score", "cache_hit", "stop_reason")
+                                if key in data and data[key] is not None
+                            },
                         })
                         session["conversation_history"] = history
 
@@ -201,8 +216,10 @@ class SessionStreamer:
     @classmethod
     def push_chat_response(cls, session_id: str, response_data: Dict[str, Any]):
         """Push a chat_response event to all session subscribers"""
+        response_data.setdefault("response_id", f"chat_{uuid.uuid4().hex}")
         event_data = {
             "session_id": session_id,
+            "response_id": response_data.get("response_id"),
             "message": response_data.get("message", ""),
             "action": response_data.get("action", "continue_chat"),
             "topic": response_data.get("topic"),
@@ -217,6 +234,7 @@ class SessionStreamer:
         _ts = datetime.now().isoformat()
         cls._persist_event(session_id, SessionSSEEventType.CHAT_RESPONSE.value, {
             "session_id": session_id,
+            "response_id": response_data.get("response_id"),
             "message": response_data.get("message", ""),
             "action": response_data.get("action", "continue_chat"),
             "topic": response_data.get("topic"),
@@ -275,6 +293,12 @@ class SessionStreamer:
     def push_agent_message(cls, session_id: str, agent_data: Dict[str, Any]):
         """Push an agent_message event to all session subscribers"""
         import time
+        # Preserve search observability fields on live and persisted events.
+        _metadata = {
+            key: agent_data[key]
+            for key in ("provider", "quality_score", "cache_hit", "stop_reason")
+            if key in agent_data and agent_data[key] is not None
+        }
         _action = agent_data.get("action", "")
         if _action != "heartbeat":
             _now = time.monotonic()
@@ -284,22 +308,17 @@ class SessionStreamer:
                 return
             cls._last_agent_msg_times[session_id] = _now
         _ts = datetime.now().isoformat()
-        cls._notify_subscribers(session_id, SessionSSEEventType.AGENT_MESSAGE, {
+        _event_payload = {
             "session_id": session_id,
             "agent_id": agent_data.get("agent_id", ""),
             "agent_name": agent_data.get("agent_name", ""),
             "action": agent_data.get("action", ""),
             "content": agent_data.get("content", ""),
             "timestamp": _ts,
-        })
-        cls._persist_event(session_id, SessionSSEEventType.AGENT_MESSAGE.value, {
-            "session_id": session_id,
-            "agent_id": agent_data.get("agent_id", ""),
-            "agent_name": agent_data.get("agent_name", ""),
-            "action": agent_data.get("action", ""),
-            "content": agent_data.get("content", ""),
-            "timestamp": _ts,
-        })
+            **_metadata,
+        }
+        cls._notify_subscribers(session_id, SessionSSEEventType.AGENT_MESSAGE, _event_payload)
+        cls._persist_event(session_id, SessionSSEEventType.AGENT_MESSAGE.value, _event_payload)
         logger.debug(f"Session stream agent_message pushed: {session_id}/{agent_data.get('agent_id', '')}")
         pending = cls._pending_agent_msgs.pop(session_id, None)
         if pending:
@@ -395,6 +414,29 @@ class SessionStreamer:
         cls._notify_subscribers(session_id, SessionSSEEventType.QUALITY_CONFIRMED, event_data)
         cls._persist_event(session_id, SessionSSEEventType.QUALITY_CONFIRMED.value, event_data)
         logger.info(f"Session stream quality_confirmed pushed: {session_id}")
+
+    @classmethod
+    def push_report_context(cls, session_id: str, context: Dict[str, Any]):
+        """Push the versioned, public report context snapshot.
+
+        The snapshot is persisted by ``update_report_context`` before this
+        method is called.  This event is intentionally separate from
+        ``agent_message`` because that event has a fixed status-only schema.
+        """
+        event_data = {
+            "event_id": f"ctx_{uuid.uuid4().hex}",
+            "session_id": session_id,
+            "context_revision": context.get("context_revision", 0),
+            "report_version": context.get("report_version", 0),
+            "snapshot": context,
+            "timestamp": datetime.now().isoformat(),
+        }
+        cls._notify_subscribers(session_id, SessionSSEEventType.REPORT_CONTEXT, event_data)
+        cls._persist_event(session_id, SessionSSEEventType.REPORT_CONTEXT.value, event_data)
+        logger.info(
+            "Session stream report_context pushed: %s revision=%s version=%s",
+            session_id, event_data["context_revision"], event_data["report_version"],
+        )
 
     # ---- Instance methods for SSE generator ----
 

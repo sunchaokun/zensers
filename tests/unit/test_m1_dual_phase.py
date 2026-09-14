@@ -39,6 +39,12 @@ class MockTaskStructure:
 @dataclass
 class MockIntent:
     requires_primary_data: bool = False
+    # Production DeepIntentResult always carries an explicit complexity.
+    # These BYD assertions exercise the multi-stage route, so the fixture
+    # must model a MULTI task instead of silently defaulting to SINGLE.
+    def __post_init__(self):
+        from src.core.intent_types import TaskComplexity
+        self.complexity = TaskComplexity.MULTI
 
 
 def _make_byd_task_structure():

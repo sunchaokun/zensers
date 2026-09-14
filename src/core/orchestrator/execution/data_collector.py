@@ -12,21 +12,24 @@ Usage:
     canonical = collector.get_canonical_data()
 """
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from src.core.communication import Event
 
 
 class DataCollector:
     """Cross-batch data event aggregator"""
 
-    def __init__(self):
+    def __init__(self, scope: Optional[str] = None):
         self._canonical_data: Dict[str, Any] = {}
         self._conflicts: List[Dict] = []
+        self._scope = scope
 
     async def on_canonical_updated(self, event: Event) -> None:
         """Handle canonical data update event"""
         data = event.data
         if not isinstance(data, dict):
+            return
+        if self._scope and data.get("scope") != self._scope:
             return
         key = data.get("metric", "")
         if not key:
@@ -38,7 +41,8 @@ class DataCollector:
 
     async def on_conflict_detected(self, event: Event) -> None:
         """Handle data conflict event"""
-        if isinstance(event.data, dict):
+        if (isinstance(event.data, dict)
+                and (not self._scope or event.data.get("scope") == self._scope)):
             self._conflicts.append(event.data)
 
     def get_canonical_data(self) -> Dict[str, Any]:

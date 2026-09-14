@@ -195,6 +195,142 @@ class TestSharedMemory:
         assert len(results) == 10
         assert set(results) == set(range(10))
 
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_canonical_memory_isolated_by_async_task_scope(self):
+        """Concurrent research sessions must not overwrite canonical metrics."""
+        from src.core.communication import SharedMemory, set_memory_scope
+
+        memory = SharedMemory()
+
+        async def session(scope, value):
+            set_memory_scope(scope)
+            await memory.write_canonical(
+                metric="revenue_2025",
+                value=value,
+                caliber="search_result",
+                source=scope,
+                publisher=scope,
+            )
+            entry = await memory.get_canonical("revenue_2025")
+            return entry["value"]
+
+        values = await asyncio.gather(
+            session("session_a", 100),
+            session("session_b", 200),
+        )
+
+        assert values == [100, 200]
+
+        set_memory_scope("session_a")
+        assert memory.get_canonical_sync("revenue_2025")["value"] == 100
+        set_memory_scope("session_b")
+        assert memory.get_canonical_sync("revenue_2025")["value"] == 200
+        set_memory_scope(None)
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_canonical_bus_events_are_filtered_by_scope(self):
+        from src.core.communication import MessageBus, SharedMemory, set_memory_scope
+        from src.core.orchestrator.execution.data_collector import DataCollector
+
+        bus = MessageBus()
+        memory = SharedMemory(message_bus=bus)
+        collector_a = DataCollector(scope="session_a")
+        collector_b = DataCollector(scope="session_b")
+        await bus.subscribe("data.canonical.updated", collector_a.on_canonical_updated)
+        await bus.subscribe("data.canonical.updated", collector_b.on_canonical_updated)
+
+        async def publish(scope, value):
+            set_memory_scope(scope)
+            await memory.write_canonical(
+                metric="margin_2025", value=value,
+                caliber="search_result", source=scope, publisher=scope,
+            )
+
+        await asyncio.gather(publish("session_a", 10), publish("session_b", 20))
+
+        assert collector_a.get_canonical_data()["margin_2025"]["value"] == 10
+        assert collector_b.get_canonical_data()["margin_2025"]["value"] == 20
+        set_memory_scope(None)
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_rejected_same_caliber_conflict_is_published(self):
+        from src.core.communication import MessageBus, SharedMemory
+
+        bus = MessageBus()
+        events = []
+
+        async def handler(event):
+            events.append(event)
+
+        await bus.subscribe("data.conflict.detected", handler)
+        memory = SharedMemory(message_bus=bus)
+        await memory.write_canonical("sales", 100, "search_result", "source-a", "agent-a")
+        conflict = await memory.write_canonical("sales", 120, "search_result", "source-b", "agent-b")
+
+        assert conflict is not None
+        await asyncio.sleep(0)
+        assert len(events) == 1
+        assert events[0].data["metric"] == "sales"
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_rejected_lower_priority_conflict_is_published(self):
+        from src.core.communication import MessageBus, SharedMemory
+
+        bus = MessageBus()
+        events = []
+
+        async def handler(event):
+            events.append(event)
+
+        await bus.subscribe("data.conflict.detected", handler)
+        memory = SharedMemory(message_bus=bus)
+        await memory.write_canonical("sales", 100, "structured_source", "source-a", "agent-a")
+        conflict = await memory.write_canonical("sales", 120, "search_result", "source-b", "agent-b")
+
+        assert conflict is not None
+        assert (await memory.get_canonical("sales"))["value"] == 100
+        await asyncio.sleep(0)
+        assert len(events) == 1
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_rejected_same_value_lower_priority_write_is_silent(self):
+        from src.core.communication import MessageBus, SharedMemory
+
+        bus = MessageBus()
+        events = []
+
+        async def handler(event):
+            events.append(event)
+
+        await bus.subscribe("data.canonical.updated", handler)
+        await bus.subscribe("data.conflict.detected", handler)
+        memory = SharedMemory(message_bus=bus)
+        await memory.write_canonical("sales", 100, "structured_source", "source-a", "agent-a")
+        result = await memory.write_canonical("sales", 100, "search_result", "source-b", "agent-b")
+
+        assert result is None
+        assert (await memory.get_canonical("sales"))["source"] == "source-a"
+        await asyncio.sleep(0)
+        assert len(events) == 1
+        assert events[0].type == "data.canonical.updated"
+
+    @pytest.mark.unit
+    def test_resolve_shared_memory_uses_configured_container_instance(self):
+        from src.core.communication import SharedMemory, resolve_shared_memory
+        from src.core.container import configure_container, reset_container
+
+        memory = SharedMemory()
+        configure_container(shared_memory=memory)
+        try:
+            assert resolve_shared_memory() is memory
+        finally:
+            reset_container()
+
 
 class TestGetCanonicalSyncPrefixFallback:
     """Test get_canonical_sync prefix fallback removal (defect 3.10)"""

@@ -11,6 +11,7 @@
 """
 import logging
 import re
+from difflib import SequenceMatcher
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -36,6 +37,105 @@ def _normalize_key(key: str) -> str:
     key = ''.join(result)
     key = re.sub(r'_+', '_', key)
     return key.strip('_')
+
+
+def _edit_distance(left: str, right: str) -> int:
+    """Return Levenshtein distance without an optional third-party package."""
+    left = str(left or "")
+    right = str(right or "")
+    if len(left) < len(right):
+        left, right = right, left
+    previous = list(range(len(right) + 1))
+    for i, left_char in enumerate(left, 1):
+        current = [i]
+        for j, right_char in enumerate(right, 1):
+            current.append(min(
+                current[-1] + 1,
+                previous[j] + 1,
+                previous[j - 1] + (left_char != right_char),
+            ))
+        previous = current
+    return previous[-1]
+
+
+def _tokenize_zh(text: str) -> Set[str]:
+    """Tokenize mixed Chinese/English titles into stable matching terms."""
+    if not text:
+        return set()
+    text = str(text).lower()
+    stopwords = {"的", "了", "和", "与", "及", "分析", "评估"}
+    tokens: Set[str] = set(re.findall(r"[a-z0-9]+", text))
+    for chunk in re.findall(r"[\u4e00-\u9fff]+", text):
+        if len(chunk) <= 2:
+            tokens.add(chunk)
+            continue
+        tokens.update(chunk[i:i + 2] for i in range(len(chunk) - 1))
+        tokens.update(chunk[i:i + 3] for i in range(len(chunk) - 2))
+    return {token for token in tokens if token not in stopwords and len(token) > 1}
+
+
+def _compute_jaccard(left: Set[str], right: Set[str]) -> float:
+    if not left or not right:
+        return 0.0
+    return len(left & right) / len(left | right)
+
+
+def _title_fuzzy_score(left: str, right: str) -> float:
+    """Score title similarity using normalized equality, tokens and edit ratio."""
+    left_key, right_key = _normalize_key(left), _normalize_key(right)
+    if not left_key or not right_key:
+        return 0.0
+    if left_key == right_key:
+        return 1.0
+    token_score = _compute_jaccard(_tokenize_zh(left_key), _tokenize_zh(right_key))
+    left_tokens = _tokenize_zh(left_key)
+    right_tokens = _tokenize_zh(right_key)
+    if left_tokens and right_tokens:
+        # Containment matters for shortened titles such as
+        # “营收构成分析” vs “营收分析”.
+        token_score = max(token_score, len(left_tokens & right_tokens) / min(len(left_tokens), len(right_tokens)))
+    sequence_score = SequenceMatcher(None, left_key, right_key).ratio()
+    # For Chinese titles, shared generic suffixes such as “分析” can make
+    # character-level similarity look deceptively high. Token overlap is the
+    # meaningful score there; a damped sequence score still helps shortened
+    # titles where only one informative bigram is shared.
+    if re.search(r"[\u4e00-\u9fff]", left_key + right_key):
+        return max(token_score, sequence_score * 0.5)
+    return max(token_score, sequence_score)
+
+
+def _semantic_match_section(
+    section_name: str,
+    section_id: str,
+    unused_agents: Dict[str, Tuple[Any, Any]],
+) -> Optional[Tuple[str, Any, float]]:
+    """Find the best unused agent result for a report section.
+
+    Candidate values are ``(content, target_section)``.  Exact normalized
+    target matches win; title similarity is preferred next, with content term
+    overlap as a conservative fallback.
+    """
+    if not unused_agents:
+        return None
+    target_key = _normalize_key(section_name or section_id)
+    best = None
+    for agent_key, value in unused_agents.items():
+        if not isinstance(value, (tuple, list)) or not value:
+            continue
+        content = value[0] if len(value) > 0 else ""
+        candidate_title = value[1] if len(value) > 1 else ""
+        candidate_key = _normalize_key(candidate_title)
+        if target_key and candidate_key and target_key == candidate_key:
+            score = 0.95
+        else:
+            score = _title_fuzzy_score(target_key, candidate_key)
+            if score < 0.3 and content:
+                score = max(score, _compute_jaccard(
+                    _tokenize_zh(target_key), _tokenize_zh(str(content))
+                ))
+        if best is None or score > best[2]:
+            best = (agent_key, content, score)
+    return best if best and best[2] >= 0.2 else None
 
 
 class ConflictResolution(Enum):
@@ -118,6 +218,8 @@ class AggregationResult:
     aggregated_at: datetime = field(default_factory=datetime.now)
     section_details: List[Dict[str, Any]] = field(default_factory=list)
     sources: List[Dict[str, Any]] = field(default_factory=list)  # P0-3修复：数据来源
+    raw_search_results: List[Dict[str, Any]] = field(default_factory=list)
+    evidence_registry: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     _sections_cleaned: bool = field(default=False, repr=False)  # 内容质量管线标记
     # 断点1修复：分层存储
     layered_content: Dict[str, Dict[str, Any]] = field(default_factory=dict)  # stage -> {key: content}
@@ -144,11 +246,18 @@ class AggregationResult:
             "stats": self.stats,
             "aggregated_at": self.aggregated_at.isoformat(),
             "sources": self.sources,  # P0-3修复：添加来源列表
+            "raw_search_results": self.raw_search_results,
+            "evidence_registry": self.evidence_registry,
         }
         
         # 转换为文档生成所需的 sections 结构
         result["sections"] = self._convert_to_sections()
         result["key_findings"] = self._extract_findings()
+        # Keep the structured report identity aligned with the rendered
+        # report whenever the aggregation input carries the topic/title.
+        title = self.data.get("title") or self.data.get("topic")
+        if title:
+            result["title"] = title
         
         # 内容质量管线：同步写回 self.data，确保一致性
         self.data["sections"] = result["sections"]
@@ -357,7 +466,18 @@ class AggregationResult:
                             # 检查 provenance 中的 section_target
                             if key in self.content_provenance:
                                 provenance = self.content_provenance[key]
-                                if provenance.section_target == section_id:
+                                provenance_target = str(
+                                    getattr(provenance, "section_target", "") or ""
+                                )
+                                # Execution paths may carry the canonical
+                                # section ID or the framework display name.
+                                # Both identify the same framework node; do
+                                # not fall back to phase-agent index when
+                                # either one is present.
+                                if _normalize_key(provenance_target) in {
+                                    _normalize_key(section_id),
+                                    _normalize_key(section_name),
+                                }:
                                     content = extract_content(value)
                                     matched_key = key
                                     matched_stage = stage
@@ -412,36 +532,16 @@ class AggregationResult:
                                     logger.debug(f"归一化匹配成功(fallback): '{section_name}' -> content_map key='{cm_key}'")
                                     break
                     
-                    # 回退：基于 agent_id 索引映射到 section
-                    # phase_2_agent_0..7 按索引顺序对应 section_details 中的 8 个 section
+                    # Never assign an unidentified phase agent by list index.
+                    # Completion order is not a stable identity and can
+                    # change under retries, cache hits, or parallel execution.
+                    # A missing identity must remain an explicit placeholder,
+                    # not become silently wrong evidence.
                     if not content and section_name:
-                        _section_idx = None
-                        for _si, _sec in enumerate(self.section_details):
-                            _sn = _to_str(_sec.get("name", _sec.get("id", "")))
-                            if _sn == section_name or _to_str(_sec.get("id", "")) == section_id:
-                                _section_idx = _si
-                                break
-                        if _section_idx is not None:
-                            for _stage in target_stages:
-                                if _stage not in self.layered_content:
-                                    continue
-                                _layer = self.layered_content[_stage]
-                                for _agent_key, _agent_val in _layer.items():
-                                    if _agent_key in used_keys:
-                                        continue
-                                    if _agent_key.startswith("phase_2_agent_") or _agent_key.startswith("phase_1_agent_"):
-                                        try:
-                                            _idx = int(_agent_key.split("_agent_")[-1])
-                                        except (ValueError, IndexError):
-                                            continue
-                                        if _idx == _section_idx:
-                                            content = extract_content(_agent_val)
-                                            matched_key = _agent_key
-                                            matched_stage = _stage
-                                            logger.info(f"索引映射: '{section_name}' -> '{_agent_key}' (idx={_idx})")
-                                            break
-                                if content:
-                                    break
+                        logger.warning(
+                            "章节 '%s' 未找到可信 ID/name provenance；拒绝按 agent index 绑定内容",
+                            section_name,
+                        )
                     
                     # 如果还是没有内容，阻断性错误（RG-FIX-1）
                     if not content:
@@ -1004,6 +1104,26 @@ class ResultAggregator:
             AggregationResult: 聚合结果
         """
         self._total_aggregations += 1
+
+        # A duplicate framework ID is an identity violation.  The old code
+        # silently discarded later sections during its de-duplication pass,
+        # which made a malformed framework look like a successful report.
+        if section_details:
+            seen_framework_ids: Set[str] = set()
+            for framework_section in section_details:
+                if not isinstance(framework_section, dict):
+                    continue
+                framework_id = str(
+                    framework_section.get("id")
+                    or framework_section.get("section_id")
+                    or ""
+                ).strip()
+                if framework_id and framework_id in seen_framework_ids:
+                    raise ValueError(
+                        f"duplicate framework section id: {framework_id}"
+                    )
+                if framework_id:
+                    seen_framework_ids.add(framework_id)
         
         if not results:
             return AggregationResult(
@@ -1100,7 +1220,12 @@ class ResultAggregator:
                 
                 # 断点2修复：记录来源追踪
                 # M0-a: prefer _section_id (from orchestrator key mapping) over heuristic
-                _sec_id = result.get("_section_id", "")
+                # Accept both the internal aggregation annotation and the
+                # persisted execution field.  Some recovery/checkpoint paths
+                # do not pass through the orchestrator's ``_section_id``
+                # annotation, but ``section_id`` is still a valid canonical
+                # identity and must not be discarded.
+                _sec_id = result.get("_section_id", "") or result.get("section_id", "")
                 if _sec_id:
                     section_target = _sec_id
                 else:
@@ -1141,7 +1266,7 @@ class ResultAggregator:
                         layered_content[stage][key] = value
                     
                     # 断点2修复：记录来源追踪
-                    _sec_id_d = result.get("_section_id", "")
+                    _sec_id_d = result.get("_section_id", "") or result.get("section_id", "")
                     if _sec_id_d:
                         section_target = _sec_id_d
                     else:
@@ -1223,20 +1348,72 @@ class ResultAggregator:
         
         # P0-3修复：收集所有来源信息
         all_sources = []
+        raw_search_results = []
+        evidence_registry = {}
         seen_urls = set()  # 去重
         for agent_id, result in results.items():
             if isinstance(result, dict):
                 sources = result.get("sources", [])
                 for source in sources:
-                    url = source.get("url", "")
-                    if url and url not in seen_urls:
-                        seen_urls.add(url)
-                        all_sources.append({
-                            "title": source.get("title", ""),
+                    url = source.get("url", "") or source.get("href", "")
+                    identity = (
+                        str(url).strip()
+                        or str(source.get("evidence_id") or "").strip()
+                        or str(source.get("title") or "").strip()
+                    )
+                    if identity and identity not in seen_urls:
+                        seen_urls.add(identity)
+                        preserved = dict(source)
+                        preserved.update({
                             "url": url,
                             "type": source.get("type", "web"),
                             "agent_id": agent_id,
                         })
+                        all_sources.append(preserved)
+                        raw_search_results.append(dict(preserved))
+                        evidence_id = str(preserved.get("evidence_id") or "").strip()
+                        if evidence_id:
+                            evidence_registry[evidence_id] = dict(preserved)
+
+                # Preserve the original search envelope when an Agent returns
+                # it.  ``sources`` is a citation catalog; it is not a
+                # substitute for raw search evidence.
+                envelopes = []
+                for key in ("raw_search_results", "search_results"):
+                    value = result.get(key)
+                    if isinstance(value, dict):
+                        envelopes.extend(value.get("searches", []) or [])
+                        envelopes.extend(value.get("results", []) or [])
+                    elif isinstance(value, list):
+                        envelopes.extend(value)
+                if isinstance(result.get("searches"), list):
+                    envelopes.extend(result["searches"])
+                for envelope in envelopes:
+                    if not isinstance(envelope, dict):
+                        continue
+                    items = envelope.get("results") if isinstance(envelope.get("results"), list) else [envelope]
+                    for item in items:
+                        if not isinstance(item, dict):
+                            continue
+                        raw_item = dict(item)
+                        raw_item.setdefault("agent_id", agent_id)
+                        if raw_item.get("body") and not raw_item.get("content"):
+                            raw_item["content"] = raw_item["body"]
+                        if raw_item.get("snippet") and not raw_item.get("evidence_excerpt"):
+                            raw_item["evidence_excerpt"] = raw_item["snippet"]
+                        identity = (
+                            str(raw_item.get("url") or raw_item.get("href") or "").strip()
+                            or str(raw_item.get("evidence_id") or "").strip()
+                            or str(raw_item.get("title") or "").strip()
+                        )
+                        if identity and not any(
+                            identity == str(existing.get("url") or existing.get("evidence_id") or existing.get("title") or "").strip()
+                            for existing in raw_search_results
+                        ):
+                            raw_search_results.append(raw_item)
+                            evidence_id = str(raw_item.get("evidence_id") or "").strip()
+                            if evidence_id:
+                                evidence_registry[evidence_id] = raw_item
         
         # 4. 构建统计
         stats = {
@@ -1245,6 +1422,7 @@ class ResultAggregator:
             "total_conflicts": len(conflicts),
             "conflict_keys": [c.key for c in conflicts],
             "total_sources": len(all_sources),  # P0-3修复
+            "total_raw_search_results": len(raw_search_results),
             "metric_conflicts": metric_conflicts,  # M4
             "metric_conflict_details": metric_conflict_details,  # M4
         }
@@ -1258,6 +1436,8 @@ class ResultAggregator:
             stats=stats,
             section_details=section_details or [],
             sources=all_sources,  # P0-3修复
+            raw_search_results=raw_search_results,
+            evidence_registry=evidence_registry,
             layered_content=layered_content,  # 断点1修复
             content_provenance=content_provenance,  # 断点2修复
         )
@@ -1538,6 +1718,34 @@ def _normalize_key_for_matching(key: str) -> str:
     return result.strip()
 
 
+def _subsection_identity(sub_section) -> tuple[str, str]:
+    """Return the stable framework ID and display name for a subsection.
+
+    ``sub_section_id`` is used by decomposition models while ``id`` is used
+    by framework/template payloads.  They are aliases of the same identity;
+    callers must not silently replace either with a title-derived ID.
+    """
+    if isinstance(sub_section, dict):
+        sub_id = (
+            sub_section.get("id")
+            or sub_section.get("sub_section_id")
+            or sub_section.get("subsection_id")
+            or ""
+        )
+        sub_name = sub_section.get("name", "")
+    else:
+        sub_id = (
+            getattr(sub_section, "id", "")
+            or getattr(sub_section, "sub_section_id", "")
+            or getattr(sub_section, "subsection_id", "")
+            or ""
+        )
+        sub_name = getattr(sub_section, "display_name", "") or getattr(sub_section, "name", "")
+    if isinstance(sub_name, dict):
+        sub_name = sub_name.get("zh", sub_name.get("en", ""))
+    return str(sub_id or ""), str(sub_name or "")
+
+
 def _match_content_to_sub_section(content: str, sub_section) -> str:
     """Match LLM output content to a framework sub_section by heading.
 
@@ -1548,16 +1756,12 @@ def _match_content_to_sub_section(content: str, sub_section) -> str:
         return ""
 
     import re
-    if isinstance(sub_section, dict):
-        sub_name = sub_section.get("name", "")
-    else:
-        sub_name = getattr(sub_section, 'display_name', '') or getattr(sub_section, 'name', '')
-    if isinstance(sub_name, dict):
-        sub_name = sub_name.get("zh", sub_name.get("en", ""))
-    if not sub_name:
+    sub_id, sub_name = _subsection_identity(sub_section)
+    if not sub_id and not sub_name:
         return ""
 
-    norm_target = _normalize_key_for_matching(sub_name)
+    norm_id = _normalize_key_for_matching(sub_id)
+    norm_name = _normalize_key_for_matching(sub_name)
     lines = content.split('\n')
     matched_lines = []
     found_start = False
@@ -1575,7 +1779,27 @@ def _match_content_to_sub_section(content: str, sub_section) -> str:
                 if m:
                     heading_text = m.group(1).strip()
                     norm_heading = _normalize_key_for_matching(heading_text)
-                    if norm_heading == norm_target or norm_heading in norm_target or norm_target in norm_heading:
+                    # IDs are opaque identifiers, not titles: only exact ID
+                    # equality (or an explicit delimited ID token) is valid.
+                    # Prefix/substring matching would map ``sub_a`` to
+                    # ``sub_a_extended`` and silently attach the wrong text.
+                    id_token_match = bool(
+                        sub_id and re.search(
+                            rf"(?<![A-Za-z0-9_]){re.escape(str(sub_id))}(?![A-Za-z0-9_])",
+                            heading_text,
+                            flags=re.IGNORECASE,
+                        )
+                    )
+                    id_match = bool(norm_id and (norm_heading == norm_id or id_token_match))
+                    # Display names remain backward-compatible with the old
+                    # shortened-title behavior, but only after ID matching.
+                    name_match = bool(
+                        norm_name
+                        and (norm_heading == norm_name
+                             or norm_heading in norm_name
+                             or norm_name in norm_heading)
+                    )
+                    if id_match or name_match:
                         found_start = True
                         break
         else:
@@ -1600,21 +1824,18 @@ def _build_subsections_from_skeleton(content: str, framework_sub_sections: list)
 
     import re
     subsections = []
+    seen_subsection_ids = set()
     for sub in framework_sub_sections:
-        if isinstance(sub, dict):
-            sub_name = sub.get("name", "")
-        elif hasattr(sub, 'display_name'):
-            sub_name = sub.display_name
-        elif hasattr(sub, 'name'):
-            sub_name = getattr(sub, 'name', '')
-        else:
+        sub_id, sub_name = _subsection_identity(sub)
+        if not sub_id and not sub_name:
             continue
-        if isinstance(sub_name, dict):
-            sub_name = sub_name.get("zh", sub_name.get("en", ""))
-        if not sub_name:
-            continue
+        if sub_id:
+            if sub_id in seen_subsection_ids:
+                raise ValueError(f"duplicate framework subsection id: {sub_id}")
+            seen_subsection_ids.add(sub_id)
         matched_content = _match_content_to_sub_section(content, sub)
-        sub_id = "sub_" + re.sub(r'[^\w\u4e00-\u9fff]+', '_', sub_name).strip('_').lower()[:30]
+        if not sub_id:
+            sub_id = "sub_" + re.sub(r'[^\w\u4e00-\u9fff]+', '_', sub_name).strip('_').lower()[:30]
         points = sub.get("points", []) if hasattr(sub, 'get') else (getattr(sub, 'points', []) if hasattr(sub, 'points') else [])
         if points and hasattr(points[0], 'text'):
             points = [pt.text for pt in points]
