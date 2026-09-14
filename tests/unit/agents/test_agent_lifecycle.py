@@ -34,7 +34,7 @@ class TestLifecycleState:
     
     def test_state_count(self):
         """验证状态数量"""
-        assert len(AgentLifecycleState) == 12
+        assert len(AgentLifecycleState) == 11
     
     def test_state_values(self):
         """验证状态值"""

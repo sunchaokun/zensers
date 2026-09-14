@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', 'sr
 from src.core.agents.factory import DynamicAgentFactory, AgentCapability, GenericAgent
 from src.core.agents.protocol import IAgent
 from src.core.agents.base import BaseAgent
+from src.skills.registry import SkillRegistry
 
 
 class TestDynamicAgentFactory:
@@ -190,20 +191,26 @@ class TestGenericAgent:
     
     def test_agent_config(self):
         """测试Agent配置."""
-        factory = DynamicAgentFactory()
+        registry = SkillRegistry()
+        # The factory validates skill names against the injected registry.
+        # Register factories so this test exercises config preservation rather
+        # than depending on optional application-wide skill discovery.
+        registry.register_factory("search_skill", lambda: None)
+        registry.register_factory("file_skill", lambda: None)
+        factory = DynamicAgentFactory(skill_registry=registry)
         
         capability = AgentCapability(
             name="ConfigTest",
             description="配置测试",
-            required_skills=["skill1"],
-            optional_skills=["skill2"]
+            required_skills=["search_skill"],
+            optional_skills=["file_skill"]
         )
         
         agent = factory.create_agent("config_agent", capability, context={"key": "value"})
         
         assert agent.config["name"] == "ConfigTest"
-        assert agent.config["required_skills"] == ["skill1"]
-        assert agent.config["optional_skills"] == ["skill2"]
+        assert agent.config["required_skills"] == ["search_skill"]
+        assert agent.config["optional_skills"] == ["file_skill"]
         assert agent.config["context"] == {"key": "value"}
 
 

@@ -34,7 +34,7 @@ class TestRequirementAnalysisAgent:
         assert agent.agent_id == "test_req_001"
         assert agent.name == "测试需求分析师"
         assert agent.status == "idle"
-        assert "意图识别" in agent.capabilities
+        assert "intent_recognition" in agent.capabilities
     
     def test_validate_input_missing_user_input(self):
         """测试输入验证 - 缺少user_input."""
@@ -78,19 +78,20 @@ class TestRequirementAnalysisAgent:
         agent = RequirementAnalysisAgent("test_001", "测试")
         
         entities = agent._extract_entities(
-            "分析中国储能行业，关注宁德时代",
+            "Analyze the energy storage market, CATL",
             {}
         )
         
-        assert entities["industry"] == "储能"
-        assert entities["region"] == "中国"
-        assert "宁德时代" in entities["companies"]
+        assert entities["industry"] == "Energy Storage"
+        assert entities["region"] == "China"
+        assert "CATL" in entities["companies"]
     
-    def test_execute_full_flow(self):
+    @pytest.mark.asyncio
+    async def test_execute_full_flow(self):
         """测试完整执行流程."""
         agent = RequirementAnalysisAgent("test_001", "测试分析师")
         
-        result = agent.run({
+        result = await agent.run({
             "user_input": "分析中国储能行业投资机会",
             "context": {},
         })
@@ -113,7 +114,7 @@ class TestReportGenerationAgent:
         )
         
         assert agent.agent_id == "test_report_001"
-        assert "内容整合" in agent.capabilities
+        assert "content_integration" in agent.capabilities
     
     def test_validate_input_missing_title(self):
         """测试输入验证 - 缺少title."""
@@ -130,16 +131,18 @@ class TestReportGenerationAgent:
         """测试封面生成."""
         agent = ReportGenerationAgent("test_001", "测试")
         
-        cover = agent._generate_cover("测试报告", "market_research")
+        from src.core.i18n import Language
+        cover = agent._generate_cover("测试报告", "market_research", Language.ZH)
         
         assert "测试报告" in cover
         assert "研究报告" in cover
     
-    def test_execute(self):
+    @pytest.mark.asyncio
+    async def test_execute(self):
         """测试报告生成."""
         agent = ReportGenerationAgent("test_001", "测试")
         
-        result = agent.run({
+        result = await agent.run({
             "title": "储能行业研究报告",
             "sections": [
                 {"id": "sec1", "title": "市场规模", "content": "市场规模内容..."},
@@ -161,7 +164,7 @@ class TestQualityCheckAgent:
         """测试Agent初始化."""
         agent = QualityCheckAgent("test_001", "测试质检员")
         
-        assert "完整性检查" in agent.capabilities
+        assert "Completeness check" in agent.capabilities
     
     def test_check_completeness_pass(self):
         """测试完整性检查 - 通过."""
@@ -170,9 +173,9 @@ class TestQualityCheckAgent:
         report = {
             "word_count": 2000,
             "sections": [
-                {"title": "执行摘要"},
-                {"title": "市场规模"},
-                {"title": "竞争格局"},
+                {"title": "执行摘要", "content": "摘要内容"},
+                {"title": "市场规模", "content": "市场规模分析"},
+                {"title": "竞争格局", "content": "竞争格局分析"},
             ],
         }
         
@@ -208,11 +211,12 @@ class TestQualityCheckAgent:
         
         assert score > 80  # 全部通过应该高分
     
-    def test_execute(self):
+    @pytest.mark.asyncio
+    async def test_execute(self):
         """测试质量检查执行."""
         agent = QualityCheckAgent("test_001", "测试")
         
-        result = agent.run({
+        result = await agent.run({
             "report": {
                 "title": "测试报告",
                 "content": "测试内容...",
@@ -233,20 +237,24 @@ class TestDataCollectionAgent:
         """测试Agent初始化."""
         agent = DataCollectionAgent("test_001", "测试数据员")
         
-        assert "网页搜索" in agent.capabilities
+        assert "web_search" in agent.capabilities
     
-    def test_execute(self):
+    @pytest.mark.asyncio
+    async def test_execute(self):
         """测试数据收集."""
         agent = DataCollectionAgent("test_001", "测试")
         
-        result = agent.run({
+        result = await agent.run({
             "query": "储能行业市场规模",
             "max_results": 5,
         })
         
-        assert result["success"] is True
+        # Without a task-scoped SearchGateway the production contract is a
+        # safe, explicit degradation; mock data must not be fabricated.
+        assert result["success"] is False
         assert "data" in result
         assert "statistics" in result
+        assert any(error["source"] == "web_search" for error in result["errors"])
     
     def test_deduplicate_data(self):
         """测试数据去重."""
@@ -270,7 +278,7 @@ class TestLayoutDesignAgent:
         """测试Agent初始化."""
         agent = LayoutDesignAgent("test_001", "测试排版员")
         
-        assert "Word文档生成" in agent.capabilities
+        assert "Word Document Generation" in agent.capabilities
     
     def test_validate_input_unsupported_format(self):
         """测试输入验证 - 不支持的格式."""
