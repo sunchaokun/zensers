@@ -229,7 +229,10 @@ class PerformanceOptimizer:
         engine = SimulationEngine()
         
         # Record start time
-        start_time = time.time()
+        # perf_counter has sufficient resolution for fast offline/rule-based
+        # simulations; time.time() can return identical samples and report a
+        # zero throughput on Windows.
+        start_time = time.perf_counter()
         
         # Execute simulation
         responses = await engine.simulate_survey(
@@ -239,7 +242,7 @@ class PerformanceOptimizer:
         )
         
         # Calculate performance metrics
-        elapsed_time = time.time() - start_time
+        elapsed_time = time.perf_counter() - start_time
         throughput = len(personas) / elapsed_time if elapsed_time > 0 else 0
         avg_time = elapsed_time / len(personas) if personas else 0
         

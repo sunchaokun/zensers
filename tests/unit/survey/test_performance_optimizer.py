@@ -389,7 +389,7 @@ class TestPerformanceIntegration:
         
         # 结果校准
         calibration_agent = ResultCalibrationAgent()
-        calibration_result = calibration_agent.execute({
+        calibration_result = await calibration_agent.execute({
             "responses": responses,
             "survey": survey,
             "target_distribution": {"age": {"18-30": 0.5, "31-50": 0.5}},
