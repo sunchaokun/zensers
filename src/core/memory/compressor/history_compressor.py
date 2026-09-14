@@ -261,6 +261,10 @@ class HistoryCompressor:
         except Exception as e:
             logger.error(f"Failed to restore archive: {e}")
             return None
+
+    def restore_from_archive(self, archive_path: Path) -> Optional[List[Dict[str, Any]]]:
+        """Backward-compatible alias for :meth:`restore_archive`."""
+        return self.restore_archive(Path(archive_path))
     
     # ========== 大小计算 ==========
     

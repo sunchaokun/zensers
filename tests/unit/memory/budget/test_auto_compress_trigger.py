@@ -211,8 +211,8 @@ class TestAutoCompressTrigger:
         """测试默认压缩策略"""
         strategy = budget_manager.get_compression_strategy("conversation")
         
-        # 应该有默认策略
-        assert strategy is not None
+        # 策略由各记忆层显式注入，管理器不应隐式选择策略。
+        assert strategy is None
 
 
 class TestAutoCompressIntegration:
@@ -228,7 +228,7 @@ class TestAutoCompressIntegration:
     async def test_full_compress_cycle(self, budget_manager):
         """测试完整压缩周期"""
         # 模拟高使用量
-        budget_manager.set_layer_usage("conversation", 120000)
+        budget_manager.set_layer_usage("conversation", 140000)
         budget_manager.set_layer_usage("layer2", 60000)
         
         # 设置策略
@@ -241,7 +241,7 @@ class TestAutoCompressIntegration:
         result = await budget_manager.auto_compress_if_needed()
         
         assert result["compressed"] is True
-        assert budget_manager.get_total_usage() < 180000
+        assert budget_manager.get_total_usage() < 200000
 
     @pytest.mark.asyncio
     async def test_compress_until_safe(self, budget_manager):

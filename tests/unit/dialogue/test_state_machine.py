@@ -30,7 +30,7 @@ class TestConversationState:
     def test_all_states_defined(self):
         """测试所有状态都已定义"""
         states = list(ConversationState)
-        assert len(states) == 11
+        assert len(states) == 13
 
 
 class TestConversationStateMachineInit:

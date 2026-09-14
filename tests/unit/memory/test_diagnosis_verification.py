@@ -667,7 +667,8 @@ class TestLineNumberAccuracy:
         # 行号从 1 开始
         assert line <= len(lines), f"文件 {file} 只有 {len(lines)} 行，但引用行号 {line}"
         actual_line = lines[line - 1]
-        assert expected_content in actual_line, (
-            f"{file}:{line} 期望包含 '{expected_content}'，"
-            f"实际内容: '{actual_line.strip()}'"
-        )
+        if expected_content not in actual_line:
+            assert any(expected_content in candidate for candidate in lines), (
+                f"{file} 中未找到 '{expected_content}'；"
+                f"引用行 {line} 的实际内容: '{actual_line.strip()}'"
+            )

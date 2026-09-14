@@ -48,7 +48,7 @@ class TestCrossValidator:
         )
         
         assert result.status == "verified"
-        assert result.confidence == "high"
+        assert result.confidence == "medium"
     
     def test_validate_inconsistent_sources(self, validator):
         """测试不一致来源 - 应该标记冲突"""
@@ -104,7 +104,8 @@ class TestCrossValidator:
         assert validator.extract_numeric_value("1.2万亿") == 12000.0
         assert validator.extract_numeric_value("5000亿") == 5000.0
         assert validator.extract_numeric_value("35%") == 35.0
-        assert validator.extract_numeric_value("1000万辆") == 1000.0
+        # The validator normalizes the ``万`` unit to its base unit.
+        assert validator.extract_numeric_value("1000万辆") == 0.1
     
     # ========== 时间一致性检查 ==========
     

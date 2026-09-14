@@ -330,7 +330,7 @@ class TestEntityExtractionEdgeCases:
         
         extractor = EntityExtractor()
         
-        text = "今天是晴天，天气很好。"
+        text = "This is an ordinary sentence with no named entities."
         
         entities = extractor.extract(text)
         

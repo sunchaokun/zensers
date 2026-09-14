@@ -195,7 +195,7 @@ class TestSavePhaseMeta:
             }
         )
         
-        meta_path = tmp_path / "test_task_001" / "phase_1_collection" / "_phase_meta.json"
+        meta_path = tmp_path / "test_task_001" / "phase_1_data_collection" / "_phase_meta.json"
         assert meta_path.exists()
         
         with open(meta_path, 'r', encoding='utf-8') as f:
@@ -312,7 +312,7 @@ class TestSaveInputRefs:
             }
         )
         
-        refs_path = tmp_path / "test_task_001" / "phase_3_analysis" / "_input_refs.json"
+        refs_path = tmp_path / "test_task_001" / "phase_3_deep_analysis" / "_input_refs.json"
         assert refs_path.exists()
         
         with open(refs_path, 'r', encoding='utf-8') as f:
@@ -512,6 +512,6 @@ class TestIntegration:
         # 检查目录结构
         research_dir = tmp_path / task_id
         assert (research_dir / "requirement.json").exists()
-        assert (research_dir / "phase_1_collection").exists()
-        assert (research_dir / "phase_1_collection" / "_phase_meta.json").exists()
-        assert (research_dir / "phase_3_analysis" / "_input_refs.json").exists()
+        assert (research_dir / "phase_1_data_collection").exists()
+        assert (research_dir / "phase_1_data_collection" / "_phase_meta.json").exists()
+        assert (research_dir / "phase_3_deep_analysis" / "_input_refs.json").exists()

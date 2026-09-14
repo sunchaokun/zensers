@@ -188,7 +188,14 @@ class LLMEntityExtractor:
         if isinstance(response, dict):
             if response.get("success") is False:
                 return None
-            return response.get("content")
+            content = response.get("content")
+            if content is not None:
+                return content
+            data = response.get("data")
+            if isinstance(data, dict):
+                return data.get("content")
+            if isinstance(data, str):
+                return data
         if isinstance(response, str):
             return response
         return None

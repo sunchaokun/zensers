@@ -54,8 +54,10 @@ class RollingSummarizer:
     def __init__(
         self,
         max_summary_length: int = DEFAULT_SUMMARY_LENGTH,
+        preserve_key_points: bool = True,
     ):
         self.max_summary_length = max_summary_length
+        self.preserve_key_points = preserve_key_points
 
     def summarize(self, history: List[Dict[str, Any]]) -> str:
         """
@@ -87,13 +89,19 @@ class RollingSummarizer:
             role = msg.get("role", "")
             content = msg.get("content", "")
             if not content:
+                content = msg.get("summary", "")
+            if not content and msg.get("state"):
+                content = f"状态: {msg['state']}"
+            if not content and msg.get("data"):
+                content = str(msg["data"])
+            if not content:
                 continue
 
             if role == "user":
                 user_messages.append(content)
                 if self._contains_decision(content):
                     decisions.append(f"用户: {self._truncate(content, 100)}")
-            elif role == "assistant":
+            else:
                 assistant_messages.append(content)
                 if self._contains_decision(content):
                     decisions.append(f"助手: {self._truncate(content, 100)}")

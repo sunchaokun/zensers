@@ -437,11 +437,14 @@ class TestParallelExecution:
     async def test_parallel_phase_execution(self, orchestrator):
         """测试并行阶段执行"""
         aspects = ["市场规模", "竞争格局", "技术趋势"]
+
+        async def phase_executor(_phase, context):
+            return {"aspect": context["aspect"], "quality_score": 0.8}
         
         results = await orchestrator._execute_parallel_phase(
             phase=AnalysisPhase.DATA_COLLECTION,
             requirement={"topic": "test", "aspects": aspects},
-            phase_executor=None,
+            phase_executor=phase_executor,
             parallel_units=aspects,
         )
         
@@ -540,7 +543,7 @@ class TestAgentIntegration:
         )
         
         assert task["action"] == "deep_analysis"
-        assert "validated_data" in task["parameters"]
+        assert task["parameters"]["validated_data"]["quality_score"] == 0.9
         assert "frameworks" in task["parameters"]
     
     def test_extract_phase_output(self, orchestrator):

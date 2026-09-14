@@ -549,6 +549,11 @@ class TokenBudgetManager:
         
         # 发送通知
         for warning in warnings:
+            for callback in self._warning_callbacks:
+                try:
+                    callback(warning)
+                except Exception as e:
+                    logger.warning(f"Warning callback error: {e}")
             for handler in self._notification_handlers:
                 try:
                     handler(warning)

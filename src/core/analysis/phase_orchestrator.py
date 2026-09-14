@@ -217,8 +217,45 @@ class PhaseOrchestrator:
         return result
 
     async def _execute_parallel_phase(self, phase, requirement, phase_executor, parallel_units):
-        await asyncio.sleep(0)
-        return []
+        """Execute independent phase units concurrently.
+
+        ``phase_executor`` follows the same ``(phase, context)`` contract as
+        :meth:`execute`.  Keeping the context explicit preserves the unit's
+        aspect while allowing callers to reuse the normal phase executor.
+        """
+        if phase_executor is None:
+            raise ValueError("phase_executor is required for parallel execution")
+
+        async def run_unit(unit):
+            context = {
+                "task_id": self._task_id_counter,
+                "phase": phase,
+                "requirement": requirement,
+                "aspect": unit,
+            }
+            started = datetime.now()
+            try:
+                output = await phase_executor(phase, context)
+                if isinstance(output, PhaseExecutionResult):
+                    return output
+                if not isinstance(output, dict):
+                    output = {"value": output}
+                return PhaseExecutionResult(
+                    phase=phase,
+                    success=True,
+                    output=output,
+                    duration_seconds=(datetime.now() - started).total_seconds(),
+                    quality_score=float(output.get("quality_score", 0.0)),
+                )
+            except Exception as exc:
+                return PhaseExecutionResult(
+                    phase=phase,
+                    success=False,
+                    error=str(exc),
+                    duration_seconds=(datetime.now() - started).total_seconds(),
+                )
+
+        return await asyncio.gather(*(run_unit(unit) for unit in parallel_units))
 
     def _merge_phase_results(self, phase, results):
         merged = {"data_points": [], "sources": [], "coverage_score": 0.0, "insights": [], "analysis_details": {"units_processed": 0}}
@@ -235,15 +272,18 @@ class PhaseOrchestrator:
         return merged
 
     def _build_agent_task(self, phase, requirement, input_data, prompt):
+        parameters = {
+            "topic": requirement.get("topic", ""),
+            "aspects": requirement.get("aspects", []),
+            "input_data": input_data,
+            "prompt": prompt,
+            "frameworks": ["TAM_SAM_SOM", "Porter_Five_Forces"],
+        }
+        for key, value in input_data.items():
+            parameters.setdefault(key, value)
         return {
             "action": phase.value,
-            "parameters": {
-                "topic": requirement.get("topic", ""),
-                "aspects": requirement.get("aspects", []),
-                "input_data": input_data,
-                "prompt": prompt,
-                "frameworks": ["TAM_SAM_SOM", "Porter_Five_Forces"],
-            },
+            "parameters": parameters,
         }
 
     def _extract_phase_output(self, phase, agent_result):
@@ -261,9 +301,9 @@ class PhaseOrchestrator:
 
     def _sanitize_aspect(self, aspect: str) -> str:
         import re
+        aspect = aspect.strip()
         aspect = re.sub(r'[/\\]', '_', aspect)
         aspect = re.sub(r'\s+', '_', aspect)
-        aspect = aspect.strip()
         if not aspect:
             aspect = "default"
         if len(aspect) > 100:
@@ -317,7 +357,10 @@ class PhaseOrchestrator:
             aspect_name = data.get("aspect", "")
             if aspect and aspect_name != aspect:
                 continue
-            result[aspect_name] = data.get("output", {})
+            output = data.get("output", {})
+            if aspect:
+                return output
+            result[aspect_name] = output
         return result
 
     def _save_input_refs(self, task_id: str, phase: AnalysisPhase, refs: Dict[str, Any]):
@@ -348,7 +391,10 @@ class PhaseOrchestrator:
         if prev_data:
             return {"previous_phase_data": prev_data}
         if self._shared_memory:
-            phase_key = f"phase_output.{phase.value}"
+            previous_phase = phase.get_previous()
+            if previous_phase is None:
+                return {}
+            phase_key = f"phase_output.{previous_phase.value}"
             mem_data = self._shared_memory.get(phase_key)
             if mem_data:
                 return {"raw_data": mem_data}

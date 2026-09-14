@@ -97,7 +97,7 @@ class TestHarnessIntegration:
         )
         
         assert result.status == "verified"
-        assert result.confidence == "high"
+        assert result.confidence == "medium"
     
     def test_cross_validation_inconsistent(self, checker):
         """测试交叉验证 - 冲突"""

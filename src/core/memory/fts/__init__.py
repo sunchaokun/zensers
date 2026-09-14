@@ -668,7 +668,7 @@ class FTSSearcher:
                 if tokens:
                     return f'"{" ".join(tokens)}"'
             except ImportError:
-                pass
+                return f'"{query}"'
         
         # 如果查询包含空格，使用短语搜索
         if ' ' in query:

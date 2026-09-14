@@ -153,8 +153,8 @@ class TestCircuitBreaker:
         assert cb.state == CircuitState.CLOSED
     
     @pytest.mark.asyncio
-    async def test_call_with_retries(self):
-        """测试熔断器保护下的重试."""
+    async def test_call_propagates_failure_without_retry(self):
+        """熔断器记录失败，但重试由 EnhancedRetryHandler 负责。"""
         cb = CircuitBreaker(failure_threshold=2)
         call_count = 0
         
@@ -165,9 +165,9 @@ class TestCircuitBreaker:
                 raise ValueError("temporary error")
             return "success"
         
-        # 不应该触发熔断（失败次数 < 阈值）
-        result = await cb.call(fail_then_success)
-        assert result == "success"
+        with pytest.raises(ValueError, match="temporary error"):
+            await cb.call(fail_then_success)
+        assert call_count == 1
     
     @pytest.mark.asyncio
     async def test_call_opens_on_failures(self):
@@ -500,7 +500,7 @@ class TestCircuitBreakerIntegration:
         
         # 配置：2次失败后熔断
         config = ResilienceConfig(
-            retry_config=RetryConfig(max_retries=1, base_delay_seconds=0.01),
+            retry_config=RetryConfig(max_retries=0, base_delay_seconds=0.01),
             circuit_breaker_config={
                 "failure_threshold": 2,
                 "recovery_timeout_seconds": 10
@@ -514,17 +514,19 @@ class TestCircuitBreakerIntegration:
             call_count += 1
             raise ValueError("error")
         
+        circuit_breaker = CircuitBreaker(failure_threshold=2, recovery_timeout_seconds=10)
+
         # 第一次调用（失败）
         with pytest.raises(ValueError):
-            await execute_with_resilience(always_fail, config, "test_op")
+            await execute_with_resilience(always_fail, config, "test_op", circuit_breaker=circuit_breaker)
         
         # 第二次调用（失败，触发熔断）
         with pytest.raises(ValueError):
-            await execute_with_resilience(always_fail, config, "test_op")
+            await execute_with_resilience(always_fail, config, "test_op", circuit_breaker=circuit_breaker)
         
         # 第三次调用（被熔断器拒绝）
         with pytest.raises(CircuitBreakerError):
-            await execute_with_resilience(always_fail, config, "test_op")
+            await execute_with_resilience(always_fail, config, "test_op", circuit_breaker=circuit_breaker)
         
         # 熔断器拒绝后，操作不会被调用
         assert call_count == 2  # 只有2次实际调用

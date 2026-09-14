@@ -194,7 +194,7 @@ class TestTokenBudgetMonitoring:
         
         assert len(report["recommendations"]) > 0
         # 应该建议压缩
-        assert any("compress" in r.lower() for r in report["recommendations"])
+        assert any("压缩" in r for r in report["recommendations"])
 
 
 class TestTokenBudgetThresholds:

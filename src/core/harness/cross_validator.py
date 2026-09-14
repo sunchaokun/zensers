@@ -284,7 +284,7 @@ class CrossValidator:
         if source_count >= 3:
             score += 40
         elif source_count >= 2:
-            score += 30
+            score += 15
         else:
             score += 10
         
@@ -293,9 +293,8 @@ class CrossValidator:
         
         # 来源等级分 (0-30)
         tier_scores = {"tier1": 15, "tier2": 10, "tier3": 5}
-        for tier in source_tiers:
-            score += tier_scores.get(tier, 5)
-        score = min(score, 30)  # 上限30
+        tier_score = sum(tier_scores.get(tier, 5) for tier in source_tiers)
+        score += min(tier_score, 30)  # 来源等级分上限30
         
         # 分数到置信度
         if score >= 70:
