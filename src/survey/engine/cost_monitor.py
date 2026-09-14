@@ -78,7 +78,10 @@ class RetryHandler:
     BACKOFF_BASE = 1.0
     BACKOFF_MULTIPLIER = 2.0
     MAX_BACKOFF = 30.0
-    TIMEOUT = 30.0
+    # Reasoning models may spend tens of seconds before returning final
+    # content.  A short timeout turns normal slow responses into avoidable
+    # fallback answers and makes multi-sample runs look unreliable.
+    TIMEOUT = 60.0
     RETRYABLE_ERROR_NAMES = frozenset({
         "TimeoutError", "RateLimitError", "ConnectionError",
         "ServiceUnavailableError", "asyncio.TimeoutError"})

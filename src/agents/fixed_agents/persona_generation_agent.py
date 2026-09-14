@@ -415,8 +415,8 @@ Personality: {', '.join(persona.personality_traits[:2])}
         """
         return self.AVAILABLE_TEMPLATES.copy()
     
-    def reset(self) -> None:
+    async def reset(self) -> None:
         """Reset Agent state."""
-        super().reset()
+        await super().reset()
         # Optionally keep or reset persona_factory
         # self._persona_factory = None

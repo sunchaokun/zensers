@@ -1,12 +1,15 @@
 """Survey analysis report builder - renders descriptive/sentiment/wordcloud/crosstab/charts into Markdown."""
-from datetime import datetime
+import logging
 import os
-from typing import Dict, Any, List, Optional
-from ..models import Survey, SurveyResponse, QuestionType
+from datetime import datetime
+
+from ..models import QuestionType
+from .crosstab import CrossTabAnalyzer
 from .descriptive import DescriptiveAnalyzer
 from .sentiment import SentimentAnalyzer
 from .wordcloud import WordCloudGenerator
-from .crosstab import CrossTabAnalyzer
+
+logger = logging.getLogger(__name__)
 
 
 class SurveyReportBuilder:
@@ -54,8 +57,11 @@ class SurveyReportBuilder:
         """Generate bar charts for key distributions. Returns dict of question_id -> image path."""
         charts = {}
         try:
-            from src.services.chart_generator import ChartGenerator, ChartConfig, ChartType
-            gen = ChartGenerator()
+            from src.services.chart_generator import ChartConfig, ChartGenerator, ChartType
+            # Keep generated images inside the report artifact directory.  A
+            # temporary generator directory makes Markdown references expire
+            # as soon as the process exits.
+            gen = ChartGenerator(output_dir=output_dir)
             per_q = desc.get("per_question", {})
             for qid, qstats in per_q.items():
                 dist = qstats.get("stats", {}).get("distribution", {})
@@ -63,7 +69,6 @@ class SurveyReportBuilder:
                     continue
                 labels = list(dist.keys())[:10]
                 values = [dist[l].get("count", 0) for l in labels]
-                chart_path = os.path.join(output_dir, f"chart_{qid}.png")
                 result = gen.generate(ChartConfig(
                     chart_type=ChartType.BAR,
                     title=qstats.get("question_text", qid)[:60],
@@ -71,10 +76,10 @@ class SurveyReportBuilder:
                     xlabel="Response",
                     ylabel="Count",
                 ))
-                if result.success:
+                if result.success and result.image_path:
                     charts[qid] = result.image_path
-        except Exception as e:
-            pass
+        except Exception:
+            logger.exception("Survey chart generation failed")
         return charts
 
     def _collect_open_texts(self, survey, responses):

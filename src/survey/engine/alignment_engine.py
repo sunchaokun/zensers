@@ -175,7 +175,8 @@ class DistributionAligner:
             return best_key
 
         if dimension == "gender":
-            return persona.gender if persona.gender in self._target_distributions.get("gender", {}) else "other"
+            gender = str(persona.gender or "").strip().lower()
+            return gender if gender in self._target_distributions.get("gender", {}) else "other"
 
         if dimension == "city_tier":
             return self._city_classifier.get(

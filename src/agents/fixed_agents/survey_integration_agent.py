@@ -94,6 +94,11 @@ class SurveyIntegrationAgent(FixedAgent):
         self._analysis_agent = None
         self._persona_agent = None
         self._simulation_agent = None
+        # Canonical AI simulation path: PersonaV2 + SimulationExecutor.
+        # The legacy agent attributes above remain only for compatibility with
+        # callers that inspect them; they are no longer used by this workflow.
+        self._persona_generator = None
+        self._simulation_executor = None
         self._stores = None  # Lazy initialization
     
     def _get_stores(self):
@@ -966,44 +971,43 @@ class SurveyIntegrationAgent(FixedAgent):
     async def _generate_personas(self, template: str, count: int) -> List[Dict]:
         """Generate AI personas"""
         try:
-            from src.agents.fixed_agents.persona_generation_agent import PersonaGenerationAgent
-            
-            if self._persona_agent is None:
-                self._persona_agent = PersonaGenerationAgent(
-                    agent_id=f"{self.agent_id}_persona",
-                )
-            
-            result = await self._persona_agent.execute_async({
-                "template": template,
-                "count": count,
-            })
-            
-            if result.get("success"):
-                return result.get("personas", [])
-            return []
+            from src.survey.engine.persona_generator import PersonaGeneratorV2
+
+            if self._persona_generator is None:
+                self._persona_generator = PersonaGeneratorV2()
+
+            personas, _stats = await self._persona_generator.generate_batch(
+                template_name=template,
+                count=count,
+                persona_type="consumer",
+            )
+            return [persona.to_dict() for persona in personas]
             
         except Exception as e:
             logger.error(f"Failed to generate personas: {e}")
-            return []
+            raise
     
     async def _simulate_responses(self, survey: Dict, personas: List[Dict]) -> List[Dict]:
         """AI simulate responses"""
         try:
-            from src.agents.fixed_agents.simulated_response_agent import SimulatedResponseAgent
-            
-            if self._simulation_agent is None:
-                self._simulation_agent = SimulatedResponseAgent(
-                    agent_id=f"{self.agent_id}_sim",
-                )
-            
-            result = await self._simulation_agent.execute({
-                "survey": survey,
-                "personas": personas,
-                "parallel": True,
-            })
-            
-            return result.get("responses", [])
+            from src.survey.engine.simulation_engine import SimulationExecutor
+            from src.survey.models import Survey
+            from src.survey.engine.persona_models import PersonaV2
+
+            if self._simulation_executor is None:
+                self._simulation_executor = SimulationExecutor()
+
+            survey_model = survey if isinstance(survey, Survey) else Survey.from_dict(survey)
+            persona_models = [
+                persona if isinstance(persona, PersonaV2) else PersonaV2.from_dict(persona)
+                for persona in personas
+            ]
+            responses = await self._simulation_executor.simulate_personas(
+                persona_models,
+                survey_model,
+            )
+            return [response.to_dict() for response in responses]
             
         except Exception as e:
             logger.error(f"Failed to simulate responses: {e}")
-            return []
+            raise

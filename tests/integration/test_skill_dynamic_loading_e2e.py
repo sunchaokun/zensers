@@ -33,7 +33,7 @@ class TestE2E1OrchestratorInitToFactoryGet:
         """验证 orchestrator.py 代码中用 register_factory 而非直接赋值 _skills"""
         orchestrator_path = SRC_ROOT / "core" / "orchestrator" / "orchestrator.py"
         content = orchestrator_path.read_text(encoding="utf-8")
-        assert "register_factory" in content, "orchestrator.py must use register_factory for analysis skills"
+        assert "init_from_discovery" in content, "orchestrator.py must initialize manifest-driven skill discovery"
         assert "skill_registry._skills[\"market_analysis\"]" not in content, \
             "orchestrator.py must NOT directly assign _skills dict for analysis skills"
 
@@ -108,12 +108,11 @@ class TestE2E2ValidateAndNormalizeSkills:
 
         norm_req, norm_opt = factory._validate_and_normalize_skills(
             agent_id="deep_analysis_financial",
-            required_skills=["llm_skill", "stock_analysis", "data_analysis"],
+            required_skills=["stock_analysis", "data_analysis"],
             optional_skills=[],
         )
         assert "stock_analysis" in norm_req, "stock_analysis must survive validation"
         assert "data_analysis" in norm_req, "data_analysis must survive validation"
-        assert "llm_skill" in norm_req
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -153,7 +152,7 @@ class TestE2E3DataCollectionStockData:
         capability = AgentCapability(
             name="Data Collection Financial",
             description="Collect financial data",
-            required_skills=["search_skill", "news_search", "llm_skill", "stock_data"],
+            required_skills=["search_skill", "news_search", "stock_data"],
         )
 
         agent = factory.create_agent("data_col_001", capability, context={"topic": "比亚迪财务分析"})
@@ -171,7 +170,7 @@ class TestE2E3DataCollectionStockData:
         capability = AgentCapability(
             name="Data Collection",
             description="Test",
-            required_skills=["search_skill", "news_search", "llm_skill", "stock_data"],
+            required_skills=["search_skill", "news_search", "stock_data"],
         )
 
         agent = factory.create_agent("e2e_data_col", capability)
@@ -312,8 +311,8 @@ class TestE2E6DiscoverSkills:
         content = registry_path.read_text(encoding="utf-8")
         discover_start = content.find("def discover_skills")
         assert discover_start > 0
-        func_body = content[discover_start:discover_start + 1500]
-        assert "_factories" in func_body, "discover_skills must check _factories in auto_load"
+        func_body = content[discover_start:]
+        assert "skill_name in self._factories" in func_body, "discover_skills must check _factories in auto_load"
 
     def test_discover_financial_data_returns_stock_data(self):
         """端到端: discover_skills('financial data') → stock_data"""
@@ -321,8 +320,7 @@ class TestE2E6DiscoverSkills:
         from src.skills.analysis import StockDataSkill
 
         registry = SkillRegistry()
-        registry.register_core_skills()
-        registry.register_factory("stock_data", StockDataSkill)
+        registry.init_from_discovery(Path("src/skills"))
 
         discovered = registry.discover_skills("financial data", auto_load=True)
         assert "stock_data" in discovered, f"'financial data' must discover stock_data, got: {discovered}"
@@ -333,8 +331,7 @@ class TestE2E6DiscoverSkills:
         from src.skills.analysis import StockAnalysisSkill
 
         registry = SkillRegistry()
-        registry.register_core_skills()
-        registry.register_factory("stock_analysis", StockAnalysisSkill)
+        registry.init_from_discovery(Path("src/skills"))
 
         discovered = registry.discover_skills("stock analysis", auto_load=True)
         assert "stock_analysis" in discovered
@@ -363,7 +360,7 @@ class TestE2E7AddSkill:
         factory = DynamicAgentFactory()
         factory._skill_registry.register_factory("stock_data", StockDataSkill)
 
-        capability = AgentCapability(name="Test", description="Test", required_skills=["llm_skill"])
+        capability = AgentCapability(name="Test", description="Test", required_skills=[])
         agent = factory.create_agent("add_e2e_001", capability)
 
         result = agent.add_skill("stock_data")
@@ -382,10 +379,10 @@ class TestE2E7AddSkill:
         factory = DynamicAgentFactory()
         factory._skill_registry.register_factory("market_analysis", MarketAnalysisSkill)
 
-        capability = AgentCapability(name="Test", description="Test", required_skills=["llm_skill"])
+        capability = AgentCapability(name="Test", description="Test", required_skills=[])
         agent = factory.create_agent("add_e2e_002", capability)
 
-        mock_template = {"skill_names": ["llm_skill"]}
+        mock_template = {"skill_names": []}
         mock_session = MagicMock()
         mock_session.agent_template = mock_template
         agent._session = mock_session
@@ -402,7 +399,7 @@ class TestE2E7AddSkill:
         factory = DynamicAgentFactory()
         factory._skill_registry.register_factory("stock_data", StockDataSkill)
 
-        capability = AgentCapability(name="Test", description="Test", required_skills=["llm_skill"])
+        capability = AgentCapability(name="Test", description="Test", required_skills=[])
         agent = factory.create_agent("add_e2e_003", capability)
 
         agent.add_skill("stock_data")
@@ -444,7 +441,7 @@ class TestE2E8DiscoverSkillsBranch:
         agent = GenericAgent.__new__(GenericAgent)
         agent.agent_id = "discover_e2e_001"
         agent._skill_registry = registry
-        agent._available_skills = ["llm_skill"]
+        agent._available_skills = []
         agent._session = None
         agent._context = {}
 
@@ -460,7 +457,6 @@ class TestE2E8DiscoverSkillsBranch:
 
             assert "stock_data" in agent._available_skills
             assert agent._available_skills.count("stock_data") == 1
-            assert "llm_skill" in agent._available_skills
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -479,9 +475,9 @@ class TestE2E9FullChainIntegration:
         )
 
         factory = DynamicAgentFactory()
-        factory._skill_registry.register_factory("stock_data", StockDataSkill)
-        factory._skill_registry.register_factory("stock_analysis", StockAnalysisSkill)
-        factory._skill_registry.register_factory("data_analysis", DataAnalysisSkill)
+        # Use the same manifest-driven registry initialization as production;
+        # this includes the web skills required by the data-collection phase.
+        factory._skill_registry.init_from_discovery(Path("src/skills"))
 
         # DATA_COLLECTION phase
         data_skills = _get_data_collection_skills("Financial Analysis", topic="比亚迪财务分析")
@@ -494,7 +490,6 @@ class TestE2E9FullChainIntegration:
         assert "stock_data" in data_agent._available_skills, \
             f"DATA_COLLECTION agent must have stock_data, got: {data_agent._available_skills}"
         assert "search_skill" in data_agent._available_skills
-        assert "llm_skill" in data_agent._available_skills
 
         # DEEP_ANALYSIS phase
         analysis_skills = get_skills_for_aspect("Financial Analysis")
@@ -507,7 +502,6 @@ class TestE2E9FullChainIntegration:
         assert "stock_analysis" in analysis_agent._available_skills, \
             f"DEEP_ANALYSIS agent must have stock_analysis, got: {analysis_agent._available_skills}"
         assert "data_analysis" in analysis_agent._available_skills
-        assert "llm_skill" in analysis_agent._available_skills
 
     def test_market_analysis_full_chain(self):
         """端到端: 'Competitive Landscape' → DATA_COLLECTION + DEEP_ANALYSIS"""

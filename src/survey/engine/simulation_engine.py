@@ -18,7 +18,10 @@ import uuid
 from datetime import datetime
 from typing import List, Optional, Dict, Any, Tuple
 
-import tiktoken
+try:
+    import tiktoken
+except ImportError:  # Token counting has a built-in approximation fallback.
+    tiktoken = None
 
 from ..models import Survey, SurveyResponse, Answer, Question, QuestionType
 from .persona_models import PersonaV2, PromptLevel
@@ -170,6 +173,30 @@ class SimulationExecutor:
         """Pre-flight validation check."""
         pass
 
+    async def simulate_personas(
+        self,
+        personas: List[PersonaV2],
+        survey: Survey,
+        survey_context: str = "",
+        max_concurrent: int = 10,
+    ) -> List[SurveyResponse]:
+        """Simulate a supplied PersonaV2 population.
+
+        This is the public bridge used by the MVP pipeline.  Persona
+        generation remains separate from response simulation so the exact
+        population can be persisted and replayed.
+        """
+        if not personas:
+            return []
+        if self._cost_tracker is None:
+            self._cost_tracker = LLMCostTracker(
+                task_id=f"sim_{uuid.uuid4().hex[:8]}",
+                budget_limit=self._budget_limit,
+            )
+        return await self._simulate_all(
+            personas, survey, survey_context, max_concurrent=max_concurrent
+        )
+
     # ---------------------------------------------------------------- #
     # Survey simulation
     # ---------------------------------------------------------------- #
@@ -305,7 +332,21 @@ class SimulationExecutor:
             survey_context=context, level=self._prompt_level,
         )
 
-        result = await self._call_llm_with_retry(prompt, question)
+        try:
+            result = await self._call_llm_with_retry(prompt, question)
+        except BudgetExceededError:
+            # A budget breach is a run-level failure and must remain visible.
+            raise
+        except Exception as exc:
+            # LLM availability or malformed output must not discard an entire
+            # respondent.  Use the deterministic answer path and keep the
+            # failure in logs for later quality review.
+            logger.warning(
+                "LLM answer unavailable for question %s; using rule fallback: %s",
+                question.question_id,
+                exc,
+            )
+            return self._answer_with_rules(persona, question)
 
         self._record_estimated_cost(prompt, result.get("content", ""), question.question_id)
 
@@ -323,6 +364,13 @@ class SimulationExecutor:
         if question.options:
             selected = random.choice(question.options)
             return Answer(question_id=question.question_id, answer_value=selected.option_id)
+        if question.question_type == QuestionType.YES_NO:
+            return Answer(
+                question_id=question.question_id,
+                answer_value=random.choice(["Yes", "No"]),
+            )
+        if question.question_type in (QuestionType.SCALE, QuestionType.LIKERT):
+            return Answer(question_id=question.question_id, answer_value=3)
         return Answer(question_id=question.question_id, answer_value="42")
 
     # ---------------------------------------------------------------- #
@@ -343,7 +391,7 @@ class SimulationExecutor:
                         prompt=prompt.user_prompt,
                         system_prompt=prompt.system_prompt,
                         temperature=prompt.temperature,
-                        max_tokens=512,
+                        max_tokens=2048,
                     ),
                     timeout=RetryHandler.TIMEOUT,
                 )
@@ -406,6 +454,8 @@ class SimulationExecutor:
     def _count_tokens(text: str) -> int:
         """Count tokens using tiktoken (cl100k_base for GPT-4/4o)."""
         try:
+            if tiktoken is None:
+                raise ImportError("tiktoken is not installed")
             enc = tiktoken.get_encoding("cl100k_base")
             return len(enc.encode(text))
         except Exception:

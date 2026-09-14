@@ -934,12 +934,12 @@ def get_webhook_handler(
     global _webhook_handler
     if _webhook_handler is None:
         from src.survey.task_manager import get_task_manager
-        from src.core.communication import SharedMemory, MessageBus
+        from src.core.communication import resolve_shared_memory, MessageBus
         
         _webhook_handler = SurveyWebhookHandler(
             task_manager=get_task_manager(),
             message_bus=MessageBus(),
-            shared_memory=SharedMemory(),
+            shared_memory=resolve_shared_memory(),
             webhook_secrets=webhook_secrets,
             enable_signature_verification=enable_signature_verification,
             encryption_key=encryption_key,

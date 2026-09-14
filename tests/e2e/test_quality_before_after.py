@@ -32,7 +32,7 @@ SCENARIO_BYD_FINANCIAL = {
         {"section_id": "market", "core_claims": ["销量427万辆", "市场份额33.4%"]},
     ],
     "execution_logs": [
-        {"section_id": "synthesis", "skills_used": ["llm_skill"]},
+        {"section_id": "synthesis", "skills_used": ["intrinsic_llm"]},
     ],
 }
 
@@ -67,7 +67,7 @@ SCENARIO_HIGH_QUALITY = {
         {"section_id": "trend", "core_claims": ["4年CAGR=69%", "产品力提升"]},
     ],
     "execution_logs": [
-        {"section_id": "synthesis", "skills_used": ["llm_skill"]},
+        {"section_id": "synthesis", "skills_used": ["intrinsic_llm"]},
     ],
 }
 

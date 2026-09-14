@@ -9,6 +9,7 @@ from src.core.llm_client import call_llm
 logger = logging.getLogger(__name__)
 
 _MAX_CONTEXT_LENGTH = 500
+_PERSONA_LLM_TIMEOUT = 90
 _INJECTION_PATTERNS = [
     r"ignore\s+(all\s+)?(above\s+)?instructions",
     r"system\s*:", r"you\s+are\s+(now|currently)\s+",
@@ -85,7 +86,7 @@ class PersonaGeneratorV2:
         try:
             result = await asyncio.wait_for(
                 call_llm(prompt=prompt, system_prompt=_SYSTEM_PROMPT,
-                         temperature=0.9, max_tokens=2048), timeout=30)
+                         temperature=0.9, max_tokens=4096), timeout=_PERSONA_LLM_TIMEOUT)
             if result.get("success"):
                 data = json.loads(self._clean_json(result["content"]))
                 return self._build_persona(data, params, persona_type, city, age, gender)

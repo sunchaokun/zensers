@@ -41,11 +41,9 @@ class CrossSynthesisAgent:
             return self._fallback(topic, desk_content, survey_content, responses_count)
 
         try:
-            result = await asyncio.wait_for(
-                call_llm(
-                    prompt=user_prompt, system_prompt=system_prompt,
-                    temperature=0.5, max_tokens=1500),
-                timeout=60)
+            result = await call_llm(
+                prompt=user_prompt, system_prompt=system_prompt,
+                temperature=0.5, max_tokens=1500)
             if result.get("success"):
                 return self._parse_output(result["content"])
         except Exception as e:

@@ -269,7 +269,7 @@ class TestPersonaGenerationAgent:
     async def test_agent_reset(self, agent):
         task_input = {"template": "一线白领", "count": 5}
         await agent.run(task_input)
-        agent.reset()
+        await agent.reset()
         assert agent.status == "idle"
 
     # ========== 能力测试 ==========
@@ -368,7 +368,7 @@ class TestPersonaGenerationAgent:
     # ========== LLM增强边界测试 ==========
 
     @pytest.mark.asyncio
-    async def test_llm_enhancement_without_llm_skill(self, agent):
+    async def test_llm_enhancement_uses_intrinsic_llm(self, agent):
         task_input = {"template": "一线白领", "count": 5, "enhance_with_llm": True}
         result = await agent.execute(task_input)
         assert result["success"] is True

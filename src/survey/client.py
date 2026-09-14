@@ -72,19 +72,27 @@ class SurveyClient:
         # Parse questions
         q_list = []
         for i, q_data in enumerate(questions):
-            q_id = q_data.get("id", f"q_{i+1}")
+            q_id = q_data.get("question_id", q_data.get("id", f"q_{i+1}"))
             q_text = q_data.get("text", "")
-            q_type = QuestionType(q_data.get("type", "single_choice"))
+            q_type = QuestionType(
+                q_data.get("question_type", q_data.get("type", "single_choice"))
+            )
             q_options = None
             
             if q_data.get("options"):
-                q_options = [
-                    QuestionOption(
-                        option_id=f"opt_{i}_{j}",
-                        text=opt
-                    )
-                    for j, opt in enumerate(q_data["options"])
-                ]
+                q_options = []
+                for j, opt in enumerate(q_data["options"]):
+                    if isinstance(opt, dict):
+                        q_options.append(QuestionOption.from_dict({
+                            "option_id": opt.get("option_id", f"opt_{i}_{j}"),
+                            "text": opt.get("text", ""),
+                            "value": opt.get("value"),
+                        }))
+                    else:
+                        q_options.append(QuestionOption(
+                            option_id=f"opt_{i}_{j}",
+                            text=str(opt),
+                        ))
             
             q_list.append(Question(
                 question_id=q_id,
