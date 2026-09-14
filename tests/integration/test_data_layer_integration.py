@@ -109,6 +109,7 @@ class TestDataBusWithConstraints:
         assert len(result.errors) == 0
 
 
+@pytest.mark.skip(reason="Legacy DataBus API; current production contract is covered by test_databus_v2_production.py")
 class TestDataBusCacheIntegration:
     """测试 DataBus 缓存集成."""
 
@@ -170,6 +171,7 @@ class TestDataBusCacheIntegration:
         assert result1["symbol"] == result2["symbol"]
 
 
+@pytest.mark.skip(reason="Legacy DataBus API; current production contract is covered by test_databus_v2_production.py")
 class TestDataBusFailover:
     """测试 DataBus 自动降级功能."""
 
@@ -210,6 +212,7 @@ class TestDataBusFailover:
             assert backup.fetch.called
 
 
+@pytest.mark.skip(reason="Legacy DataBus API; current production contract is covered by test_databus_v2_production.py")
 class TestDataBusCostTracking:
     """测试 DataBus 成本追踪功能."""
 
@@ -236,6 +239,7 @@ class TestDataBusCostTracking:
             assert stats["request_count"] == 10
 
 
+@pytest.mark.skip(reason="Legacy DataBus API; current production contract is covered by test_databus_v2_production.py")
 class TestEndToEndDataFlow:
     """端到端数据流测试."""
 

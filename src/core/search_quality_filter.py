@@ -16,6 +16,7 @@ import logging
 from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
@@ -308,6 +309,20 @@ class SearchQualityFilter:
 
         # 2. Content relevance assessment
         relevance_score = self._assess_relevance(result, query, context)
+
+        # A structurally valid page is not useful if it is unrelated to the
+        # query.  This hard floor also prevents the caller's low-result
+        # fallback from re-introducing irrelevant search hits.
+        if relevance_score < 20.0:
+            return QualityScore(
+                overall_score=0,
+                credibility=credibility,
+                relevance_score=relevance_score,
+                depth_score=0,
+                freshness_score=0,
+                is_filtered=True,
+                filter_reason="Insufficient query relevance",
+            )
 
         # 3. Content quality assessment
         depth_score = self._assess_depth(result)

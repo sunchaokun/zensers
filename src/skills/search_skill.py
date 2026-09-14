@@ -11,11 +11,13 @@ import asyncio
 import logging
 import os
 import re
+import socket
+import threading
 from typing import Any, Dict, List, Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 from src.skills.base import Skill, SkillConfig
-from src.core.search_quality_filter import SearchQualityFilter
+from src.core.search_quality_filter import SearchQualityFilter, SourceCredibility
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +31,7 @@ SEARCH_ENGINES = {
     },
     "bing_cn": {
         "name": "Bing China",
-        "url": "https://cn.bing.com/search?q={keyword}&ensearch=0",
+        "url": "https://www.bing.com/search?q={keyword}&mkt=zh-CN&ensearch=0",
         "region": "cn",
         "priority": 2,
         "selectors": {
@@ -93,6 +95,25 @@ except ImportError:
 
 class MultiSearchSkill(Skill):
 
+    # Optional legacy/local provider capability.  A missing optional package
+    # must not be rediscovered for every query in a long report run.
+    _BAIDU_API_AVAILABLE: Optional[bool] = None
+
+    # DDGS rotates through public backends and is sensitive to burst traffic.
+    # Keep the global limit process-wide because every Agent owns its own
+    # MultiSearchSkill instance during a research run.
+    _DDGS_MAX_CONCURRENCY = 4
+    _DDGS_CONCURRENCY = threading.BoundedSemaphore(_DDGS_MAX_CONCURRENCY)
+
+    # These are local listener ports used by common desktop proxy clients.
+    # A TUN-only VPN does not expose any of them and should be used directly.
+    _LOCAL_PROXY_CANDIDATES = (
+        ("http://127.0.0.1:7890", "Clash HTTP"),
+        ("http://127.0.0.1:7897", "Clash HTTP"),
+        ("http://127.0.0.1:10809", "V2RayN HTTP"),
+        ("socks5://127.0.0.1:1080", "Shadowsocks SOCKS5"),
+    )
+
     def __init__(self, config: Optional[SkillConfig] = None):
         super().__init__(config)
         _min_quality = self._load_min_quality_score()
@@ -130,6 +151,7 @@ class MultiSearchSkill(Skill):
         env_proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or os.environ.get("https_proxy") or os.environ.get("http_proxy")
         if env_proxy:
             return env_proxy
+        configured_proxy = ""
         try:
             import yaml
             from pathlib import Path
@@ -142,12 +164,50 @@ class MultiSearchSkill(Skill):
                         cfg = yaml.safe_load(f)
                     val = cfg.get("proxy", {}).get("url", "")
                     if val:
-                        return str(val)
+                        configured_proxy = str(val)
+                        break
                     val = cfg.get("search", {}).get("proxy", "")
                     if val:
-                        return str(val)
+                        configured_proxy = str(val)
+                        break
         except Exception:
-            pass
+            configured_proxy = ""
+
+        # Do not keep routing every request to a stale localhost port. If the
+        # configured local listener is down, try another common listener and
+        # finally fall back to the system/TUN route.
+        if configured_proxy and MultiSearchSkill._proxy_is_listening(configured_proxy):
+            return configured_proxy
+        if configured_proxy:
+            logger.warning("Configured proxy is unavailable: %s; trying auto-detection", configured_proxy)
+
+        detected = MultiSearchSkill._detect_local_proxy()
+        if detected:
+            logger.info("Auto-detected local proxy: %s", detected)
+        return detected
+
+    @staticmethod
+    def _proxy_is_listening(proxy_url: str, timeout: float = 0.25) -> bool:
+        """Check only local proxy listeners; never probe remote user data."""
+        try:
+            parsed = urlparse(proxy_url)
+            host = parsed.hostname
+            port = parsed.port
+            if not host or not port:
+                return False
+            if host not in {"127.0.0.1", "localhost", "::1"}:
+                return True  # Remote proxy may be intentional and cannot be TCP-probed safely here.
+            with socket.create_connection((host, port), timeout=timeout):
+                return True
+        except (OSError, ValueError):
+            return False
+
+    @classmethod
+    def _detect_local_proxy(cls) -> str:
+        for proxy_url, label in cls._LOCAL_PROXY_CANDIDATES:
+            if cls._proxy_is_listening(proxy_url):
+                logger.info("Detected %s at %s", label, proxy_url)
+                return proxy_url
         return ""
 
     @property
@@ -163,8 +223,41 @@ class MultiSearchSkill(Skill):
         )
 
     async def execute(self, **kwargs) -> Dict[str, Any]:
-        query = kwargs.get("query", "").strip()
+        """Execute a search and normalize failures at the skill boundary.
+
+        ``_do_search`` is intentionally kept as the overridable search
+        implementation.  Besides making the multi-engine implementation
+        testable, this preserves the contract used by integrations that need
+        to inject a deterministic search provider.
+        """
+        raw_query = kwargs.get("query", "")
+        query = " ".join(str(item).strip() for item in raw_query if str(item).strip()) if isinstance(raw_query, (list, tuple, set)) else str(raw_query or "").strip()
+        if not query:
+            return self._failure("query cannot be empty")
+        try:
+            normalized_kwargs = dict(kwargs)
+            normalized_kwargs["query"] = query
+            result = await self._do_search(**normalized_kwargs)
+            # Backward-compatible provider contract: injected providers may
+            # return the raw result list instead of the envelope used by the
+            # built-in multi-engine implementation.
+            if isinstance(result, list):
+                limited = result[:min(kwargs.get("max_results", 10), 200)]
+                return self._success({
+                    "results": limited,
+                    "query": query,
+                    "total": len(limited),
+                }, f"Search completed, found {len(limited)} results")
+            return result
+        except Exception as exc:
+            logger.exception("Search execution failed")
+            return self._failure(str(exc), "Search failed")
+
+    async def _do_search(self, **kwargs) -> Dict[str, Any]:
+        raw_query = kwargs.get("query", "")
+        query = " ".join(str(item).strip() for item in raw_query if str(item).strip()) if isinstance(raw_query, (list, tuple, set)) else str(raw_query or "").strip()
         engines = kwargs.get("engines")
+        site = kwargs.get("site")
         max_results = min(kwargs.get("max_results", 10), 200)
         region = kwargs.get("region", "cn")
         use_ddgs = kwargs.get("use_ddgs", True)
@@ -175,6 +268,11 @@ class MultiSearchSkill(Skill):
 
         if not query:
             return self._failure("query cannot be empty")
+
+        if site:
+            site = str(site).strip()
+            if site:
+                query = f"site:{site} {query}"
 
         if min_quality_score != 40.0:
             self.quality_filter.min_quality_score = min_quality_score
@@ -189,7 +287,9 @@ class MultiSearchSkill(Skill):
                 name="search_ddgs"
             )
 
-        if is_cn:
+        # Baidu SERP scraping is only enabled when a proxy is available;
+        # direct requests are routinely closed by Baidu anti-bot controls.
+        if is_cn and self._proxy and self._baidu_api_available():
             search_tasks["baidu"] = asyncio.create_task(
                 self._search_with_baidu_api(query, max_results),
                 name="search_baidu"
@@ -225,16 +325,26 @@ class MultiSearchSkill(Skill):
 
         all_results = []
         engines_used = []
+        engine_errors = {}
+        engine_status = {}
         for eng_name, task in search_tasks.items():
             if task not in done:
+                engine_status[eng_name] = "timeout"
+                engine_errors[eng_name] = f"Timed out after {self.timeout + 5}s"
                 continue
             try:
                 results = task.result()
                 if results:
                     all_results.extend(results)
                     engines_used.append(eng_name)
+                    engine_status[eng_name] = "ok"
                     logger.info(f"{eng_name}: {len(results)} results")
+                else:
+                    engine_status[eng_name] = "empty"
+                    logger.info(f"{eng_name}: 0 results")
             except Exception as e:
+                engine_status[eng_name] = "error"
+                engine_errors[eng_name] = str(e)
                 logger.warning(f"{eng_name} failed: {e}")
 
         seen_urls = set()
@@ -247,7 +357,9 @@ class MultiSearchSkill(Skill):
         raw_results = unique_results
 
         if not raw_results:
-            return self._failure("All search engines unavailable", "Search failed")
+            failure = self._failure("All search engines unavailable", "Search failed")
+            failure.update({"engine_status": engine_status, "engine_errors": engine_errors})
+            return failure
 
         if enable_quality_filter and raw_results:
             filtered_results, quality_scores = self.quality_filter.filter_results(raw_results, query, context)
@@ -265,8 +377,33 @@ class MultiSearchSkill(Skill):
                     filtered_results = scored_raw[:max_results]
                     logger.warning(f"Quality filter too strict for query: {query}, using {len(filtered_results)} low-quality results")
                 else:
-                    logger.warning(f"All results filtered out for query: {query}, returning nothing rather than unfiltered")
-                    return self._failure("All results below quality threshold", "Search quality insufficient")
+                    # Preserve partially relevant, non-marketing evidence for
+                    # downstream review.  Returning an empty set here makes
+                    # the report look like data was never searched.  Truly
+                    # unrelated or explicitly tier-5 results remain blocked.
+                    rescue = []
+                    for r, score in zip(raw_results, quality_scores):
+                        if score.credibility == SourceCredibility.TIER5_LOW_QUALITY:
+                            continue
+                        if score.relevance_score < 10.0:
+                            continue
+                        item = r.copy()
+                        item["quality_score"] = score.overall_score
+                        item["credibility"] = score.credibility.value
+                        item["quality_rescue"] = True
+                        rescue.append(item)
+                    rescue.sort(key=lambda item: item.get("quality_score", 0), reverse=True)
+                    if rescue:
+                        filtered_results = rescue[:max_results]
+                        logger.warning(
+                            "All results missed the configured threshold for query: %s; "
+                            "returning %d partially relevant evidence items for review",
+                            query,
+                            len(filtered_results),
+                        )
+                    else:
+                        logger.warning(f"All results filtered out for query: {query}, no relevant evidence to rescue")
+                        return self._failure("All results below quality threshold", "Search quality insufficient")
 
             filtered_results = filtered_results[:max_results]
             tier_counts = {}
@@ -282,6 +419,8 @@ class MultiSearchSkill(Skill):
                 "total": len(filtered_results),
                 "raw_total": len(raw_results),
                 "engines_used": engines_used,
+                "engine_status": engine_status,
+                "engine_errors": engine_errors,
                 "quality_stats": {
                     "filtered_count": len(raw_results) - len(filtered_results),
                     "tier_distribution": tier_counts,
@@ -293,7 +432,26 @@ class MultiSearchSkill(Skill):
             "query": query,
             "total": len(raw_results[:max_results]),
             "engines_used": engines_used,
+            "engine_status": engine_status,
+            "engine_errors": engine_errors,
         }, f"Search completed, found {len(raw_results)} results")
+
+    @classmethod
+    def _baidu_api_available(cls) -> bool:
+        """Return cached availability for the optional Baidu adapter."""
+        if cls._BAIDU_API_AVAILABLE is not None:
+            return cls._BAIDU_API_AVAILABLE
+        try:
+            from baidu_serp_api import BaiduPc  # noqa: F401
+        except ImportError:
+            cls._BAIDU_API_AVAILABLE = False
+            logger.warning(
+                "Baidu provider disabled: optional package 'baidu-serp-api' "
+                "is not installed; continuing with AnySearch/local fallbacks"
+            )
+        else:
+            cls._BAIDU_API_AVAILABLE = True
+        return cls._BAIDU_API_AVAILABLE
 
     def _select_engines(self, region: str) -> List[str]:
         is_cn = region and region.lower().startswith(("cn", "zh"))
@@ -309,27 +467,46 @@ class MultiSearchSkill(Skill):
         return [eng[0] for eng in engines]
 
     async def _search_with_ddgs(self, query: str, max_results: int, time_range: Optional[str] = None) -> List[Dict[str, Any]]:
-        try:
-            from ddgs import DDGS
-            IS_NEW = True
-        except ImportError:
-            from duckduckgo_search import DDGS
-            IS_NEW = False
-
-        def sync_search():
+        def sync_search(proxy: str = ""):
+            # Import lazily inside the worker.  This keeps retry/fallback
+            # behavior testable and prevents an optional provider import
+            # failure from bypassing the normal provider error path.
+            try:
+                from ddgs import DDGS
+                is_new = True
+            except ImportError:
+                from duckduckgo_search import DDGS
+                is_new = False
             ddgs_kwargs = {"timeout": self.timeout}
-            if self._proxy:
-                ddgs_kwargs["proxy"] = self._proxy
-            with DDGS(**ddgs_kwargs) as ddgs:
-                kwargs = {"max_results": max_results}
-                if time_range:
-                    kwargs["timelimit"] = time_range
-                if IS_NEW:
-                    return list(ddgs.text(query=query, **kwargs))
-                else:
-                    return list(ddgs.text(keywords=query, **kwargs))
+            if proxy:
+                ddgs_kwargs["proxy"] = proxy
+            acquired = MultiSearchSkill._DDGS_CONCURRENCY.acquire(timeout=self.timeout)
+            if not acquired:
+                raise TimeoutError("DuckDuckGo concurrency limit reached")
+            try:
+                with DDGS(**ddgs_kwargs) as ddgs:
+                    kwargs = {"max_results": max_results}
+                    if time_range:
+                        kwargs["timelimit"] = time_range
+                    if is_new:
+                        return list(ddgs.text(query=query, **kwargs))
+                    else:
+                        return list(ddgs.text(keywords=query, **kwargs))
+            finally:
+                MultiSearchSkill._DDGS_CONCURRENCY.release()
 
-        raw_results = await asyncio.to_thread(sync_search)
+        try:
+            raw_results = await asyncio.to_thread(sync_search, self._proxy)
+        except Exception as proxy_error:
+            if self._proxy:
+                logger.warning("DDGS proxy request failed; retrying direct: %s", proxy_error)
+                raw_results = await asyncio.to_thread(sync_search, "")
+            else:
+                # Public DDGS backends occasionally time out under burst
+                # traffic. One bounded retry improves availability without
+                # multiplying the search fan-out or changing query scope.
+                logger.warning("DDGS direct request failed; retrying once: %s", proxy_error)
+                raw_results = await asyncio.to_thread(sync_search, "")
         results = []
         for r in raw_results:
             results.append({
@@ -345,9 +522,19 @@ class MultiSearchSkill(Skill):
 
         def sync_search():
             searcher = BaiduPc()
-            return searcher.search(query, pn=1)
+            proxies = None
+            if self._proxy:
+                proxies = {"http": self._proxy, "https": self._proxy}
+            return searcher.search(query, pn=1, proxies=proxies)
 
         raw = await asyncio.to_thread(sync_search)
+        if isinstance(raw, dict):
+            # baidu-serp-api uses HTTP-like ``200`` for success while older
+            # releases/examples used ``0``.  Treat only explicit non-success
+            # codes as errors; the previous truthiness check rejected 200.
+            code = raw.get("code")
+            if code not in (None, 0, 200, "0", "200"):
+                raise RuntimeError(f"Baidu SERP error {code}: {raw.get('msg', '')}")
         items = raw.get("data", {}).get("results", [])
         results = []
         for item in items[:max_results]:
@@ -367,7 +554,18 @@ class MultiSearchSkill(Skill):
         from bs4 import BeautifulSoup
 
         encoded_query = quote(query)
-        search_url = engine["url"].format(keyword=encoded_query)
+        engine_url = engine["url"]
+        if engine_id == "bing_cn":
+            try:
+                import yaml
+                from pathlib import Path
+                cfg_path = Path("config/settings.yaml")
+                if cfg_path.exists():
+                    cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+                    engine_url = cfg.get("search", {}).get("bing_cn_url", engine_url)
+            except Exception:
+                pass
+        search_url = engine_url.format(keyword=encoded_query)
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -384,14 +582,29 @@ class MultiSearchSkill(Skill):
             client_kwargs = {"timeout": self.timeout, "follow_redirects": True}
             if self._proxy:
                 client_kwargs["proxy"] = self._proxy
-            async with httpx.AsyncClient(**client_kwargs) as client:
-                response = await client.get(search_url, headers=headers)
-                if response.status_code == 403 and engine_id not in ("baidu",):
-                    alt_headers = dict(headers)
-                    alt_headers["User-Agent"] = _UA_LIST[1]
-                    response = await client.get(search_url, headers=alt_headers)
-                response.raise_for_status()
-                html = response.text
+            try:
+                async with httpx.AsyncClient(**client_kwargs) as client:
+                    response = await client.get(search_url, headers=headers)
+                    if response.status_code == 403 and engine_id not in ("baidu",):
+                        alt_headers = dict(headers)
+                        alt_headers["User-Agent"] = _UA_LIST[1]
+                        response = await client.get(search_url, headers=alt_headers)
+                    response.raise_for_status()
+                    html = response.text
+
+            except Exception as proxy_error:
+                if not self._proxy:
+                    raise
+                logger.warning("%s proxy request failed; retrying direct: %s", engine_id, proxy_error)
+                direct_kwargs = {"timeout": self.timeout, "follow_redirects": True}
+                async with httpx.AsyncClient(**direct_kwargs) as client:
+                    response = await client.get(search_url, headers=headers)
+                    response.raise_for_status()
+                    html = response.text
+
+            final_path = (response.url.path or "").lower()
+            if engine_id.startswith("bing") and final_path.rstrip("/") in ("", "/"):
+                raise RuntimeError(f"Bing redirected to homepage: {response.url}")
 
             soup = BeautifulSoup(html, "lxml")
             results = []
@@ -424,7 +637,7 @@ class MultiSearchSkill(Skill):
 
         except Exception as e:
             logger.warning(f"web_fetch failed ({engine_id}): {e}")
-            return []
+            raise
 
 
 SearchSkill = MultiSearchSkill
@@ -442,7 +655,8 @@ class NewsSearchSkill(Skill):
         return "Search for recent news articles using DuckDuckGo."
 
     async def execute(self, **kwargs) -> Dict[str, Any]:
-        query = kwargs.get("query", "").strip()
+        raw_query = kwargs.get("query", "")
+        query = " ".join(str(item).strip() for item in raw_query if str(item).strip()) if isinstance(raw_query, (list, tuple, set)) else str(raw_query or "").strip()
         max_results = min(kwargs.get("max_results", 10), 50)
         time_range = kwargs.get("time_range", "w")
 

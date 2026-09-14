@@ -124,10 +124,25 @@ class EntityResolver:
                     entities.append(table_name)
 
         if not entities and self._stock_name_table:
+            # Support the common user form that omits an exchange suffix,
+            # e.g. "京东方" for the listed name "京东方A". Match prefixes
+            # only when they contain at least three Chinese characters so
+            # generic words such as "东方" are not treated as securities.
+            text_segments = re.findall(r"[\u4e00-\u9fff]+", text)
+            prefix_candidates = set()
+            for segment in text_segments:
+                for length in range(len(segment), _MIN_FUZZY_MATCH_LEN - 1, -1):
+                    prefix_candidates.add(segment[:length])
             for table_name in self._stock_name_table:
                 if len(table_name) < _MIN_FUZZY_MATCH_LEN:
                     continue
-                if table_name in text and table_name not in entities:
+                if (
+                    (table_name in text or any(
+                        table_name.startswith(candidate)
+                        for candidate in prefix_candidates
+                    ))
+                    and table_name not in entities
+                ):
                     entities.append(table_name)
 
         return entities

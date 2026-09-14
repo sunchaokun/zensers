@@ -37,7 +37,7 @@ class TestDataCollectionSkillRouting:
     }
 
     def _get_data_collection_skills(self, aspect, topic="", intent_result=None):
-        skills = ["search_skill", "news_search", "llm_skill"]
+        skills = ["search_skill", "news_search"]
         aspect_lower = aspect.lower()
         for keyword, extra_skills in self.DATA_SOURCE_SKILL_MAP.items():
             if keyword in aspect_lower:
@@ -84,7 +84,6 @@ class TestDataCollectionSkillRouting:
             skills = self._get_data_collection_skills(aspect)
             assert "search_skill" in skills
             assert "news_search" in skills
-            assert "llm_skill" in skills
 
 
 # ============================================================

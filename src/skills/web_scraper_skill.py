@@ -77,6 +77,7 @@ class WebScraperSkill(Skill):
         )
         if env_proxy:
             return env_proxy
+        configured_proxy = ""
         try:
             import yaml
             from pathlib import Path
@@ -90,14 +91,25 @@ class WebScraperSkill(Skill):
                     # Global proxy first
                     val = cfg.get("proxy", {}).get("url", "")
                     if val:
-                        return str(val)
+                        configured_proxy = str(val)
+                        break
                     # Legacy search.proxy fallback
                     val = cfg.get("search", {}).get("proxy", "")
                     if val:
-                        return str(val)
+                        configured_proxy = str(val)
+                        break
         except Exception:
-            pass
-        return ""
+            configured_proxy = ""
+
+        # Reuse the search skill's local-listener detection. FeiVPN TUN mode
+        # exposes no HTTP/SOCKS port, so an empty result correctly means that
+        # httpx should use the system route.
+        from src.skills.search_skill import MultiSearchSkill
+        if configured_proxy and MultiSearchSkill._proxy_is_listening(configured_proxy):
+            return configured_proxy
+        if configured_proxy:
+            logger.warning("Configured proxy is unavailable: %s; using auto-detection", configured_proxy)
+        return MultiSearchSkill._detect_local_proxy()
 
     def _httpx_client(self, timeout: int = 30, follow_redirects: bool = True, **kwargs):
         """Create an httpx AsyncClient with proxy if configured."""

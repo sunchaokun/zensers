@@ -50,6 +50,7 @@ class DataPoint:
             "metric_value": self.metric_value,
             "unit": self.unit,
             "time_period": self.time_period,
+            "source_ref": self.source_ref,
             "confidence": self.confidence,
         }
 
@@ -96,17 +97,24 @@ class DataPointStore(SQLiteStore[DataPoint]):
         if not DATA_POINTS_SCHEMA.exists(self.db):
             DATA_POINTS_SCHEMA.create(self.db)
     
-    def _row_to_item(self, row: sqlite3.Row) -> DataPoint:
-        """行转对象"""
+    @staticmethod
+    def _row_value(row: Union[sqlite3.Row, tuple], column: str, index: int) -> Any:
+        """Read a selected column from either sqlite3.Row or a plain tuple."""
+        if isinstance(row, sqlite3.Row):
+            return row[column]
+        return row[index]
+
+    def _row_to_item(self, row: Union[sqlite3.Row, tuple]) -> DataPoint:
+        """行转对象，兼容带/不带 row_factory 的连接。"""
         return DataPoint(
-            data_id=row['data_id'],
-            entity_id=row['entity_id'],
-            metric_name=row['metric_name'],
-            metric_value=row['metric_value'],
-            unit=row['unit'] or "",
-            time_period=row['time_period'] or "",
-            source_ref=row['source_ref'] or "",
-            confidence=row['confidence']
+            data_id=self._row_value(row, 'data_id', 0),
+            entity_id=self._row_value(row, 'entity_id', 1),
+            metric_name=self._row_value(row, 'metric_name', 2),
+            metric_value=self._row_value(row, 'metric_value', 3),
+            unit=self._row_value(row, 'unit', 4) or "",
+            time_period=self._row_value(row, 'time_period', 5) or "",
+            source_ref=self._row_value(row, 'source_ref', 6) or "",
+            confidence=self._row_value(row, 'confidence', 7)
         )
     
     def _item_to_dict(self, item: DataPoint) -> Dict[str, Any]:
@@ -134,6 +142,33 @@ class DataPointStore(SQLiteStore[DataPoint]):
             'data_id', 'entity_id', 'metric_name', 'metric_value',
             'unit', 'time_period', 'source_ref', 'confidence', 'created_at'
         ]
+
+    def _table_columns(self) -> set[str]:
+        """Return physical columns for current and legacy table layouts."""
+        rows = self.db.execute("PRAGMA table_info(data_points)").fetchall()
+        return {row[1] for row in rows}
+
+    def _source_expression(self, columns: Optional[set[str]] = None) -> str:
+        """Build a source expression compatible with legacy schemas."""
+        columns = columns or self._table_columns()
+        if "source_ref" in columns and "source" in columns:
+            return "COALESCE(NULLIF(source_ref, ''), source, '')"
+        if "source_ref" in columns:
+            return "COALESCE(source_ref, '')"
+        if "source" in columns:
+            return "COALESCE(source, '')"
+        return "''"
+
+    def _select_sql(self) -> str:
+        """Select a stable logical shape independent of table migration state."""
+        columns = self._table_columns()
+        source_expression = self._source_expression(columns)
+        confidence_expression = "confidence" if "confidence" in columns else "NULL"
+        return (
+            "SELECT data_id, entity_id, metric_name, metric_value, unit, "
+            f"time_period, {source_expression} AS source_ref, {confidence_expression} AS confidence "
+            "FROM data_points"
+        )
     
     # === 公共方法 ===
     
@@ -157,22 +192,29 @@ class DataPointStore(SQLiteStore[DataPoint]):
         data_id = f"data_{uuid.uuid4().hex[:12]}"
         now = datetime.now().isoformat()
         
-        self.db.execute("""
-            INSERT INTO data_points (
-                data_id, entity_id, metric_name, metric_value,
-                unit, time_period, source_ref, confidence, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            data_id,
-            entity_id,
-            metric_name,
-            metric_value,
-            unit,
-            time_period,
-            source,
-            confidence,
-            now
-        ))
+        columns = self._table_columns()
+        insert_columns = [
+            "data_id", "entity_id", "metric_name", "metric_value",
+            "unit", "time_period",
+        ]
+        values = [data_id, entity_id, metric_name, metric_value, unit, time_period]
+        if "source_ref" in columns:
+            insert_columns.append("source_ref")
+            values.append(source)
+        if "source" in columns:
+            insert_columns.append("source")
+            values.append(source)
+        if "confidence" in columns:
+            insert_columns.append("confidence")
+            values.append(confidence)
+        if "created_at" in columns:
+            insert_columns.append("created_at")
+            values.append(now)
+        placeholders = ", ".join("?" for _ in insert_columns)
+        self.db.execute(
+            f"INSERT INTO data_points ({', '.join(insert_columns)}) VALUES ({placeholders})",
+            tuple(values),
+        )
         
         self.db.commit()
         return data_id
@@ -186,7 +228,7 @@ class DataPointStore(SQLiteStore[DataPoint]):
             使用 :meth:`get` 方法替代。
         """
         cursor = self.db.execute(
-            "SELECT * FROM data_points WHERE data_id = ?",
+            self._select_sql() + " WHERE data_id = ?",
             (data_id,)
         )
         row = cursor.fetchone()
@@ -210,8 +252,15 @@ class DataPointStore(SQLiteStore[DataPoint]):
         params = []
         
         if query:
-            conditions.append("metric_name LIKE ?")
+            columns = self._table_columns()
+            searchable = ["metric_name", "metric_value"]
+            if "source_ref" in columns:
+                searchable.append("source_ref")
+            if "source" in columns:
+                searchable.append("source")
+            conditions.append("(" + " OR ".join(f"{column} LIKE ?" for column in searchable) + ")")
             params.append(f"%{query}%")
+            params = [value for _ in range(len(searchable)) for value in (f"%{query}%",)] + params[1:]
         
         if entity_id:
             conditions.append("entity_id = ?")
@@ -225,7 +274,7 @@ class DataPointStore(SQLiteStore[DataPoint]):
         params.append(limit)
         
         cursor = self.db.execute(
-            f"SELECT * FROM data_points WHERE {where_clause} LIMIT ?",
+            self._select_sql() + f" WHERE {where_clause} LIMIT ?",
             tuple(params)
         )
         
@@ -242,6 +291,45 @@ class DataPointStore(SQLiteStore[DataPoint]):
     def count(self, filters: Optional[Dict[str, Any]] = None) -> int:
         """统计数据点数量"""
         return super().count(filters)
+
+    def get_data_for_entity(self, entity_id: str) -> List[Dict[str, Any]]:
+        """Legacy compatibility wrapper returning entity data as dictionaries."""
+        cursor = self.db.execute(
+            self._select_sql() + " WHERE entity_id = ?",
+            (entity_id,),
+        )
+        return [self._row_to_dict_internal(row) for row in cursor.fetchall()]
+
+    def get_data_by_metric(self, metric_name: str) -> List[Dict[str, Any]]:
+        """Legacy compatibility wrapper returning metric data as dictionaries."""
+        cursor = self.db.execute(
+            self._select_sql() + " WHERE metric_name = ?",
+            (metric_name,),
+        )
+        return [self._row_to_dict_internal(row) for row in cursor.fetchall()]
+
+    def update_value(self, data_id: str, metric_value: str) -> None:
+        """Update a data point value for legacy callers."""
+        self.db.execute(
+            "UPDATE data_points SET metric_value = ? WHERE data_id = ?",
+            (metric_value, data_id),
+        )
+        self.db.commit()
+
+    def delete_data_point(self, data_id: str) -> None:
+        """Delete a data point for legacy callers."""
+        self.db.execute("DELETE FROM data_points WHERE data_id = ?", (data_id,))
+        self.db.commit()
+
+    def get_latest_data(self, entity_id: str, metric_name: str) -> Optional[Dict[str, Any]]:
+        """Return the latest period for an entity/metric pair."""
+        cursor = self.db.execute(
+            self._select_sql()
+            + " WHERE entity_id = ? AND metric_name = ? ORDER BY time_period DESC LIMIT 1",
+            (entity_id, metric_name),
+        )
+        row = cursor.fetchone()
+        return self._row_to_dict_internal(row) if row else None
     
     # === 内部方法 ===
     
@@ -255,6 +343,7 @@ class DataPointStore(SQLiteStore[DataPoint]):
             "unit": row[4] or "",
             "time_period": row[5] or "",
             "source_ref": row[6] or "",
+            "source": row[6] or "",
             "confidence": row[7]
         }
     
@@ -282,7 +371,7 @@ class DataPointStore(SQLiteStore[DataPoint]):
     def get(self, data_id: str) -> Optional[DataPoint]:
         """获取数据点对象（内部方法）"""
         cursor = self.db.execute(
-            "SELECT * FROM data_points WHERE data_id = ?",
+            self._select_sql() + " WHERE data_id = ?",
             (data_id,)
         )
         row = cursor.fetchone()

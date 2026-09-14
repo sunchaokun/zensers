@@ -122,7 +122,10 @@ class MemoryCacheBackend(CacheBackend):
                 return None
             
             # 检查过期
-            if datetime.now() > entry.created_at + timedelta(seconds=entry.ttl_seconds):
+            # Treat zero TTL as an explicit no-cache request.  Using ``>=``
+            # also makes the boundary deterministic instead of allowing a
+            # same-timestamp read to reuse a zero-TTL entry.
+            if datetime.now() >= entry.created_at + timedelta(seconds=entry.ttl_seconds):
                 del self._cache[key]
                 self._stats["misses"] += 1
                 return None
@@ -478,13 +481,23 @@ class DataBusV2:
         if use_cache:
             cached = self._cache.get(cache_key)
             if cached is not None:
+                cache_source = "cache"
+                cache_fallback_used = False
+                cache_data = cached
+                # New cache entries preserve the source that produced them.
+                # Accept raw legacy entries for backward compatibility.
+                if isinstance(cached, dict) and cached.get("__databus_cache_envelope__"):
+                    cache_source = cached.get("source") or "cache"
+                    cache_fallback_used = bool(cached.get("fallback_used", False))
+                    cache_data = cached.get("data")
                 with self._stats_lock:
                     self._stats["cache_hits"] += 1
                 return {
                     "success": True,
-                    "data": cached,
-                    "source": "cache",
+                    "data": cache_data,
+                    "source": cache_source,
                     "cached": True,
+                    "fallback_used": cache_fallback_used,
                 }
         
         # 选择数据源
@@ -542,7 +555,17 @@ class DataBusV2:
                 
                 # 写入缓存
                 if use_cache:
-                    self._cache.set(cache_key, result, memory_ttl=min(cache_ttl, 300))
+                    self._cache.set(
+                        cache_key,
+                        {
+                            "__databus_cache_envelope__": True,
+                            "data": result,
+                            "source": source_id,
+                            "fallback_used": fallback_used,
+                            "cached_at": datetime.now().isoformat(),
+                        },
+                        memory_ttl=min(cache_ttl, 300),
+                    )
                 
                 with self._stats_lock:
                     self._stats["successful_requests"] += 1

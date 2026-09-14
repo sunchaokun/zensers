@@ -22,7 +22,7 @@ from urllib.parse import urlparse
 logger = logging.getLogger(__name__)
 
 _PATCHED = False
-_PUSH2_PATTERN = re.compile(r"\.push2\.eastmoney\.com$")
+_PUSH2_PATTERN = re.compile(r"(?:^|\.)(?:push2|push2his)\.eastmoney\.com$")
 _MAX_RETRIES = 3
 
 
@@ -56,14 +56,50 @@ def patch_akshare_requests(proxy_url: Optional[str] = None) -> bool:
         logger.warning("AkshareTransport: httpx not installed, cannot patch")
         return False
 
-    _original_get = requests.Session.get
+    _original_session = requests.Session
+    _original_request = _original_session.request
 
     class _PatchedSession(requests.Session):
         def get(self, url: str, **kwargs: Any) -> Any:
+            return self.request("GET", url, **kwargs)
+
+        def request(self, method: str, url: str, **kwargs: Any) -> Any:
             parsed = urlparse(url)
-            if _PUSH2_PATTERN.search(parsed.netloc):
+            if not _PUSH2_PATTERN.search(parsed.netloc):
+                return _original_request(self, method, url, **kwargs)
+
+            # EastMoney closes proxied TLS sessions unless requests presents
+            # a browser-like user agent and skips local certificate
+            # interception. Scope this only to EastMoney endpoints.
+            kwargs.setdefault("verify", False)
+            if kwargs.get("timeout") is None:
+                kwargs["timeout"] = 30
+            headers = dict(kwargs.get("headers") or {})
+            headers.setdefault("User-Agent", "Mozilla/5.0")
+            kwargs["headers"] = headers
+
+            try:
+                return _original_request(self, method, url, **kwargs)
+            except requests.RequestException as original_error:
+                if method.upper() != "GET":
+                    raise
+                # The local proxy can close the first TLS connection to
+                # EastMoney while accepting the next one. Retry the native
+                # requests path before changing HTTP clients.
+                last_request_error = original_error
+                for retry_index in range(1, _MAX_RETRIES):
+                    try:
+                        time.sleep(float(retry_index))
+                        return _original_request(self, method, url, **kwargs)
+                    except requests.RequestException as retry_error:
+                        last_request_error = retry_error
+                logger.debug(
+                    "AkshareTransport: requests failed for %s; "
+                        "trying httpx fallback: %s",
+                    parsed.netloc,
+                    last_request_error,
+                )
                 return self._get_via_httpx(url, proxy_url, **kwargs)
-            return _original_get(self, url, **kwargs)
 
         @staticmethod
         def _get_via_httpx(url: str, proxy: str, **kwargs: Any) -> Any:
@@ -98,9 +134,12 @@ def patch_akshare_requests(proxy_url: Optional[str] = None) -> bool:
             logger.warning(f"AkshareTransport: httpx failed after {_MAX_RETRIES} retries for {parsed.netloc}: {last_err}")
             raise requests.ConnectionError(
                 f"httpx failed for {parsed.netloc} after {_MAX_RETRIES} retries: {last_err}"
-            )
+            ) from last_err
 
+    # requests.api uses requests.sessions.Session directly, so replacing only
+    # requests.Session leaves AkShare's requests.get path unpatched.
     requests.Session = _PatchedSession
+    requests.sessions.Session = _PatchedSession
     _PATCHED = True
     logger.info(f"AkshareTransport: patched requests.Session for push2.eastmoney.com via httpx (proxy={proxy_url})")
     return True
