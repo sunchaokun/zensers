@@ -203,7 +203,8 @@ class SystemConfig:
 @dataclass
 class ConversationConfig:
     """Conversation / Chat Configuration"""
-    max_tool_iterations: int = 10
+    # Search-capable tool calls are quota-bearing; keep the default bounded.
+    max_tool_iterations: int = 5
 
 
 @dataclass
@@ -212,6 +213,10 @@ class ChartPlannerConfig:
     enabled: bool = True
     max_per_section: int = 2
     min_confidence: float = 0.5
+    # Chart planning is a structured LLM response.  Keep this separate from
+    # the global task/runtime lifecycle: it is an output budget, not a
+    # timeout, and must be large enough for two semantically rich plans.
+    llm_max_tokens: int = 4096
     data_fetch_timeout: int = 30
     max_data_retries: int = 2
     max_data_days: int = 365

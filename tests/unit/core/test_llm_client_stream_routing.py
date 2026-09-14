@@ -1,0 +1,122 @@
+import pytest
+from unittest.mock import patch
+
+from src.config.llm_profiles import LLMProfile, LLMProfileRegistry
+
+
+class _Delta:
+    content = "ok"
+
+
+class _Chunk:
+    choices = [type("Choice", (), {"delta": _Delta()})()]
+
+
+class _StreamingClient:
+    calls = []
+    failures = {}
+
+    def __init__(self, *, api_key, base_url):
+        self.api_key = api_key
+        self.base_url = base_url
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+    async def create(self, **kwargs):
+        self.calls.append({"api_key": self.api_key, "base_url": self.base_url, **kwargs})
+        failure = self.failures.get(self.api_key)
+        if failure:
+            raise failure
+
+        async def _response():
+            yield _Chunk()
+
+        return _response()
+
+
+class _Completions:
+    def __init__(self, client):
+        self.create = client.create
+
+
+class _OpenAI:
+    def __init__(self, **kwargs):
+        client = _StreamingClient(**kwargs)
+        self.chat = type("Chat", (), {"completions": _Completions(client)})()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+
+@pytest.mark.asyncio
+async def test_stream_uses_configured_default_after_auth_failure():
+    import src.core.llm_client as mod
+
+    stale = LLMProfile(name="stale", provider="zhipu", api_key="stale-key", base_url="https://stale", model="glm")
+    primary = LLMProfile(name="primary", provider="mimo", api_key="primary-key", base_url="https://primary", model="mimo-v2.5")
+    registry = LLMProfileRegistry(
+        profiles={"stale": stale, "primary": primary},
+        default_profile="stale",
+        fallback_chain=["stale", "primary"],
+    )
+    old_unavailable = set(mod._UNAVAILABLE_PROFILES)
+    old_router = mod._router
+    _StreamingClient.calls = []
+    _StreamingClient.failures = {"stale-key": RuntimeError("401 Unauthorized")}
+    mod._UNAVAILABLE_PROFILES.discard("stale")
+    try:
+        mod.init_llm_infrastructure(registry)
+        with patch("openai.AsyncOpenAI", _OpenAI):
+            tokens = [token async for token in mod.call_llm_stream("hello")]
+    finally:
+        mod._router = old_router
+        mod._UNAVAILABLE_PROFILES.clear()
+        mod._UNAVAILABLE_PROFILES.update(old_unavailable)
+
+    assert tokens == ["ok"]
+    assert [call["api_key"] for call in _StreamingClient.calls] == ["stale-key", "primary-key"]
+
+
+@pytest.mark.asyncio
+async def test_stream_does_not_retry_after_partial_output():
+    import src.core.llm_client as mod
+
+    primary = LLMProfile(name="primary", provider="mimo", api_key="primary-key", base_url="https://primary", model="mimo-v2.5")
+    backup = LLMProfile(name="backup", provider="local", api_key="", base_url="http://local", model="local")
+    registry = LLMProfileRegistry(profiles={"primary": primary, "backup": backup}, default_profile="primary", fallback_chain=["primary", "backup"])
+    old_unavailable = set(mod._UNAVAILABLE_PROFILES)
+    old_router = mod._router
+    mod._UNAVAILABLE_PROFILES.clear()
+    _StreamingClient.calls = []
+
+    class _PartialOpenAI(_OpenAI):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            original = self.chat.completions.create
+
+            async def create(**call_kwargs):
+                async def response():
+                    yield _Chunk()
+                    raise RuntimeError("connection dropped")
+                _StreamingClient.calls.append({"api_key": kwargs["api_key"], **call_kwargs})
+                return response()
+
+            self.chat.completions.create = create
+
+    try:
+        mod.init_llm_infrastructure(registry)
+        with patch("openai.AsyncOpenAI", _PartialOpenAI):
+            with pytest.raises(RuntimeError, match="connection dropped"):
+                _ = [token async for token in mod.call_llm_stream("hello")]
+    finally:
+        mod._router = old_router
+        mod._UNAVAILABLE_PROFILES.clear()
+        mod._UNAVAILABLE_PROFILES.update(old_unavailable)
+    assert len(_StreamingClient.calls) == 1

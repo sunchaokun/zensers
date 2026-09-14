@@ -63,6 +63,52 @@ class TestCallLlmReturnFormat:
                 assert "usage" in result
 
     @pytest.mark.asyncio
+    async def test_http_success_with_empty_content_is_not_success(self):
+        with patch("src.core.llm_client.settings", _mock_settings()):
+            with patch("src.core.llm_client._call_llm_api", new_callable=AsyncMock) as mock_api:
+                mock_api.return_value = {"choices": [{"message": {"content": ""}}], "usage": {}}
+                from src.core.llm_client import call_llm
+                result = await call_llm(prompt="test")
+                assert result["success"] is False
+                assert result["error"] == "empty_content"
+                assert result["content"] == ""
+
+    @pytest.mark.asyncio
+    async def test_structured_reasoning_content_can_recover_intent_json(self):
+        with patch("src.core.llm_client.settings", _mock_settings()):
+            with patch("src.core.llm_client._call_llm_api", new_callable=AsyncMock) as mock_api:
+                mock_api.return_value = {
+                    "choices": [{"message": {
+                        "content": "",
+                        "reasoning_content": 'internal notes {"action":"continue_chat","topic":"新能源汽车"}',
+                    }}],
+                    "usage": {},
+                }
+                from src.core.llm_client import call_llm
+                result = await call_llm(prompt="test")
+                assert result["success"] is True
+                assert '新能源汽车' in result["content"]
+
+    @pytest.mark.asyncio
+    async def test_reasoning_content_can_recover_semantic_intent_json(self):
+        with patch("src.core.llm_client.settings", _mock_settings()):
+            with patch("src.core.llm_client._call_llm_api", new_callable=AsyncMock) as mock_api:
+                mock_api.return_value = {
+                    "choices": [{"message": {
+                        "content": None,
+                        "reasoning_content": (
+                            'final answer: {"primary_intent":"research",'
+                            '"complexity":"multi","research_types":["industry_research"]}'
+                        ),
+                    }}],
+                    "usage": {},
+                }
+                from src.core.llm_client import call_llm
+                result = await call_llm(prompt="test")
+                assert result["success"] is True
+                assert '"primary_intent": "research"' in result["content"]
+
+    @pytest.mark.asyncio
     async def test_failure_also_has_content_key(self):
         with patch("src.core.llm_client.settings", _mock_settings()):
             from src.core.llm_client import call_llm
@@ -81,6 +127,22 @@ class TestCallLlmReturnFormat:
                 assert result["success"] is True
                 assert result["content"] == "fallback ok"
                 assert result.get("fallback_used") is True
+
+    @pytest.mark.asyncio
+    async def test_empty_primary_response_uses_fallback_model(self):
+        """HTTP 200 with no content is a failed primary attempt, not success."""
+        with patch("src.core.llm_client.settings", _mock_settings()):
+            with patch("src.core.llm_client._call_llm_api", new_callable=AsyncMock) as mock_api:
+                mock_api.side_effect = [
+                    {"choices": [{"message": {"content": ""}}], "usage": {}},
+                    {"choices": [{"message": {"content": "fallback after empty"}}], "usage": {}},
+                ]
+                from src.core.llm_client import call_llm
+                result = await call_llm(prompt="test")
+                assert result["success"] is True
+                assert result["content"] == "fallback after empty"
+                assert result.get("fallback_used") is True
+                assert mock_api.call_args_list[1].kwargs["model"] == "test-fallback"
 
     @pytest.mark.asyncio
     async def test_both_models_fail(self):

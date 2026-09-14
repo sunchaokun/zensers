@@ -83,35 +83,27 @@ class TestFrameworkSectionInferenceMaxTokens:
         return api
 
     @pytest.mark.asyncio
-    async def test_infer_uses_settings_max_tokens(self):
+    async def test_infer_uses_intrinsic_call_llm(self):
         api = self._make_api()
-        mock_settings = MagicMock()
-        mock_settings.llm.model = 'default-model'
-        mock_settings.llm.max_tokens = 4096
-
         mock_session = {
             'research_context': {'topic': 'AI market'},
             'conversation_history': [{'role': 'user', 'content': 'Tell me about AI'}],
             'language': 'en',
         }
 
-        llm_skill_instance = AsyncMock()
-        llm_skill_instance.execute.return_value = {
+        mock_call_llm = AsyncMock(return_value={
             'success': True, 'content': '["Market Size", "Competition"]'
-        }
-        mock_llm_class = MagicMock(return_value=llm_skill_instance)
+        })
 
         with patch('src.api.research_api.session_manager') as mock_sm:
             mock_sm.get.return_value = mock_session
-            with patch('src.skills.llm_skill.LLMSkill', mock_llm_class):
-                with patch('src.config.settings.settings', mock_settings):
-                    result = await api._infer_framework_sections_from_conversation('sess1')
+            with patch('src.core.llm_client.call_llm', mock_call_llm):
+                result = await api._infer_framework_sections_from_conversation('sess1')
 
-        call_args = llm_skill_instance.execute.call_args
-        assert call_args is not None, "llm_skill.execute was not called"
-        max_tokens_used = call_args.kwargs.get('max_tokens')
-        assert max_tokens_used == 4096, \
-               f"max_tokens should use app_settings.llm.max_tokens (4096), got: {max_tokens_used}"
+        call_args = mock_call_llm.call_args
+        assert call_args is not None, "call_llm was not called"
+        assert call_args.kwargs["routing_hint"].action == "section_inference"
+        assert result == ["Market Size", "Competition"]
 
 
 class TestNoHardcodedMaxTokensAnywhere:

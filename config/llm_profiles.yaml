@@ -18,6 +18,25 @@ profiles:
     presence_penalty: 0.0
     max_context_tokens: 128000
     cost_limit_per_call: 0.0
+    max_concurrency: 3
+    enabled: false
+
+  mimo:
+    name: mimo
+    display_name: Xiaomi MiMo
+    provider: mimo
+    api_key: ${MIMO_API_KEY}
+    base_url: https://token-plan-cn.xiaomimimo.com/v1
+    model: mimo-v2.5
+    fallback_model: mimo-v2.5
+    temperature: 0.7
+    max_tokens: 8192
+    top_p: 1.0
+    frequency_penalty: 0.0
+    presence_penalty: 0.0
+    max_context_tokens: 131072
+    cost_limit_per_call: 0.0
+    max_concurrency: 3
     enabled: true
 
   zhipu:
@@ -35,7 +54,9 @@ profiles:
     presence_penalty: 0.0
     max_context_tokens: 128000
     cost_limit_per_call: 0.0
-    enabled: true
+    # Disabled until credentials and provider health are explicitly verified.
+    # It must not be selected by automatic fallback while MIMO is the primary.
+    enabled: false
 
   local:
     name: local
@@ -54,8 +75,8 @@ profiles:
     cost_limit_per_call: 0.0
     enabled: false
 
-default_profile: deepseek
+default_profile: mimo
 fallback_chain:
+  - mimo
   - deepseek
-  - zhipu
   - local

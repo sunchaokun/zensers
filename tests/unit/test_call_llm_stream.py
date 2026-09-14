@@ -50,9 +50,10 @@ class TestCallLlmStream:
     async def test_yields_tokens_in_order(self):
         ms = _mock_settings()
         mock_gen = _make_stream_chunks(["Hello", " ", "World"])
-        with patch("src.core.llm_client.settings", ms):
+        with patch("src.core.llm_client.settings", ms), patch("src.core.llm_client._router", None):
             with patch("openai.AsyncOpenAI") as mock_client_cls:
                 mock_client = AsyncMock()
+                mock_client.__aenter__.return_value = mock_client
                 mock_client_cls.return_value = mock_client
                 mock_client.chat.completions.create.return_value = mock_gen()
 
@@ -70,6 +71,7 @@ class TestCallLlmStream:
         with patch("src.core.llm_client.settings", ms):
             with patch("openai.AsyncOpenAI") as mock_client_cls:
                 mock_client = AsyncMock()
+                mock_client.__aenter__.return_value = mock_client
                 mock_client_cls.return_value = mock_client
                 mock_client.chat.completions.create.return_value = mock_gen()
 
@@ -88,6 +90,7 @@ class TestCallLlmStream:
         with patch("src.core.llm_client.settings", ms):
             with patch("openai.AsyncOpenAI") as mock_client_cls:
                 mock_client = AsyncMock()
+                mock_client.__aenter__.return_value = mock_client
                 mock_client_cls.return_value = mock_client
                 mock_client.chat.completions.create.return_value = mock_gen()
 
@@ -105,6 +108,7 @@ class TestCallLlmStream:
         with patch("src.core.llm_client.settings", ms):
             with patch("openai.AsyncOpenAI") as mock_client_cls:
                 mock_client = AsyncMock()
+                mock_client.__aenter__.return_value = mock_client
                 mock_client_cls.return_value = mock_client
                 mock_client.chat.completions.create.return_value = mock_gen()
 
@@ -121,6 +125,7 @@ class TestCallLlmStream:
         with patch("src.core.llm_client.settings", ms):
             with patch("openai.AsyncOpenAI") as mock_client_cls:
                 mock_client = AsyncMock()
+                mock_client.__aenter__.return_value = mock_client
                 mock_client_cls.return_value = mock_client
 
                 from src.core.llm_client import call_llm_stream
@@ -137,6 +142,7 @@ class TestCallLlmStream:
         with patch("src.core.llm_client.settings", ms):
             with patch("openai.AsyncOpenAI") as mock_client_cls:
                 mock_client = AsyncMock()
+                mock_client.__aenter__.return_value = mock_client
                 mock_client_cls.return_value = mock_client
 
                 from src.core.llm_client import call_llm_stream
@@ -153,6 +159,7 @@ class TestCallLlmStream:
         with patch("src.core.llm_client.settings", ms):
             with patch("openai.AsyncOpenAI") as mock_client_cls:
                 mock_client = AsyncMock()
+                mock_client.__aenter__.return_value = mock_client
                 mock_client_cls.return_value = mock_client
                 mock_client.chat.completions.create.return_value = mock_gen()
 
@@ -171,6 +178,7 @@ class TestCallLlmStream:
         with patch("src.core.llm_client.settings", ms):
             with patch("openai.AsyncOpenAI") as mock_client_cls:
                 mock_client = AsyncMock()
+                mock_client.__aenter__.return_value = mock_client
                 mock_client_cls.return_value = mock_client
                 mock_client.chat.completions.create.return_value = mock_gen()
 
@@ -188,6 +196,7 @@ class TestCallLlmStream:
         with patch("src.core.llm_client.settings", ms):
             with patch("openai.AsyncOpenAI") as mock_client_cls:
                 mock_client = AsyncMock()
+                mock_client.__aenter__.return_value = mock_client
                 mock_client_cls.return_value = mock_client
                 mock_client.chat.completions.create.return_value = mock_gen()
 
@@ -204,6 +213,7 @@ class TestCallLlmStream:
         with patch("src.core.llm_client.settings", ms):
             with patch("openai.AsyncOpenAI") as mock_client_cls:
                 mock_client = AsyncMock()
+                mock_client.__aenter__.return_value = mock_client
                 mock_client_cls.return_value = mock_client
                 mock_client.chat.completions.create.side_effect = Exception("API error")
 
@@ -228,6 +238,7 @@ class TestCallLlmStream:
         with patch("src.core.llm_client.settings", ms):
             with patch("openai.AsyncOpenAI") as mock_client_cls:
                 mock_client = AsyncMock()
+                mock_client.__aenter__.return_value = mock_client
                 mock_client_cls.return_value = mock_client
                 mock_client.chat.completions.create.return_value = _empty_gen()
 
@@ -263,6 +274,7 @@ class TestCallLlmStream:
         with patch("src.core.llm_client.settings", ms):
             with patch("openai.AsyncOpenAI") as mock_client_cls:
                 mock_client = AsyncMock()
+                mock_client.__aenter__.return_value = mock_client
                 mock_client_cls.return_value = mock_client
                 mock_client.chat.completions.create.return_value = _gen()
 
@@ -281,6 +293,7 @@ class TestCallLlmStream:
         with patch("src.core.llm_client.settings", ms):
             with patch("openai.AsyncOpenAI") as mock_client_cls:
                 mock_client = AsyncMock()
+                mock_client.__aenter__.return_value = mock_client
                 mock_client_cls.return_value = mock_client
                 mock_client.chat.completions.create.return_value = mock_gen()
 
@@ -299,6 +312,7 @@ class TestCallLlmStream:
         with patch("src.core.llm_client.settings", ms):
             with patch("openai.AsyncOpenAI") as mock_client_cls:
                 mock_client = AsyncMock()
+                mock_client.__aenter__.return_value = mock_client
                 mock_client_cls.return_value = mock_client
                 mock_client.chat.completions.create.return_value = mock_gen()
 
@@ -317,6 +331,7 @@ class TestCallLlmStream:
         with patch("src.core.llm_client.settings", ms):
             with patch("openai.AsyncOpenAI") as mock_client_cls:
                 mock_client = AsyncMock()
+                mock_client.__aenter__.return_value = mock_client
                 mock_client_cls.return_value = mock_client
                 mock_client.chat.completions.create.return_value = mock_gen()
 
@@ -333,9 +348,10 @@ class TestCallLlmStream:
         ms.llm.api_key = "settings-key"
         ms.llm.base_url = "https://settings.example.com"
         mock_gen = _make_stream_chunks(["ok"])
-        with patch("src.core.llm_client.settings", ms):
+        with patch("src.core.llm_client.settings", ms), patch("src.core.llm_client._router", None):
             with patch("openai.AsyncOpenAI") as mock_client_cls:
                 mock_client = AsyncMock()
+                mock_client.__aenter__.return_value = mock_client
                 mock_client_cls.return_value = mock_client
                 mock_client.chat.completions.create.return_value = mock_gen()
 

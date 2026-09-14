@@ -46,8 +46,8 @@ class TestLLMProfileRegistry:
     def test_default_values(self):
         registry = LLMProfileRegistry()
         assert registry.profiles == {}
-        assert registry.default_profile == "deepseek"
-        assert registry.fallback_chain == ["deepseek", "zhipu", "local"]
+        assert registry.default_profile == "mimo"
+        assert registry.fallback_chain == ["mimo", "deepseek", "local"]
         assert registry.fixed_agent_routing == {}
         assert registry.action_routing == {}
 

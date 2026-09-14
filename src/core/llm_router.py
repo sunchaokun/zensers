@@ -17,6 +17,12 @@ class LLMRouter:
     def __init__(self, registry: LLMProfileRegistry):
         self.registry = registry
 
+    @staticmethod
+    def _has_usable_api_key(profile: LLMProfile) -> bool:
+        """Treat unresolved YAML environment placeholders as missing keys."""
+        key = str(profile.api_key or "").strip()
+        return bool(key) and not (key.startswith("${") and key.endswith("}"))
+
     def resolve(self, hint: RoutingHint) -> LLMProfile:
         candidates = self.resolve_candidates(hint)
         if candidates:
@@ -28,7 +34,15 @@ class LLMRouter:
         candidates = []
 
         def _add(profile: Optional[LLMProfile], force: bool = False):
-            if profile and (force or profile.enabled) and profile.name not in seen:
+            if not profile or profile.name in seen or not (force or profile.enabled):
+                return
+            # Local/Ollama endpoints do not require an API key.  Remote
+            # profiles without a key are configuration errors, not usable
+            # fallback candidates; routing them only creates repeated 401s.
+            provider = str(profile.provider or "").lower()
+            if not force and provider not in {"local", "ollama"} and not self._has_usable_api_key(profile):
+                return
+            if profile.name not in seen:
                 seen.add(profile.name)
                 candidates.append(profile)
 

@@ -517,25 +517,28 @@ class TestCallLlmSyncAvailability:
 # ============================================================
 
 _TIMEOUT_FILES = [
-    ("persona_generator.py", "src/survey/engine/persona_generator.py", 30),
-    ("simulation_engine.py", "src/survey/engine/simulation_engine.py", None),
-    ("focus_group.py", "src/survey/engine/focus_group.py", 15),
-    ("cross_synthesis_agent.py", "src/agents/fixed_agents/cross_synthesis_agent.py", 60),
+    ("persona_generator.py", "src/survey/engine/persona_generator.py", True),
+    ("simulation_engine.py", "src/survey/engine/simulation_engine.py", True),
+    ("focus_group.py", "src/survey/engine/focus_group.py", True),
+    ("cross_synthesis_agent.py", "src/agents/fixed_agents/cross_synthesis_agent.py", False),
 ]
 
 class TestTimeoutPreservation:
-    """验证迁移后保留了原有的 asyncio.wait_for() 超时保护"""
+    """验证需要局部超时保护的组件保留保护，深度研究组件不引入固定总超时"""
 
     @pytest.mark.parametrize("name,path,expected_timeout", _TIMEOUT_FILES)
-    def test_wait_for_preserved(self, name, path, expected_timeout):
-        """迁移后应保留 asyncio.wait_for() 超时保护"""
+    def test_timeout_policy(self, name, path, expected_timeout):
+        """超时策略由组件职责决定，而不是要求所有组件复制同一实现"""
         if not os.path.exists(path):
             pytest.skip(f"{path} 不存在")
         with open(path, "r", encoding="utf-8") as f:
             content = f.read()
-        if "call_llm" in content:
+        if expected_timeout:
             assert "asyncio.wait_for" in content, \
-                f"{name} 迁移到 call_llm 后必须保留 asyncio.wait_for() 超时保护"
+                f"{name} 需要保留局部 asyncio.wait_for() 超时保护"
+        else:
+            assert "asyncio.wait_for" not in content, \
+                f"{name} 不应引入固定总 asyncio.wait_for() 超时"
 
 
 # ============================================================
@@ -616,3 +619,15 @@ class TestLlmSkillFileDeletion:
                     f"{path} 不应导入 llm_skill"
                 assert "from .llm_skill import" not in content, \
                     f"{path} 不应导入 llm_skill"
+
+    def test_no_legacy_llm_skill_in_runtime_prompts(self):
+        """运行时 prompt 元数据不应再声明已删除的 llm_skill。"""
+        for root, dirs, files in os.walk("prompts"):
+            for f in files:
+                if not f.endswith(".md"):
+                    continue
+                path = os.path.join(root, f)
+                with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+                    content = fh.read()
+                assert "llm_skill" not in content, \
+                    f"{path} 不应再声明已删除的 llm_skill"

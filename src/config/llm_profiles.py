@@ -20,6 +20,7 @@ class LLMProfile:
     presence_penalty: float = 0.0
     max_context_tokens: int = 128000
     cost_limit_per_call: float = 0.0
+    max_concurrency: int = 3
     is_default: bool = False
     enabled: bool = True
     created_at: str = ""
@@ -29,8 +30,8 @@ class LLMProfile:
 @dataclass
 class LLMProfileRegistry:
     profiles: Dict[str, LLMProfile] = field(default_factory=dict)
-    default_profile: str = "deepseek"
-    fallback_chain: List[str] = field(default_factory=lambda: ["deepseek", "zhipu", "local"])
+    default_profile: str = "mimo"
+    fallback_chain: List[str] = field(default_factory=lambda: ["mimo", "deepseek", "local"])
     fixed_agent_routing: Dict[str, str] = field(default_factory=dict)
     action_routing: Dict[str, str] = field(default_factory=dict)
 

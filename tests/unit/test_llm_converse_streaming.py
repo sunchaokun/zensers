@@ -140,6 +140,66 @@ class TestLlmConverseStreamingBranch:
                                 assert result["action"] == "continue_chat"
 
     @pytest.mark.asyncio
+    async def test_empty_stream_falls_back_before_intent_parse(self, mock_deps):
+        """A cleanly-closed empty stream must not become an empty intent."""
+        deps = mock_deps
+
+        async def _empty_stream(*args, **kwargs):
+            if False:
+                yield ""
+
+        async def _mock_call_llm(*args, **kwargs):
+            return {
+                "success": True,
+                "content": '{"message": "fallback", "action": "continue_chat", "tool_call": null}',
+            }
+
+        with patch("src.api.research_api.session_manager", deps["session_manager"]):
+            with patch("src.api.research_api.PromptManager") as pm_cls:
+                pm_cls.get_instance.return_value = deps["pm_instance"]
+                with patch("src.core.session_streamer.SessionStreamer", deps["SessionStreamer"]):
+                    with patch("src.api.research_api.call_llm_stream", new=_empty_stream):
+                        with patch("src.api.research_api.call_llm", new_callable=AsyncMock,
+                                   side_effect=_mock_call_llm) as mock_call_llm:
+                            with patch("src.config.settings", deps["settings"]):
+                                from src.api.research_api import ResearchAPI
+                                api = ResearchAPI()
+                                api._tool_set = deps["tool_set"]
+                                api._loop_cancel_flags = {}
+
+                                result = await api._llm_converse("test_ses", "hello")
+
+                                assert result["message"] == "fallback"
+                                assert mock_call_llm.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_empty_stream_failed_fallback_is_called_once(self, mock_deps):
+        """A failed non-stream degradation must not be retried by the outer handler."""
+        deps = mock_deps
+
+        async def _empty_stream(*args, **kwargs):
+            if False:
+                yield ""
+
+        with patch("src.api.research_api.session_manager", deps["session_manager"]):
+            with patch("src.api.research_api.PromptManager") as pm_cls:
+                pm_cls.get_instance.return_value = deps["pm_instance"]
+                with patch("src.core.session_streamer.SessionStreamer", deps["SessionStreamer"]):
+                    with patch("src.api.research_api.call_llm_stream", new=_empty_stream):
+                        with patch("src.api.research_api.call_llm", new_callable=AsyncMock,
+                                   return_value={"success": False, "error": "empty_content"}) as mock_call_llm:
+                            with patch("src.config.settings", deps["settings"]):
+                                from src.api.research_api import ResearchAPI
+                                api = ResearchAPI()
+                                api._tool_set = deps["tool_set"]
+                                api._loop_cancel_flags = {}
+
+                                result = await api._llm_converse("test_ses", "hello")
+
+                                assert result["action"] == "continue_chat"
+                                assert mock_call_llm.call_count == 1
+
+    @pytest.mark.asyncio
     async def test_push_chat_token_not_called_on_degraded_path(self, mock_deps):
         deps = mock_deps
         mock_streamer = MagicMock()
@@ -168,6 +228,30 @@ class TestLlmConverseStreamingBranch:
 
                                 await api._llm_converse("test_ses", "hello")
                                 mock_streamer.push_chat_token.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_none_llm_response_is_reported_without_none_type_error(self, mock_deps):
+        """A provider returning None must not be converted into result.get()."""
+        deps = mock_deps
+
+        with patch("src.api.research_api.session_manager", deps["session_manager"]):
+            with patch("src.api.research_api.PromptManager") as pm_cls:
+                pm_cls.get_instance.return_value = deps["pm_instance"]
+                with patch("src.core.session_streamer.SessionStreamer", deps["SessionStreamer"]):
+                    with patch("src.api.research_api.call_llm_stream",
+                               side_effect=Exception("stream unavailable")):
+                        with patch("src.api.research_api.call_llm", new_callable=AsyncMock,
+                                   return_value=None):
+                            with patch("src.config.settings", deps["settings"]):
+                                from src.api.research_api import ResearchAPI
+                                api = ResearchAPI()
+                                api._tool_set = deps["tool_set"]
+                                api._loop_cancel_flags = {}
+
+                                result = await api._llm_converse("test_ses", "hello")
+
+                                assert result["action"] == "continue_chat"
+                                assert "重新描述" in result["message"]
 
     @pytest.mark.asyncio
     async def test_non_first_iteration_uses_call_llm(self, mock_deps):
@@ -203,4 +287,8 @@ class TestLlmConverseStreamingBranch:
                                 api._JSON_OUTPUT_SCHEMA = "{}"
 
                                 result = await api._llm_converse("test_ses", "hello")
-                                assert result["message"] == "search done"
+                                # Tool chains are intentionally continued in
+                                # the background after the first search.
+                                assert result["status"] == "processing"
+                                assert result["message"] == "Let me search"
+                                mock_tool_set.execute_tool.assert_awaited_once()

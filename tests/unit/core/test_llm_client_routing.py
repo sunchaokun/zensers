@@ -1,3 +1,4 @@
+import asyncio
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 from src.config.llm_profiles import LLMProfile, LLMProfileRegistry, RoutingHint
@@ -151,6 +152,170 @@ class TestRoutingHintWithRouter:
                 assert call_kwargs["model"] == "my-custom-model"
                 assert call_kwargs["api_key"] == "sk-zhipu"
                 assert call_kwargs["base_url"] == "https://zhipu.api/v1"
+
+    @pytest.mark.asyncio
+    async def test_zhipu_auth_failure_skips_profile_fallback_and_uses_mimo(self):
+        """401 from optional zhipu must fail over directly to healthy mimo."""
+        import src.core.llm_client as mod
+
+        zhipu = LLMProfile(
+            name="zhipu", provider="zhipu", api_key="expired",
+            base_url="https://zhipu.api/v1", model="glm", fallback_model="glm-fast",
+        )
+        mimo = LLMProfile(
+            name="mimo", provider="mimo", api_key="mimo-key",
+            base_url="https://mimo.api/v1", model="mimo-v2.5",
+        )
+        registry = LLMProfileRegistry(
+            profiles={"zhipu": zhipu, "mimo": mimo},
+            default_profile="zhipu", fallback_chain=["zhipu", "mimo"],
+        )
+        mod._UNAVAILABLE_PROFILES.discard("zhipu")
+        with patch("src.core.llm_client.settings", _mock_settings()):
+            from src.core.llm_client import init_llm_infrastructure, call_llm
+            init_llm_infrastructure(registry)
+            with patch("src.core.llm_client._call_llm_api", new_callable=AsyncMock) as mock_api:
+                mock_api.side_effect = [
+                    RuntimeError("401 Unauthorized"),
+                    {"choices": [{"message": {"content": "mimo-ok"}}], "usage": {}},
+                ]
+                result = await call_llm(
+                    prompt="test", routing_hint=RoutingHint(profile_name="zhipu"),
+                )
+
+        assert result["success"] is True
+        assert result.get("fallback_used") is True
+        assert result.get("fallback_profile") == "mimo"
+        assert mock_api.call_count == 2
+        assert mock_api.call_args_list[1].kwargs["model"] == "mimo-v2.5"
+        assert mock_api.call_args_list[1].kwargs["api_key"] == "mimo-key"
+        assert all(call.kwargs["model"] != "glm-fast" for call in mock_api.call_args_list)
+
+    @pytest.mark.asyncio
+    async def test_empty_primary_profile_response_uses_next_profile(self):
+        """An empty successful HTTP response must activate profile failover."""
+        import src.core.llm_client as mod
+
+        zhipu = LLMProfile(
+            name="zhipu", provider="zhipu", api_key="key-z",
+            base_url="https://zhipu.api/v1", model="glm",
+        )
+        mimo = LLMProfile(
+            name="mimo", provider="mimo", api_key="key-m",
+            base_url="https://mimo.api/v1", model="mimo-v2.5",
+        )
+        registry = LLMProfileRegistry(
+            profiles={"zhipu": zhipu, "mimo": mimo},
+            default_profile="zhipu", fallback_chain=["zhipu", "mimo"],
+        )
+        mod._UNAVAILABLE_PROFILES.discard("zhipu")
+        with patch("src.core.llm_client.settings", _mock_settings()):
+            from src.core.llm_client import init_llm_infrastructure, call_llm
+            init_llm_infrastructure(registry)
+            with patch("src.core.llm_client._call_llm_api", new_callable=AsyncMock) as mock_api:
+                mock_api.side_effect = [
+                    {"choices": [{"message": {"content": ""}}], "usage": {}},
+                    {"choices": [{"message": {"content": ""}}], "usage": {}},
+                    {"choices": [{"message": {"content": "mimo after empty"}}], "usage": {}},
+                ]
+                result = await call_llm(prompt="test", routing_hint=RoutingHint(profile_name="zhipu"))
+
+        assert result["success"] is True
+        assert result["content"] == "mimo after empty"
+        assert result.get("fallback_profile") == "mimo"
+        assert mock_api.call_args_list[2].kwargs["model"] == "mimo-v2.5"
+
+    @pytest.mark.asyncio
+    async def test_empty_primary_profile_response_retries_same_profile_once(self):
+        registry = LLMProfileRegistry(
+            profiles={"mimo": LLMProfile(
+                name="mimo", provider="mimo", api_key="key-m",
+                base_url="https://mimo.api/v1", model="mimo-v2.5",
+            )},
+            default_profile="mimo", fallback_chain=["mimo"],
+        )
+        import src.core.llm_client as mod
+        mod._UNAVAILABLE_PROFILES.discard("mimo")
+        with patch("src.core.llm_client.settings", _mock_settings()):
+            from src.core.llm_client import init_llm_infrastructure, call_llm
+            init_llm_infrastructure(registry)
+            with patch("src.core.llm_client._call_llm_api", new_callable=AsyncMock) as mock_api:
+                mock_api.side_effect = [
+                    {"choices": [{"message": {"content": ""}}], "usage": {}},
+                    {"choices": [{"message": {"content": "mimo retry ok"}}], "usage": {}},
+                ]
+                result = await call_llm(prompt="test", routing_hint=RoutingHint(action="intent_analysis"))
+
+        assert result["success"] is True
+        assert result["content"] == "mimo retry ok"
+        assert mock_api.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_profile_concurrency_gate_limits_inflight_calls(self):
+        profile = LLMProfile(
+            name="mimo", provider="mimo", api_key="key-m",
+            base_url="https://mimo.api/v1", model="mimo-v2.5",
+            max_concurrency=1,
+        )
+        registry = LLMProfileRegistry(
+            profiles={"mimo": profile}, default_profile="mimo", fallback_chain=["mimo"],
+        )
+        import src.core.llm_client as mod
+        mod._UNAVAILABLE_PROFILES.discard("mimo")
+        with patch("src.core.llm_client.settings", _mock_settings()):
+            from src.core.llm_client import init_llm_infrastructure, call_llm
+            init_llm_infrastructure(registry)
+            active = 0
+            peak = 0
+
+            async def fake_api(**kwargs):
+                nonlocal active, peak
+                active += 1
+                peak = max(peak, active)
+                await asyncio.sleep(0.01)
+                active -= 1
+                return {"choices": [{"message": {"content": "ok"}}], "usage": {}}
+
+            with patch("src.core.llm_client._call_llm_api", new=fake_api):
+                results = await asyncio.gather(*[
+                    call_llm(prompt=f"test-{i}", routing_hint=RoutingHint(action="intent_analysis"))
+                    for i in range(3)
+                ])
+
+        assert all(result["success"] for result in results)
+        assert peak == 1
+
+    @pytest.mark.asyncio
+    async def test_unhinted_call_uses_default_profile_fallback_chain(self):
+        """Legacy call_llm() callers must not bypass the configured router."""
+        import src.core.llm_client as mod
+
+        zhipu = LLMProfile(
+            name="zhipu", provider="zhipu", api_key="expired",
+            base_url="https://zhipu.api/v1", model="glm",
+        )
+        mimo = LLMProfile(
+            name="mimo", provider="mimo", api_key="mimo-key",
+            base_url="https://mimo.api/v1", model="mimo-v2.5",
+        )
+        registry = LLMProfileRegistry(
+            profiles={"zhipu": zhipu, "mimo": mimo},
+            default_profile="zhipu", fallback_chain=["zhipu", "mimo"],
+        )
+        mod._UNAVAILABLE_PROFILES.discard("zhipu")
+        with patch("src.core.llm_client.settings", _mock_settings()):
+            from src.core.llm_client import init_llm_infrastructure, call_llm
+            init_llm_infrastructure(registry)
+            with patch("src.core.llm_client._call_llm_api", new_callable=AsyncMock) as mock_api:
+                mock_api.side_effect = [
+                    RuntimeError("401 Unauthorized"),
+                    {"choices": [{"message": {"content": "mimo-ok"}}], "usage": {}},
+                ]
+                result = await call_llm(prompt="test")
+
+        assert result["success"] is True
+        assert result.get("fallback_profile") == "mimo"
+        assert mock_api.call_args_list[1].kwargs["model"] == "mimo-v2.5"
 
 
 class TestInitLlmInfrastructure:
