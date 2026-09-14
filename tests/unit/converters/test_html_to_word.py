@@ -221,6 +221,45 @@ class TestHTMLToWordConverterParagraphs:
         
         assert result.success is True
 
+    def test_plain_paragraph_is_written_once(self, converter, temp_dir):
+        """普通段落不能因无内联标签而被写入两次"""
+        from docx import Document
+
+        html = "<article><p>追加的投资判断：这是只应出现一次的内容。</p></article>"
+        output_path = os.path.join(temp_dir, "plain_once.docx")
+        result = converter.convert(html, output_path)
+
+        assert result.success is True
+        document = Document(output_path)
+        paragraphs = [paragraph.text for paragraph in document.paragraphs]
+        assert paragraphs == ["追加的投资判断：这是只应出现一次的内容。"]
+
+    def test_multiple_plain_and_formatted_paragraphs_preserve_cardinality(self, converter, temp_dir):
+        """修订反馈中的标题、正文和说明各自只能生成一个 Word 段落"""
+        from docx import Document
+
+        html = """
+        <article>
+          <p><strong>追加的投资判断：</strong></p>
+          <p>这是新增的投资判断。</p>
+          <p>---</p>
+          <p><strong>修改说明：</strong></p>
+          <p>这是修改说明。</p>
+        </article>
+        """
+        output_path = os.path.join(temp_dir, "revision_feedback_once.docx")
+        result = converter.convert(html, output_path)
+
+        assert result.success is True
+        paragraphs = [paragraph.text for paragraph in Document(output_path).paragraphs]
+        assert paragraphs == [
+            "追加的投资判断：",
+            "这是新增的投资判断。",
+            "---",
+            "修改说明：",
+            "这是修改说明。",
+        ]
+
 
 class TestHTMLToWordConverterLists:
     """测试列表处理"""
@@ -415,17 +454,17 @@ class TestHTMLToWordConverterErrorHandling:
         # 应该尝试处理或返回错误
         assert result is not None
     
-    def test_invalid_output_path(self, converter):
-        """测试无效输出路径"""
+    def test_output_path_directory_is_created(self, converter, tmp_path):
+        """测试输出目录不存在时会自动创建"""
         html = "<article><p>内容</p></article>"
         
-        # 无效路径（不存在的目录）
-        output_path = "/nonexistent/path/test.docx"
+        output_path = str(tmp_path / "nested" / "path" / "test.docx")
         
         result = converter.convert(html, output_path)
         
-        # 应该返回失败
-        assert result.success is False or result.error is not None
+        assert result.success is True
+        assert result.error is None
+        assert os.path.exists(output_path)
 
 
 class TestHTMLToWordConverterResult:
