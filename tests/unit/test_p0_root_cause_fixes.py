@@ -318,7 +318,9 @@ class TestR4AProxySupport:
         """When no proxy configured, _proxy should be empty string."""
         from src.skills.search_skill import MultiSearchSkill
 
-        with patch.dict(os.environ, {}, clear=True):
+        with patch.dict(os.environ, {}, clear=True), \
+             patch.object(MultiSearchSkill, "_detect_local_proxy", return_value=""), \
+             patch.object(MultiSearchSkill, "_proxy_is_listening", return_value=False):
             env_keys = ["HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"]
             for k in env_keys:
                 os.environ.pop(k, None)

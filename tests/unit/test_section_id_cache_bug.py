@@ -625,7 +625,7 @@ class TestEngineCacheDictMissingSectionId:
         found_cache_append = False
         cache_dict_has_section_id = False
         for i, line in enumerate(lines):
-            if 'completed_results.append' in line and i > 1100 and i < 1200:
+            if 'completed_results.append' in line:
                 found_cache_append = True
                 block_lines = []
                 for j in range(i, min(i + 20, len(lines))):
@@ -651,12 +651,12 @@ class TestEngineCacheDictMissingSectionId:
             content = f.read()
             lines = content.split('\n')
 
-        # 找到正常路径的 section_id 注入代码
-        found_injection = False
-        for i, line in enumerate(lines):
-            if i > 1270 and i < 1310 and 'agent_result["section_id"]' in line:
-                found_injection = True
-                break
+        # Locate the injection structurally rather than relying on stale
+        # line numbers; the execution engine grows as recovery branches are
+        # added.
+        found_injection = any(
+            'agent_result["section_id"]' in line for line in lines
+        )
 
         assert found_injection, "正常执行路径缺少 section_id 注入代码"
 
@@ -679,22 +679,23 @@ class TestEngineContinueSkipsInjection:
         with open(engine_path, 'r', encoding='utf-8') as f:
             lines = f.readlines()
 
-        # 在 1180-1230 范围内找到 continue
+        # Locate the all-cached continue by the surrounding branch text.
         found_continue = False
         continue_line = -1
-        for i in range(1178, min(1235, len(lines))):
+        for i, line in enumerate(lines):
             stripped = lines[i].strip()
             if stripped == 'continue':
-                # 确保它在 all-cached 分支内（缩进层级匹配）
-                found_continue = True
-                continue_line = i + 1  # 1-indexed
-                break
+                context = ''.join(lines[max(0, i - 25):i])
+                if 'cached_result' in context and 'completed_results.append' in context:
+                    found_continue = True
+                    continue_line = i + 1  # 1-indexed
+                    break
 
         assert found_continue, "未找到 all-cached 分支的 continue 语句"
 
         # 确认 section_id 注入代码在 continue 之后
         injection_line = -1
-        for i in range(1280, min(1310, len(lines))):
+        for i in range(max(0, continue_line - 1), len(lines)):
             if 'agent_result["section_id"]' in lines[i]:
                 injection_line = i + 1
                 break
@@ -748,7 +749,7 @@ class TestOrchestratorExistingMapBug:
 
         lines = content.split('\n')
         map_used_in_mapping = False
-        for i in range(1740, min(1810, len(lines))):
+        for i in range(len(lines)):
             if 'agent_section_map' in lines[i] and 'key' in lines[i].lower():
                 map_used_in_mapping = True
                 break
