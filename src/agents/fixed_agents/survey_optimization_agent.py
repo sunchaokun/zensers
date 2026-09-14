@@ -132,11 +132,19 @@ class SurveyOptimizationAgent(FixedAgent):
         # Analyze questions
         analysis = await self._analyze_questions_async(questions, optimization_goals)
         
-        # Generate optimization suggestions
-        suggestions = self._generate_suggestions(analysis)
-        
+        # Generate optimization suggestions from the same issue model used by
+        # the current suggestion API.  Keep the full context here so target
+        # audience and optimization goals are not silently discarded.
+        issues = self._identify_issues(questions)
+        suggestions = await self._generate_suggestions(
+            questions,
+            issues,
+            optimization_goals,
+            target_audience,
+        )
+
         # Apply optimizations
-        optimized_questions = self._apply_optimizations(questions, suggestions)
+        optimized_questions = await self._optimize_questions(questions, suggestions)
         
         # Write to shared state
         await self.write_shared_state(f"agent.{self.agent_id}.last_optimization", {
@@ -150,6 +158,7 @@ class SurveyOptimizationAgent(FixedAgent):
         return {
             "success": True,
             "analysis": analysis,
+            "issues": issues,
             "suggestions": suggestions,
             "optimized_questions": optimized_questions,
         }
@@ -161,7 +170,7 @@ class SurveyOptimizationAgent(FixedAgent):
     ) -> Dict[str, Any]:
         """Asynchronously analyze questions."""
         # Analysis logic (can actually call LLM)
-        return self._analyze_questions(questions, goals)
+        return await self._analyze_questions(questions, goals)
     
     async def _analyze_questions(
         self, 
