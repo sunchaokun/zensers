@@ -173,8 +173,8 @@ class SimulatedResponseAgent(FixedAgent):
                 "total_count": 0,
             }
     
-    def reset(self) -> None:
+    async def reset(self) -> None:
         """Reset Agent state."""
-        super().reset()
+        await super().reset()
         # Optionally keep or reset simulation_engine
         # self._simulation_engine = None

@@ -165,7 +165,7 @@ class TestSimulatedResponseAgent:
     async def test_agent_reset(self, agent):
         task_input = {"survey": create_sample_survey().to_dict(), "personas": [create_sample_persona()]}
         await agent.run(task_input)
-        agent.reset()
+        await agent.reset()
         assert agent.status == "idle"
 
     # ========== 错误恢复测试 ==========
