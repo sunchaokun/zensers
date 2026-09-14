@@ -179,15 +179,15 @@ class TestBugFix_FrameworkModifyFallbackPreservesExisting:
         assert new_framework == {'regenerated': True}
 
 
-class TestBugFix_FrameworkModifyTimeoutIncreased:
-    """Bug fix: _llm_framework_modify timeout increased from 30s to 60s."""
+class TestFrameworkModifyRouting:
+    """Framework modification uses the routed LLM client contract."""
 
-    def test_timeout_is_60(self):
+    def test_uses_framework_modify_routing_hint(self):
         import inspect
         from src.api.research_api import ResearchAPI
         source = inspect.getsource(ResearchAPI._llm_framework_modify)
-        assert 'timeout=60' in source, "Timeout should be 60 seconds"
-        assert 'timeout=30' not in source, "Timeout should NOT be 30 seconds"
+        assert 'routing_hint=RoutingHint(action="framework_modify")' in source
+        assert 'timeout=30' not in source
 
 
 class TestBugFix_FrameworkModifyExceptionLogged:

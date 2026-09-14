@@ -13,7 +13,9 @@ class TestBuildInteractionCallback:
     async def test_returns_callable(self):
         from cli.interaction import build_interaction_callback
         mock_console = Mock()
-        callback = await build_interaction_callback(mock_console)
+        fake_questionary = Mock()
+        with patch.dict("sys.modules", {"questionary": fake_questionary}):
+            callback = await build_interaction_callback(mock_console)
         assert callable(callback)
 
     @pytest.mark.asyncio

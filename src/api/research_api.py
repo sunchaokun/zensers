@@ -1904,6 +1904,9 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
                 max_tokens=llm_config.get('max_tokens') or None,
                 routing_hint=RoutingHint(action="framework_modify"),
             )
+        except asyncio.TimeoutError as e:
+            logger.warning(f"[{session_id}] _llm_framework_modify timed out: {e}")
+            return {'action': 'modify', 'message': "Framework modification timed out. Please tell me what changes you'd like to make.", 'new_sections': None}
         except Exception as e:
             logger.warning(f"[{session_id}] _llm_framework_modify LLM call failed: {e}")
             return {'action': 'modify', 'message': "I understand you'd like to adjust the framework. Please tell me what changes you'd like to make.", 'new_sections': None}

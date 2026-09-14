@@ -187,10 +187,10 @@ class TestBugFix_ScrollDepsChange:
         assert deps_v1 != deps_v2
 
 
-class TestBugFix_SessionManagerDisplayHistoryIntegration:
-    """Integration test: session_manager __setitem__ display_history sync."""
+class TestSessionManagerHistoryPersistenceIntegration:
+    """Current contract: conversation history is append-only and complete."""
 
-    def test_display_history_survives_compression_cycle(self):
+    def test_history_survives_compression_cycle(self):
         from src.core.session_manager import SessionManager, PersistentSessionDict
         import tempfile, shutil
 
@@ -205,26 +205,22 @@ class TestBugFix_SessionManagerDisplayHistoryIntegration:
                 history.append({"role": "user", "content": f"msg {i}"})
                 session["conversation_history"] = history
 
-            display_after_init = dict.get(session, "display_history", [])
-            assert len(display_after_init) == 20
+            assert len(session.get("conversation_history", [])) == 20
 
             compressed = session.get("conversation_history", [])[:5]
-            dict.__setitem__(session, "display_history", list(session.get("conversation_history", [])))
-            dict.__setitem__(session, "conversation_history", compressed)
-            dict.__setitem__(session, "_display_synced_len", 5)
-
-            display_after_compress = dict.get(session, "display_history", [])
-            assert len(display_after_compress) == 20, f"Expected 20, got {len(display_after_compress)}"
+            with pytest.raises(ValueError, match="truncation blocked"):
+                session["conversation_history"] = compressed
+            assert len(session.get("conversation_history", [])) == 20
 
             for i in range(20, 25):
                 history = session.get("conversation_history", [])
                 history.append({"role": "user", "content": f"msg {i}"})
                 session["conversation_history"] = history
 
-            display_after_append = dict.get(session, "display_history", [])
-            assert len(display_after_append) == 25, f"Expected 25, got {len(display_after_append)}"
-            assert display_after_append[0]["content"] == "msg 0"
-            assert display_after_append[24]["content"] == "msg 24"
+            history_after_append = session.get("conversation_history", [])
+            assert len(history_after_append) == 25
+            assert history_after_append[0]["content"] == "msg 0"
+            assert history_after_append[24]["content"] == "msg 24"
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
