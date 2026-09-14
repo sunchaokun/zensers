@@ -505,7 +505,7 @@ class TestInstructionSkill:
             categories=["synthesis", "quality-check"],
             priority="llm",
             keywords=["llm", "生成", "分析"],
-            aliases=["llm_skill"],
+            aliases=[],
             capabilities=[],
             data_types={},
             data_source_keywords=[],

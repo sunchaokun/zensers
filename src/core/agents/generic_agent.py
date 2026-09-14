@@ -24,6 +24,8 @@ v2.2 新增：
 """
 
 import asyncio
+import hashlib
+import inspect
 import json
 import re
 from pathlib import Path
@@ -57,6 +59,13 @@ if TYPE_CHECKING:
     from src.core.agents.agent_session import AgentSession
 
 from src.core.llm_client import call_llm
+from src.core.evidence_scope import EvidenceScope
+from src.core.search import (
+    AnySearchProvider,
+    GatewaySearchSkillAdapter,
+    LocalSkillProvider,
+    SearchGateway,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -161,7 +170,7 @@ class GenericAgent(
         available_skills = self.config.get("skills", [])
         
         if action == "search" and "search_skill" in available_skills:
-            skill = skill_registry.get("search_skill")
+            skill = self._get_search_skill(skill_registry)
             return await skill.execute(**parameters)
     
     构造函数兼容性：
@@ -173,7 +182,16 @@ class GenericAgent(
     """
     
     agent_type: str = "dynamic"
-    
+
+    @staticmethod
+    def _build_claim_canonical_key(
+        task_id: str, chapter_id: str, section_id: str, claim_id: str,
+    ) -> str:
+        """Build a collision-safe canonical key for a cross-dimension claim."""
+        parts = [task_id, chapter_id, section_id, claim_id]
+        normalized = [str(part or "unknown").strip().replace(":", "_") for part in parts]
+        return "claim:" + ":".join(normalized)
+
     def __init__(
         self,
         agent_id: str,
@@ -218,6 +236,8 @@ class GenericAgent(
         self._role = self.config.get("role", "")
         self._goal = self.config.get("goal", "")
         self._backstory = self.config.get("backstory", "")
+        self._search_gateway = None
+        self._search_gateway_skill = None
         
         # === 生命周期状态 ===
         self._lifecycle_state = AgentLifecycleState.CREATED
@@ -227,6 +247,12 @@ class GenericAgent(
         # 这样 ExecutionEngine._get_section_id_from_agent() 可以正确获取 section_id
         # 用于 ContentLockManager 的章节锁定机制
         self.section_id = self._context.get("section_id", "")
+
+    def validate_input(self, task_input: Dict[str, Any]) -> tuple[bool, str]:
+        """Validate the common task shape required by the IAgent contract."""
+        if not isinstance(task_input, dict):
+            return False, "task_input must be a dictionary"
+        return True, ""
 
     def _report_progress(self, message: str, action: str = "analyzing"):
         _sid = getattr(self, '_current_session_id', None)
@@ -285,6 +311,17 @@ class GenericAgent(
         skill_name = ACTION_TO_SKILL.get(action)
         
         logger.info(f"GenericAgent {self.agent_id}: action='{action}' -> skill_name='{skill_name}', available_skills={available_skills[:5]}...")
+
+        # A missing action is not an intrinsic LLM request.  Only actions
+        # explicitly declared in the intrinsic map may enter the LLM path;
+        # unknown actions must remain a cheap, deterministic compatibility
+        # response instead of unexpectedly spending an LLM call.
+        if action not in ACTION_TO_SKILL:
+            return {
+                "success": True,
+                "message": f"GenericAgent {self.agent_id} executed action: {action}",
+                "available_skills": available_skills,
+            }
         
         if skill_name is not None and skill_name in available_skills and skill_registry:
             skill = skill_registry.get(skill_name)
@@ -501,7 +538,7 @@ class GenericAgent(
                     search_depth = "basic" if _structured_data_sufficient else "deep"
 
                     if "search_skill" in web_skills and skill_registry:
-                        search_skill = skill_registry.get("search_skill")
+                        search_skill = self._get_search_skill(skill_registry)
                         if search_skill:
                             search_result = await self._process_skill_output(
                                 search_skill, "search_skill", topic, aspect, skill_registry,
@@ -564,7 +601,10 @@ class GenericAgent(
                                             })
                                         )
                     return self._ensure_standard_result({
-                        "success": True,
+                        # A configured search tier is not evidence that data
+                        # was collected. Do not report success when every
+                        # provider/skill returned no usable data.
+                        "success": bool(data_points),
                         "data_points": data_points,
                         "sources": sources,
                         "total_sources": search_results.get("total_sources", 0) if search_results else len(sources),
@@ -618,13 +658,14 @@ class GenericAgent(
                             topic, aspect or "", validation_result.get("warnings", [])
                         )
                         if recollection_queries:
-                            search_skill = skill_registry.get("search_skill")
+                            search_skill = self._get_search_skill(skill_registry)
                             if search_skill:
                                 try:
                                     for rq in recollection_queries[:3]:
                                         sr = await search_skill.execute(query=rq, max_results=5)
                                         if sr and sr.get("success") and sr.get("results"):
                                             for item in sr["results"]:
+                                                evidence = self._evidence_metadata(item)
                                                 data_points.append({
                                                     "title": item.get("title", ""),
                                                     "content": item.get("body", "") or item.get("snippet", ""),
@@ -632,11 +673,13 @@ class GenericAgent(
                                                     "quality_score": 40,
                                                     "source_type": "recollection",
                                                     "credibility": "recollection_search",
+                                                    **evidence,
                                                 })
                                                 sources.append({
                                                     "title": item.get("title", ""),
                                                     "url": item.get("href", "") or item.get("url", ""),
                                                     "type": "web",
+                                                    **evidence,
                                                 })
                                     recollection_attempted = True
                                     logger.info(
@@ -671,6 +714,24 @@ class GenericAgent(
                 self._report_progress(f"Analyzing {aspect or topic}...", "analyzing")
                 aggregated_data_points = task.get("aggregated_data_points", [])
                 aggregated_sources = task.get("aggregated_sources", [])
+                _analysis_scope_config = task.get("evidence_scope", {}) or {}
+                _scope_is_explicit = bool(
+                    _analysis_scope_config
+                    or task.get("dependency_agent_ids")
+                    or task.get("required_metrics")
+                    or task.get("section_id")
+                )
+                _direct_source_agents = {
+                    str(item.get("source_agent_id") or item.get("agent_id") or "").strip()
+                    for item in aggregated_data_points
+                    if isinstance(item, dict)
+                    and str(item.get("source_agent_id") or item.get("agent_id") or "").strip()
+                }
+                _analysis_scope = EvidenceScope(
+                    section_id=str(_analysis_scope_config.get("section_id") or getattr(self, "section_id", "") or task.get("section_id", "")),
+                    allowed_source_agents=set(_analysis_scope_config.get("allowed_source_agents") or task.get("dependency_agent_ids", []) or _direct_source_agents),
+                    required_metrics=set(task.get("required_metrics") or _analysis_scope_config.get("required_metrics") or task.get("data_needs", []) or self._context.get("data_needs", [])),
+                )
                 # P-FIX-DEEP: search fallback when no upstream data available
                 # Skip search if annual report document_context is preloaded
                 _has_doc_data = bool(self._context.get("document_context") or self._context.get("has_preloaded_data") or task.get("document_context"))
@@ -684,20 +745,30 @@ class GenericAgent(
                         for _search in _sr["searches"]:
                             for _item in (_search.get("results") or []):
                                 _url = _item.get("href", "") or _item.get("url", "")
+                                _evidence = self._evidence_metadata(_item)
                                 aggregated_data_points.append({
                                     "title": _item.get("title", ""),
                                     "content": _item.get("body", "") or _item.get("snippet", ""),
                                     "url": _url,
                                     "quality_score": _item.get("quality_score", 0),
+                                    "source_agent_id": f"analysis_fallback:{self.agent_id}",
+                                    "section_id": _analysis_scope.section_id,
+                                    **_evidence,
                                 })
                                 aggregated_sources.append({
                                     "title": _item.get("title", ""),
                                     "url": _url,
                                     "type": "web",
+                                    **_evidence,
                                 })
                         logger.info(f"GenericAgent {self.agent_id}: 降级搜索收集 {len(aggregated_data_points)} 数据点")
                         self._report_progress(f"降级搜索完成，获取 {len(aggregated_data_points)} 条数据", "searching")
                 canonical_data = task.get("canonical_data", {}) or {}
+                # Apply the same scope to both upstream evidence and any
+                # targeted fallback search results.  Fallback evidence is
+                # explicitly scoped to this agent/chapter above.
+                _analysis_scope.allowed_source_agents.add(f"analysis_fallback:{self.agent_id}")
+                aggregated_data_points, _evidence_audit = _analysis_scope.select(aggregated_data_points)
                 # Filter to target currency only: zh report→CNY, en report→USD
                 _target_cur = task.get("target_currency", "CNY")
                 if _target_cur and canonical_data:
@@ -717,25 +788,47 @@ class GenericAgent(
                         canonical_data = {}
                     elif _filtered:
                         canonical_data = _filtered
+                canonical_data = (
+                    _analysis_scope.select_canonical(canonical_data)
+                    if _scope_is_explicit else {}
+                )
                 # Supplement from SharedMemory for real-time updates across batches
                 if self._shared_memory and hasattr(self._shared_memory, 'get'):
                     _sm_reg = self._shared_memory.get("_canonical_registry", {})
                     if _sm_reg:
+                        _merged_canonical = dict(canonical_data)
                         for _k, _v in _sm_reg.items():
                             _spk = parse_entry_key(_k)
                             _skey_cur = _spk["currency"]
                             if _skey_cur == _target_cur or not _skey_cur:
-                                canonical_data[_k] = _v
+                                _merged_canonical[_k] = _v
+                        # Re-apply the same chapter scope after merging the
+                        # live registry; otherwise SharedMemory would bypass
+                        # the filtered task canonical_data view.
+                        canonical_data = (
+                            _analysis_scope.select_canonical(_merged_canonical)
+                            if _scope_is_explicit else {}
+                        )
                 # B2.3: Read cross-dimension claims from SharedMemory
                 cross_dimension_claims = []
                 if self._shared_memory and hasattr(self._shared_memory, 'get_all_canonical'):
                     _all_canon = self._shared_memory.get_all_canonical()
+                    _claim_records = []
                     for _ck, _cv in _all_canon.items():
                         if _ck.startswith("claim:") and _cv.get("publisher") != aspect:
                             _claim_val = _cv.get("value", {})
                             if isinstance(_claim_val, dict) and _claim_val.get("statement"):
-                                cross_dimension_claims.append(_claim_val)
-                    _conflict_entries = {k: v for k, v in _all_canon.items() if k.startswith("conflict:claim:")}
+                                _claim_records.append(_claim_val)
+                    cross_dimension_claims = (
+                        _analysis_scope.select_claims(_claim_records)
+                        if _scope_is_explicit else []
+                    )
+                    _conflict_entries = {
+                        k: v for k, v in _all_canon.items()
+                        if k.startswith("conflict:claim:")
+                        and _scope_is_explicit
+                        and _analysis_scope.select_claims([v.get("value", {})])
+                    }
                 # A2.1: Generate causal hypotheses before analysis
                 _cog_type = await self.infer_cognitive_type(aspect, topic)
                 _cog_strategy = COGNITIVE_STRATEGY.get(_cog_type, COGNITIVE_STRATEGY["fact_driven"])
@@ -896,8 +989,26 @@ class GenericAgent(
                                                 source=self.agent_id,
                                                 publisher=aspect,
                                             )
+                            _claim_task_id = str(
+                                self._context.get("task_id")
+                                or self._context.get("session_id")
+                                or "task_unknown"
+                            )
+                            _claim_chapter_id = str(
+                                self._context.get("chapter_id")
+                                or self.section_id
+                                or "chapter_unknown"
+                            )
+                            _claim_section_id = str(
+                                self._context.get("section_id") or aspect or "section_unknown"
+                            )
                             await self._shared_memory.write_canonical(
-                                metric=f"claim:{aspect}:{_claim['id']}",
+                                metric=self._build_claim_canonical_key(
+                                    _claim_task_id,
+                                    _claim_chapter_id,
+                                    _claim_section_id,
+                                    str(_claim.get("id", "claim_unknown")),
+                                ),
                                 value=_claim,
                                 caliber=_caliber,
                                 source=self.agent_id,
@@ -923,8 +1034,27 @@ class GenericAgent(
                             skill_registry=skill_registry,
                         )
                         if supp_result and supp_result.get("data_points"):
-                            new_data_points = list(aggregated_data_points) + supp_result["data_points"]
-                            new_sources = list(aggregated_sources) + supp_result["sources"]
+                            supplemental_points = []
+                            for raw_point in supp_result["data_points"]:
+                                if not isinstance(raw_point, dict):
+                                    continue
+                                point = dict(raw_point)
+                                point.setdefault("source_agent_id", f"analysis_supplement:{self.agent_id}")
+                                point.setdefault("section_id", _analysis_scope.section_id)
+                                supplemental_points.append(point)
+                            supplemental_points, _supplement_audit = _analysis_scope.select(supplemental_points)
+                            new_data_points = list(aggregated_data_points) + supplemental_points
+                            selected_urls = {
+                                str(point.get("url") or point.get("source_url") or "").strip()
+                                for point in supplemental_points
+                                if isinstance(point, dict)
+                            }
+                            new_sources = list(aggregated_sources) + [
+                                source for source in (supp_result.get("sources") or [])
+                                if isinstance(source, dict)
+                                and selected_urls
+                                and str(source.get("url") or source.get("source_url") or "").strip() in selected_urls
+                            ]
                             prompt2 = self._build_analysis_prompt_with_data(
                                 topic=topic, aspect=aspect, aspects=aspects,
                                 data_points=new_data_points, sources=new_sources,
@@ -966,6 +1096,8 @@ class GenericAgent(
                 if result.get("success"):
                     result["data_points"] = aggregated_data_points
                     result["sources"] = aggregated_sources
+                    if task.get("evidence_scope"):
+                        result["evidence_scope"] = task["evidence_scope"]
                 return self._ensure_standard_result(result, action)
                     
             # M5-b: CALIBRATION - cross-agent numeric consistency check
@@ -1275,18 +1407,21 @@ class GenericAgent(
                 sources = []
                 for search in search_results.get("searches", []):
                     for item in search.get("results", []):
+                        evidence = self._evidence_metadata(item)
                         data_points.append({
                             "title": item.get("title", ""),
                             "content": item.get("body", "") or item.get("snippet", ""),
                             "url": item.get("href", "") or item.get("url", ""),
                             "quality_score": item.get("quality_score", 0),
                             "credibility": item.get("credibility", "unknown"),
+                            **evidence,
                         })
                         sources.append({
                             "title": item.get("title", ""),
                             "url": item.get("href", "") or item.get("url", ""),
                             "type": "web",
                             "quality_score": item.get("quality_score", 0),
+                            **evidence,
                         })
                         
                 result["data_points"] = data_points
@@ -1342,7 +1477,7 @@ class GenericAgent(
             search_results = None
             _has_doc_data_fb = bool(self._context.get("document_context") or self._context.get("has_preloaded_data") or task.get("document_context"))
             if topic and skill_registry and not _has_doc_data_fb:
-                search_skill = skill_registry.get("search_skill")
+                search_skill = self._get_search_skill(skill_registry)
                 if search_skill:
                     try:
                         logger.info(
@@ -1426,18 +1561,21 @@ class GenericAgent(
                 sources = []
                 for search in search_results.get("searches", []):
                     for item in search.get("results", []):
+                        evidence = self._evidence_metadata(item)
                         data_points.append({
                             "title": item.get("title", ""),
                             "content": item.get("body", "") or item.get("snippet", ""),
                             "url": item.get("href", "") or item.get("url", ""),
                             "quality_score": item.get("quality_score", 0),
                             "credibility": item.get("credibility", "unknown"),
+                            **evidence,
                         })
                         sources.append({
                             "title": item.get("title", ""),
                             "url": item.get("href", "") or item.get("url", ""),
                             "type": "web",
                             "quality_score": item.get("quality_score", 0),
+                            **evidence,
                         })
                 result["data_points"] = data_points
                 result["sources"] = sources
@@ -1579,7 +1717,7 @@ class GenericAgent(
         确保返回标准格式结果
         
         支持多种Skill返回格式的统一化：
-        - LLM Skill: {content, model, usage}
+        - Intrinsic LLM: {content, model, usage}
         - Search Skill: {results, query, total}
         - HTTP Skill: {status_code, body}
         - Web Scraper: {text, title, url}
@@ -1658,7 +1796,8 @@ class GenericAgent(
                                         sources.append({
                                             "title": title,
                                             "url": url,
-                                            "type": "web"
+                                            "type": "web",
+                                            **self._evidence_metadata(item),
                                         })
                                     formatted.append("")
                             result[target_field] = "\n".join(formatted)
@@ -2080,19 +2219,32 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
         )
         
         try:
-            result = await call_llm(
-                prompt=prompt,
-                system_prompt="你是一个逻辑矛盾检测专家。只输出JSON，不输出任何其他内容。",
-                max_tokens=200,
-                temperature=0.0,
-            )
-            content = result.get("content", "").strip()
+            # Keep an injectable client seam for quality checks and tests.  The
+            # production fallback remains the shared LLM gateway.
+            injected_client = getattr(self, "_llm_client", None)
+            injected_generate = getattr(injected_client, "generate", None)
+            if callable(injected_generate):
+                result = await injected_generate(prompt)
+                content = result.get("content", "") if isinstance(result, dict) else str(result or "")
+            else:
+                result = await call_llm(
+                    prompt=prompt,
+                    system_prompt="你是一个逻辑矛盾检测专家。只输出JSON，不输出任何其他内容。",
+                    max_tokens=200,
+                    temperature=0.0,
+                )
+                content = result.get("content", "")
+            content = content.strip()
             
             import json as _json
             json_match = re.search(r'\{[^}]+\}', content)
             if json_match:
                 parsed = _json.loads(json_match.group())
-                is_contradiction = parsed.get("contradiction", False)
+                # Accept both historical response keys while the prompt uses
+                # the canonical ``contradiction`` name.
+                is_contradiction = parsed.get(
+                    "contradiction", parsed.get("is_contradiction", False)
+                )
                 conf = parsed.get("confidence", 0.0)
                 ctype = parsed.get("type", "方向矛盾")
                 explanation = parsed.get("explanation", "")
@@ -2282,17 +2434,14 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
         result = {"data_points": [], "sources": [], "canonical_metrics": {}}
 
         try:
-            processed = await asyncio.wait_for(
-                self._process_skill_output_inner(
-                    skill, skill_name, topic, aspect, skill_registry,
-                    structured_data_sufficient, preloaded_search_results, search_depth,
-                ),
-                timeout=60.0,
+            # Skill execution belongs to the Agent task lifecycle.  Do not
+            # truncate it with a hidden fixed timeout; cancellation is owned
+            # by the coordinator/task controller.
+            processed = await self._process_skill_output_inner(
+                skill, skill_name, topic, aspect, skill_registry,
+                structured_data_sufficient, preloaded_search_results, search_depth,
             )
             return processed
-        except asyncio.TimeoutError:
-            logger.error(f"GenericAgent {self.agent_id}: {skill_name} timed out (60s)")
-            return result
         except Exception as e:
             logger.error(f"GenericAgent {self.agent_id}: {skill_name} unexpected error: {e}")
             return result
@@ -2423,18 +2572,21 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
         )
         for search in search_results.get("searches", []):
             for item in search.get("results", []):
+                evidence = self._evidence_metadata(item)
                 result["data_points"].append({
                     "title": item.get("title", ""),
                     "content": item.get("body", "") or item.get("snippet", ""),
                     "url": item.get("href", "") or item.get("url", ""),
                     "quality_score": item.get("quality_score", 0),
                     "credibility": item.get("credibility", "unknown"),
+                    **evidence,
                 })
                 result["sources"].append({
                     "title": item.get("title", ""),
                     "url": item.get("href", "") or item.get("url", ""),
                     "type": "web",
                     "quality_score": item.get("quality_score", 0),
+                    **evidence,
                 })
         result["total_sources"] = search_results.get("total_sources", 0)
         result["quality_stats"] = search_results.get("quality_stats", {})
@@ -2462,6 +2614,7 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
                         continue
                     news_body = nr.get("body", "") or nr.get("snippet", "")
                     news_url = nr.get("href", "") or nr.get("url", "")
+                    evidence = self._evidence_metadata(nr)
                     result["data_points"].append({
                         "title": nr.get("title", ""),
                         "content": news_body,
@@ -2471,12 +2624,14 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
                         "source_type": "news",
                         "source_name": nr.get("source", ""),
                         "date": nr.get("date", ""),
+                        **evidence,
                     })
                     result["sources"].append({
                         "title": nr.get("title", ""),
                         "url": news_url,
                         "type": "news",
                         "quality_score": 70,
+                        **evidence,
                     })
         except Exception as e:
             logger.warning(f"GenericAgent {self.agent_id}: news_search failed: {e}")
@@ -2506,7 +2661,10 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
         formatted = ""
         if hasattr(skill, 'format_data') and callable(skill.format_data):
             try:
-                formatted = skill.format_data(data, action, identifier) or ""
+                formatted = skill.format_data(data, action, identifier)
+                if inspect.isawaitable(formatted):
+                    formatted = await formatted
+                formatted = formatted or ""
                 if not isinstance(formatted, str):
                     formatted = str(formatted)
             except Exception:
@@ -3037,7 +3195,9 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
         }
         result = dict(intrinsic)
         if self._skill_registry:
-            for name, manifest in self._skill_registry.all_manifests().items():
+            all_manifests = getattr(self._skill_registry, "all_manifests", None)
+            manifests = all_manifests() if callable(all_manifests) else {}
+            for name, manifest in manifests.items():
                 for cap in manifest.capabilities:
                     if cap not in result:
                         result[cap] = name
@@ -3193,6 +3353,60 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
             })
         return resolved
 
+    def _get_search_skill(self, skill_registry: Any):
+        """Return the task's routed search skill when factory routing is enabled.
+
+        Direct ``GenericAgent`` construction remains compatible with existing
+        tests and callers; agents created by ``AgentFactory`` opt in through
+        ``use_search_gateway``.
+        """
+        injected_gateway = self.config.get("search_gateway")
+        if injected_gateway is not None:
+            if self._search_gateway_skill is None:
+                self._search_gateway = injected_gateway
+                self._search_gateway_skill = GatewaySearchSkillAdapter(
+                    injected_gateway,
+                    scope="generic_agent",
+                )
+            return self._search_gateway_skill
+        if not skill_registry:
+            return None
+        legacy_skill = skill_registry.get("search_skill")
+        if not legacy_skill or not self.config.get("use_search_gateway", False):
+            return legacy_skill
+        if self._search_gateway_skill is None:
+            self._search_gateway = SearchGateway(
+                task_id=self.agent_id,
+                providers={
+                    "anysearch": AnySearchProvider(),
+                    "local_skill": LocalSkillProvider(legacy_skill, name="local_skill"),
+                },
+                primary_provider="anysearch",
+                fallback_providers=["local_skill"],
+                min_quality_score=40,
+                max_provider_retries=1,
+                max_provider_switches=1,
+            )
+            self._search_gateway_skill = GatewaySearchSkillAdapter(self._search_gateway)
+        return self._search_gateway_skill
+
+    @staticmethod
+    def _evidence_metadata(item: Dict[str, Any]) -> Dict[str, Any]:
+        """Copy auditable evidence identity across legacy result projections."""
+        return {
+            "evidence_id": item.get("evidence_id", ""),
+            "provenance_id": item.get("provenance_id", ""),
+            "evidence_excerpt": item.get("evidence_excerpt", "")
+            or item.get("excerpt", "")
+            or item.get("snippet", ""),
+            "locator": item.get("locator", "")
+            or item.get("url", "")
+            or item.get("href", ""),
+            "task_id": item.get("task_id", ""),
+            "request_id": item.get("request_id", ""),
+            "retrieved_at": item.get("retrieved_at"),
+        }
+
     async def _do_deep_research(
         self,
         topic: str,
@@ -3223,8 +3437,15 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
             搜索结果汇总（包含质量评分和完整内容）
         """
         import asyncio
+
+        # Compact large-report routing still needs evidence, but repeating the
+        # full deep-search loop for every section creates an avoidable long
+        # tail.  Keep the default deep behavior for normal and primary-data
+        # tasks; only the explicit compact route uses the bounded basic mode.
+        if self._context.get("compact_route"):
+            depth = "basic"
         
-        search_skill = skill_registry.get("search_skill")
+        search_skill = self._get_search_skill(skill_registry)
         if not search_skill:
             logger.warning(f"GenericAgent {self.agent_id}: no search skill available")
             return {}
@@ -3272,18 +3493,27 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
             MIN_QUALITY_SCORE = 55.0
             MIN_SOURCES = 2
             STAGNATION_LIMIT = 2
-            MAX_QUERIES = 10
+            MAX_QUERIES = 5
             MAX_ITERATIONS = 5
             MAX_LLM_CALLS = 1
         else:
-            min_queries = search_params.get("max_queries", 10)
+            min_queries = min(max(int(search_params.get("max_queries", 5)), 3), 5)
             max_results_per_query = search_params.get("max_results", 20)
             MIN_QUALITY_SCORE = 45.0
             MIN_SOURCES = 5
             STAGNATION_LIMIT = 6
-            MAX_QUERIES = 50
-            MAX_ITERATIONS = 20
+            MAX_QUERIES = 5
+            MAX_ITERATIONS = 5
             MAX_LLM_CALLS = 3
+
+        if self._context.get("compact_route"):
+            # Large reports trade per-section search depth for breadth.  Do
+            # not let framework-level max_queries values silently expand the
+            # compact route back into a full deep-search workload.
+            min_queries = 2
+            MAX_QUERIES = 3
+            MAX_ITERATIONS = 2
+            MAX_LLM_CALLS = 0
         
         logger.info(f"GenericAgent {self.agent_id}: 搜索配置 depth={depth}, min_queries={min_queries}, max_results={max_results_per_query}")
         
@@ -3397,8 +3627,7 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
                         # English queries -> global engines (Google, DDGS, Bing Intl) for authoritative intl data.
                         query_region = "global" if self._is_english_query(query) else "cn-cn"
                         
-                        search_result = await asyncio.wait_for(
-                            search_skill.execute(
+                        search_result = await search_skill.execute(
                                 query=query,
                                 max_results=max_results_per_query,
                                 region=query_region,
@@ -3416,9 +3645,7 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
                                 enable_quality_filter=True,
                                 min_quality_score=35.0,
                                 context=quality_context,
-                            ),
-                            timeout=60.0  # 单次搜索最多60秒
-                        )
+                            )
                         
                         if search_result.get("success") and search_result.get("results"):
                             quality_stats = search_result.get("quality_stats", {})
@@ -3489,14 +3716,17 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
                         saved_sources = []
                         for search in all_results.get("searches", []):
                             for item in search.get("results", []):
+                                evidence = self._evidence_metadata(item)
                                 saved_data_points.append({
                                     "title": item.get("title", ""),
                                     "content": item.get("body", "") or item.get("snippet", ""),
                                     "url": item.get("href", "") or item.get("url", ""),
+                                    **evidence,
                                 })
                                 saved_sources.append({
                                     "title": item.get("title", ""),
                                     "url": item.get("href", "") or item.get("url", ""),
+                                    **evidence,
                                 })
                         store.save_result(
                             task_id=task_id,
@@ -3999,7 +4229,7 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
             Dict with 'data_points' and 'sources' lists, or empty dict on failure
         """
         # Get search skill from registry (not from available_skills, since analysis agents don't have it)
-        search_skill = skill_registry.get("search_skill")
+        search_skill = self._get_search_skill(skill_registry)
         if not search_skill:
             logger.info(f"GenericAgent {self.agent_id}: no search skill available for gap filling")
             return {}
@@ -4032,31 +4262,31 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
         
         for query in gap_queries[:4]:  # Max 4 gap-filling queries
             try:
-                search_result = await asyncio.wait_for(
-                    search_skill.execute(
+                search_result = await search_skill.execute(
                         query=query,
                         max_results=10,
                         region="global",
                         enable_quality_filter=True,
                         min_quality_score=35.0,
-                    ),
-                    timeout=30.0,
-                )
+                    )
                 if search_result.get("success") and search_result.get("results"):
                     for item in search_result["results"]:
                         url = item.get("href", "") or item.get("url", "")
                         if url and url not in seen_urls:
                             seen_urls.add(url)
+                            evidence = self._evidence_metadata(item)
                             all_data_points.append({
                                 "title": item.get("title", ""),
                                 "content": item.get("body", "") or item.get("snippet", ""),
                                 "url": url,
                                 "quality_score": item.get("quality_score", 0),
+                                **evidence,
                             })
                             all_sources.append({
                                 "title": item.get("title", ""),
                                 "url": url,
                                 "type": "web",
+                                **evidence,
                             })
             except Exception as e:
                 logger.warning(f"GenericAgent {self.agent_id}: gap-fill search failed for '{query}': {e}")
@@ -4587,7 +4817,6 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
         
         enriched_results = []
         max_concurrent = 3  # 并发爬取数（避免被封）
-        timeout_per_url = 15.0  # 每个URL超时时间
         
         async def crawl_single_result(result: Dict[str, Any]) -> Dict[str, Any]:
             """爬取单个URL"""
@@ -4597,9 +4826,8 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
             
             try:
                 # 调用web_scraper爬取完整内容
-                scraper_result = await asyncio.wait_for(
-                    web_scraper.execute(url=url, action="extract_text"),
-                    timeout=timeout_per_url
+                scraper_result = await web_scraper.execute(
+                    url=url, action="extract_text"
                 )
                 
                 if scraper_result.get("success"):
@@ -4723,6 +4951,20 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
         # 纯数字或纯符号检查
         if query.isdigit() or all(not c.isalnum() for c in query):
             return False
+
+        # Reject generic report-generation prompts.  They produce broad,
+        # low-signal search results instead of a factual research query.
+        forbidden_phrases = (
+            "市场分析报告",
+            "研究报告",
+            "预测分析",
+            "market research report",
+            "market analysis report",
+            "industry research forecast",
+        )
+        query_lower = query.casefold()
+        if any(phrase.casefold() in query_lower for phrase in forbidden_phrases):
+            return False
         
         # 重复检查
         if existing_queries and query in existing_queries:
@@ -4778,7 +5020,7 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
         **核心原则**：搜索原始数据，而非现成报告或分析结论！
         
         **变更说明**：
-        - 移除 llm_skill 依赖，改用 call_llm()
+        - 移除旧 LLM Skill 依赖，改用 call_llm()
         - 新增 role_info 参数，接收 DomainRoleInferrer 推断的角色信息
         - 新增 min_queries 参数，确保生成足够的关键词
         
@@ -5261,9 +5503,36 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
         Returns:
             Rendered prompt string
         """
-        # Format data points into context string
+        # Analysis results carry inherited evidence forward.  Deduplicate it
+        # before rendering, otherwise each dependent agent multiplies the same
+        # source in the next batch.
+        unique_data_points = []
+        seen_data_keys = set()
+        for dp in data_points or []:
+            if not isinstance(dp, dict):
+                continue
+            identity = next(
+                (str(dp.get(field)).strip() for field in ("evidence_id", "provenance_id", "data_id")
+                 if str(dp.get(field) or "").strip()),
+                "",
+            )
+            if identity:
+                raw_key = f"identity:{identity}"
+            else:
+                try:
+                    raw_key = json.dumps(
+                        [dp.get("url"), dp.get("title"), dp.get("content"), dp.get("data")],
+                        ensure_ascii=False, sort_keys=True, default=str,
+                    )
+                except (TypeError, ValueError):
+                    raw_key = str(dp)
+            key = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+            if key not in seen_data_keys:
+                seen_data_keys.add(key)
+                unique_data_points.append(dp)
+
         data_context = []
-        for i, dp in enumerate(data_points[:50], 1):
+        for i, dp in enumerate(unique_data_points, 1):
             title = dp.get("title", "")
             raw_content = dp.get("content", "") or ""
             raw_data = dp.get("data")
@@ -5287,12 +5556,13 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
             }
             cred_label = cred_labels.get(credibility, "")
             
-            data_context.append(f"{i}. **{title}**{cred_label}")
+            item_lines = [f"{i}. **{title}**{cred_label}"]
             if content:
-                data_context.append(f"   Content: {content}")
+                item_lines.append(f"   Content: {content}")
             if url:
-                data_context.append(f"   Source: {url}")
-            data_context.append("")
+                item_lines.append(f"   Source: {url}")
+            item_lines.append("")
+            data_context.append("\n".join(item_lines))
         
         data_str = "\n".join(data_context)
         
@@ -5595,9 +5865,10 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
         Scans for 4-digit year patterns, checks them against the system clock,
         and logs warnings for any mismatches that indicate date hallucination.
         
-        Auto-corrects only when the context makes the correction certain:
-        - Years > current_year -> replace with current_year (likely hallucinated future data)
-        - Logs warnings for years < current_year - 2 (might be stale data)
+        Future years are valid in forecasts, targets, plans, and scenarios.
+        This validator therefore never rewrites a year in model output.  It
+        only logs future years for the L4 semantic quality audit, which can
+        distinguish a labelled forecast from an unlabeled factual claim.
         
         Implementation note: processes matches right-to-left so that
         string position shifts don't affect earlier match positions.
@@ -5613,14 +5884,11 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
         import re
         
         current_year = datetime.now().year
-        corrections = []
-        
         # Find all 4-digit year patterns (1900-2099 range), standalone (not part of larger number)
         year_pattern = re.compile(r'(?<!\d)(19[0-9]{2}|20[0-9]{2})(?!\d)')
-        
-        # Process RIGHT-TO-LEFT so earlier positions stay valid after replacement
+
         matches = list(year_pattern.finditer(content))
-        for match in reversed(matches):
+        for match in matches:
             year = int(match.group())
             start, end = match.start(), match.end()
             
@@ -5629,17 +5897,14 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
             context = content[ctx_start:ctx_end].replace('\n', ' ')
             
             if year > current_year:
-                old_text = match.group()
-                content = content[:start] + str(current_year) + content[end:]
-                corrections.append(f"YEAR_FIX: '{old_text}' -> '{current_year}' (future year) | ctx: ...{context}...")
-                logger.warning(f"GenericAgent {agent_id}: DATE HALLUCATION — year '{old_text}' > current year '{current_year}'. Auto-corrected to '{current_year}'. Context: {context}")
+                logger.info(
+                    f"GenericAgent {agent_id}: DATE CHECK — future year "
+                    f"'{year}' preserved for semantic L4 validation. Context: {context}"
+                )
             elif year < 2020:
                 logger.warning(f"GenericAgent {agent_id}: DATE CHECK — year '{year}' is before 2020. Verify this is intentionally historical data: {context}")
             elif year < current_year - 2:
                 logger.info(f"GenericAgent {agent_id}: DATE CHECK — year '{year}' is >= 2 years old. Verify data freshness: {context}")
-        
-        if corrections:
-            logger.warning(f"GenericAgent {agent_id}: Output date validation applied {len(corrections)} corrections:\n" + "\n".join(corrections))
         
         return content
 

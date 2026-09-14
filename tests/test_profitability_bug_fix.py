@@ -453,7 +453,7 @@ except Exception as e:
     test("SectionType 导入成功", False, str(e))
 
 try:
-    from src.quality.llm_judge import LLMJudgeChecker
+    from src.core.quality.llm_judge import LLMJudgeChecker
     test("LLMJudgeChecker 导入成功", True)
     checker = LLMJudgeChecker(threshold=75.0)
     test("LLMJudgeChecker 实例化成功", True)

@@ -230,6 +230,13 @@ class TestAnalystBenchmark:
         assert quality_score < 70, \
             f"低质量报告不应通过: {quality_score}"
 
+    @pytest.mark.asyncio
+    async def test_low_quality_scores_below_moderate_quality(self, quality_agent):
+        """结构缺口更大的报告不能与中等报告得到相同分数。"""
+        moderate = await quality_agent.execute({"report": MODERATE_QUALITY_REPORT})
+        low = await quality_agent.execute({"report": LOW_QUALITY_REPORT})
+        assert low["quality_score"] < moderate["quality_score"]
+
 
 class TestQualityDimensions:
     """质量维度测试"""

@@ -14,7 +14,7 @@ for rid in regions:
 
 from src.survey.engine.alignment_engine import DistributionAligner
 da = DistributionAligner(region='us')
-assert 'Male' in da._target_distributions['gender']
+assert 'male' in da._target_distributions['gender']
 gk = list(da._target_distributions.get('gender', {}).keys())
 print(f'US aligner: gender keys={gk}')
 

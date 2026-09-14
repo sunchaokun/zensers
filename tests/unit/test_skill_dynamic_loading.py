@@ -114,10 +114,9 @@ class TestValidateAndNormalizeSkillsFix:
 
         norm_req, norm_opt = factory._validate_and_normalize_skills(
             agent_id="test_agent",
-            required_skills=["llm_skill", "stock_analysis"],
+            required_skills=["stock_analysis"],
             optional_skills=[],
         )
-        assert "llm_skill" in norm_req
         assert "stock_analysis" in norm_req
 
     def test_unknown_skill_still_dropped(self, factory):
@@ -134,7 +133,7 @@ class TestValidateAndNormalizeSkillsFix:
 
         norm_req, norm_opt = factory._validate_and_normalize_skills(
             agent_id="data_collection_agent",
-            required_skills=["search_skill", "news_search", "llm_skill", "stock_data"],
+            required_skills=["search_skill", "news_search", "stock_data"],
             optional_skills=[],
         )
         assert "stock_data" in norm_req, "stock_data must survive validation for DATA_COLLECTION"
@@ -146,7 +145,7 @@ class TestValidateAndNormalizeSkillsFix:
 
         norm_req, norm_opt = factory._validate_and_normalize_skills(
             agent_id="deep_analysis_agent",
-            required_skills=["llm_skill", "stock_analysis", "data_analysis"],
+            required_skills=["stock_analysis", "data_analysis"],
             optional_skills=[],
         )
         assert "stock_analysis" in norm_req
@@ -211,7 +210,7 @@ class TestEndToEndSkillAvailability:
         capability = AgentCapability(
             name="Data Collection Agent",
             description="Collects data",
-            required_skills=["search_skill", "news_search", "llm_skill", "stock_data"],
+            required_skills=["search_skill", "news_search", "stock_data"],
         )
 
         agent = factory.create_agent(
@@ -234,7 +233,7 @@ class TestEndToEndSkillAvailability:
         capability = AgentCapability(
             name="Deep Analysis Agent",
             description="Analyzes data",
-            required_skills=["llm_skill", "stock_analysis", "data_analysis"],
+            required_skills=["stock_analysis", "data_analysis"],
         )
 
         agent = factory.create_agent(
@@ -254,24 +253,13 @@ class TestLoadSkillsForCategoryFix:
 
     @pytest.fixture
     def registry(self):
+        from pathlib import Path
         from src.skills.registry import SkillRegistry
-        from src.skills.analysis import (
-            MarketAnalysisSkill, DataAnalysisSkill, StockDataSkill,
-            StockAnalysisSkill, PolicyAnalysisSkill, TechTrendSkill,
-            RiskAnalysisSkill,
-        )
         reg = SkillRegistry()
-        reg.register_core_skills()
-        for name, cls in [
-            ("market_analysis", MarketAnalysisSkill),
-            ("data_analysis", DataAnalysisSkill),
-            ("stock_data", StockDataSkill),
-            ("stock_analysis", StockAnalysisSkill),
-            ("policy_analysis", PolicyAnalysisSkill),
-            ("tech_trend", TechTrendSkill),
-            ("risk_analysis", RiskAnalysisSkill),
-        ]:
-            reg.register_factory(name, cls)
+        # Discovery is manifest-driven. Loading the real manifests keeps this
+        # fixture aligned with production instead of reconstructing metadata
+        # through a legacy hand-written keyword table.
+        reg.init_from_discovery(Path("src/skills"))
         return reg
 
     def test_financial_analysis_category_returns_stock_data(self, registry):
@@ -290,13 +278,13 @@ class TestLoadSkillsForCategoryFix:
         loaded = registry.load_skills_for_category("data-analysis")
         assert "data_analysis" in loaded, f"data-analysis should load data_analysis, got: {loaded}"
 
-    def test_synthesis_category_returns_llm(self, registry):
+    def test_synthesis_category_has_no_legacy_llm_skill(self, registry):
         loaded = registry.load_skills_for_category("synthesis")
-        assert "llm_skill" in loaded, f"synthesis should load llm_skill, got: {loaded}"
+        assert "llm_skill" not in loaded
 
-    def test_calibration_category_returns_llm(self, registry):
+    def test_calibration_category_has_no_legacy_llm_skill(self, registry):
         loaded = registry.load_skills_for_category("calibration")
-        assert "llm_skill" in loaded, f"calibration should load llm_skill, got: {loaded}"
+        assert "llm_skill" not in loaded
 
     def test_factory_skill_instantiated_on_load(self, registry):
         assert "stock_data" not in registry._skills
@@ -309,24 +297,13 @@ class TestDiscoverSkillsFactorySupport:
 
     @pytest.fixture
     def registry(self):
+        from pathlib import Path
         from src.skills.registry import SkillRegistry
-        from src.skills.analysis import (
-            MarketAnalysisSkill, DataAnalysisSkill, StockDataSkill,
-            StockAnalysisSkill, PolicyAnalysisSkill, TechTrendSkill,
-            RiskAnalysisSkill,
-        )
         reg = SkillRegistry()
-        reg.register_core_skills()
-        for name, cls in [
-            ("market_analysis", MarketAnalysisSkill),
-            ("data_analysis", DataAnalysisSkill),
-            ("stock_data", StockDataSkill),
-            ("stock_analysis", StockAnalysisSkill),
-            ("policy_analysis", PolicyAnalysisSkill),
-            ("tech_trend", TechTrendSkill),
-            ("risk_analysis", RiskAnalysisSkill),
-        ]:
-            reg.register_factory(name, cls)
+        # Discovery is manifest-driven. Loading the real manifests keeps this
+        # fixture aligned with production instead of reconstructing metadata
+        # through a legacy hand-written keyword table.
+        reg.init_from_discovery(Path("src/skills"))
         return reg
 
     def test_discover_stock_data_by_keyword(self, registry):
@@ -382,7 +359,7 @@ class TestAddSkillMethod:
         capability = AgentCapability(
             name="Test Agent",
             description="Test",
-            required_skills=["llm_skill"],
+            required_skills=[],
         )
         agent = factory.create_agent("add_skill_test", capability, context={})
         return agent
@@ -404,7 +381,7 @@ class TestAddSkillMethod:
         assert "nonexistent_skill_xyz" not in agent_with_registry._available_skills
 
     def test_add_skill_syncs_session_template(self, agent_with_registry):
-        mock_template = {"skill_names": ["llm_skill"]}
+        mock_template = {"skill_names": []}
         mock_session = MagicMock()
         mock_session.agent_template = mock_template
         agent_with_registry._session = mock_session

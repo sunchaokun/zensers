@@ -31,7 +31,6 @@ from .document_models import (
     GenerationAction,
     DocumentGenerationRequest,
     DocumentGenerationResult,
-    DocumentVersion,
     ValidationError,
 )
 
@@ -70,13 +69,13 @@ class DocumentGenerationAgent(FixedAgent):
     agent_type = "document_generation"
     version = "1.0.0"
     capabilities = [
-        "Word document generation",
-        "PPT document generation",
-        "PDF document generation",
-        "Version management",
-        "Export management",
-        "Preview generation",
-        "Content adjustment"
+        "Word文档生成",
+        "PPT文档生成",
+        "PDF文档生成",
+        "版本管理",
+        "导出管理",
+        "预览生成",
+        "内容调整"
     ]
     
     def __init__(
@@ -322,7 +321,7 @@ class DocumentGenerationAgent(FixedAgent):
         
         return result
     
-    def _handle_produce_document(
+    async def _handle_produce_document(
         self,
         request: DocumentGenerationRequest
     ) -> Dict[str, Any]:
@@ -350,6 +349,13 @@ class DocumentGenerationAgent(FixedAgent):
             research_result = self._load_research_result(task_id)
         
         if not research_result:
+            if request.task_id:
+                return DocumentGenerationResult(
+                    success=True,
+                    task_id=task_id,
+                    output_format=request.output_format,
+                    warning="PENDING: research result is not available yet",
+                ).to_dict()
             return DocumentGenerationResult(
                 success=False,
                 task_id=task_id,
@@ -376,8 +382,9 @@ class DocumentGenerationAgent(FixedAgent):
         try:
             # HTML preview: use ContentOrchestrator (not DocumentGenerator which only does DOCX/PDF)
             if format_value == "html":
-                # 前置图表生成：从 data_points 和段落内容自动配图
-                research_result = self._generate_charts_for_html(research_result)
+                # Chart planning is an LLM stage: it must understand the
+                # section argument before selecting data and a visual form.
+                research_result = await self._generate_charts_for_html(research_result)
 
                 from src.content.content_orchestrator import ContentOrchestrator
                 from src.core.preview_storage import PreviewStorage
@@ -387,6 +394,9 @@ class DocumentGenerationAgent(FixedAgent):
                     research_result=research_result,
                     output_format=html_layout,
                     output_dir=str(PreviewStorage.NEW_DIR),
+                )
+                html_content = self._prepare_html_chart_assets(
+                    html_content, output_path.parent,
                 )
                 output_path.write_text(html_content, encoding="utf-8")
                 
@@ -440,7 +450,6 @@ class DocumentGenerationAgent(FixedAgent):
                 else:
                     preview_html_path = None
 
-            result = None
             if not direct_conversion_ok:
                 from ...core.orchestrator.output.document_generator import (
                     DocumentGenerator,
@@ -471,7 +480,7 @@ class DocumentGenerationAgent(FixedAgent):
                 self._populate_document_content(generator, research_result)
                 
                 # Generate document
-                result = generator.generate(output_path)
+                generator.generate(output_path)
             
             if output_path.exists():
                 file_size = output_path.stat().st_size
@@ -1326,18 +1335,97 @@ class DocumentGenerationAgent(FixedAgent):
 
     # ==================== 图表系统修复：HTML 路径自动配图 ====================
 
-    def _generate_charts_for_html(self, research_result: Dict[str, Any]) -> Dict[str, Any]:
-        """为 HTML 报告生成图表：优先复用管线1结果，不足时补充，总数≤2"""
+    async def _generate_charts_for_html(self, research_result: Dict[str, Any]) -> Dict[str, Any]:
+        """Plan charts with the LLM, then render only validated plans.
+
+        Numeric extraction is deliberately not a fallback here.  A report
+        section may contain many numbers that are not comparable or not
+        decision-relevant; if the planner cannot justify a chart, no chart is
+        produced.
+        """
         if not research_result.get("sections"):
             return research_result
 
         MAX_CHARTS_PER_SECTION = 2
 
-        self._html_charts_from_datapoints(research_result)
-        self._html_charts_from_content(research_result)
+        try:
+            from src.services.chart_planner import ChartPlannerAgent
+            from src.services.chart_generator import ChartConfig, ChartGenerator
+        except ImportError:
+            logger.warning("Chart planner or renderer unavailable; skipping charts")
+            return research_result
+
+        root = Path(__file__).resolve().parent.parent.parent.parent
+        output_dir = root / "data" / "html_reports" / "charts"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        planner = ChartPlannerAgent(output_dir=str(output_dir))
+        topic = str(research_result.get("topic") or research_result.get("title") or "研究报告")
+
+        for section in research_result.get("sections", []):
+            if section.get("charts"):
+                # Charts already attached by the report-generation planner are
+                # already semantic plans; do not mechanically supplement them.
+                continue
+            title = str(section.get("title") or section.get("id") or "章节")
+            content = str(section.get("content") or "")
+            datapoints = section.get("data_points", [])
+            if datapoints:
+                content += "\n\n## 报告已提取的数据点（仅供语义核验）\n"
+                content += json.dumps(datapoints[:80], ensure_ascii=False, indent=2, default=str)
+            try:
+                plans = await planner.plan(content=content, topic=topic, section_title=title)
+            except Exception:
+                logger.exception("LLM chart planning failed: %s", title)
+                continue
+            generator = ChartGenerator(output_dir=str(output_dir))
+            generated = []
+            for plan in plans[:2]:
+                try:
+                    rendered = generator.generate(ChartConfig(
+                        chart_type=plan.chart_type,
+                        title=plan.title,
+                        data=plan.data,
+                        xlabel=plan.xlabel,
+                        ylabel=plan.ylabel,
+                        caption=plan.caption,
+                        source=plan.subtitle or plan.data_source or topic,
+                        unit=plan.unit,
+                    ))
+                    if rendered.success and rendered.image_path:
+                        generated.append({
+                            "path": rendered.image_path,
+                            "chart_id": f"{section.get('id', title)}:llm:{len(generated)}",
+                            "chart_type": plan.chart_type.value,
+                            "title": plan.title,
+                            "caption": plan.caption,
+                            "section_title": title,
+                            "data_ref": plan.data_source,
+                            "source": plan.subtitle or plan.data_source or topic,
+                            "unit": plan.unit,
+                            "insertion_anchor": plan.insertion_anchor,
+                            "anchor_type": plan.anchor_type or "section_end",
+                        })
+                except Exception:
+                    logger.exception("LLM chart rendering failed: %s", plan.title)
+            if generated:
+                section["charts"] = generated
+                logger.info("Generated %d LLM-planned chart(s) for section: %s", len(generated), title)
 
         for section in research_result.get("sections", []):
             charts = section.get("charts", [])
+            unique_charts = []
+            seen_chart_keys = set()
+            for chart in charts:
+                chart_key = chart.get("chart_id") or (
+                    chart.get("path", ""),
+                    chart.get("chart_type", ""),
+                    chart.get("data_ref", ""),
+                )
+                if chart_key in seen_chart_keys:
+                    continue
+                seen_chart_keys.add(chart_key)
+                unique_charts.append(chart)
+            section["charts"] = charts = unique_charts
             if len(charts) <= MAX_CHARTS_PER_SECTION:
                 continue
             planner_charts = [c for c in charts if c.get("insertion_anchor") or c.get("anchor_type")]
@@ -1349,6 +1437,40 @@ class DocumentGenerationAgent(FixedAgent):
                 section["charts"] = planner_charts + other_charts[:needed]
 
         return research_result
+
+    @staticmethod
+    def _prepare_html_chart_assets(html_content: str, output_dir: Path) -> str:
+        """Copy chart assets beside an HTML file and use portable URLs.
+
+        DOCX/PDF conversion needs absolute image paths, but browser HTML must
+        reference assets relative to the served HTML document.  Keep this
+        normalization at the HTML boundary so the converter contract remains
+        unchanged.
+        """
+        output_dir = Path(output_dir)
+        charts_dir = output_dir / "charts"
+        charts_dir.mkdir(parents=True, exist_ok=True)
+
+        def _replace(match):
+            prefix, raw_path, suffix = match.groups()
+            if not raw_path or raw_path.startswith("data:"):
+                return match.group(0)
+            source = Path(raw_path)
+            if not source.is_absolute() or not source.exists() or source.suffix.lower() not in {
+                ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp",
+            }:
+                return match.group(0)
+            destination = charts_dir / source.name
+            try:
+                if source.resolve() != destination.resolve():
+                    shutil.copy2(source, destination)
+            except OSError:
+                logger.warning("Failed to copy HTML chart asset: %s", source)
+                return match.group(0)
+            return f'{prefix}charts/{source.name}{suffix}'
+
+        # Only rewrite quoted img src attributes; leave unrelated URLs intact.
+        return re.sub(r'(<img\b[^>]*\bsrc=["\'])([^"\']+)(["\'])', _replace, html_content, flags=re.IGNORECASE)
 
     # 指标-数值语义校验白名单
     _METRIC_SEMANTIC_RULES = {
@@ -1376,6 +1498,24 @@ class DocumentGenerationAgent(FixedAgent):
                     return False
         return True
 
+    @staticmethod
+    def _chart_metric_family(metric: str) -> str:
+        """Return a conservative comparable-metric key for charting.
+
+        Removing only period and scenario qualifiers lets repeated measures
+        form a time series (for example, revenue in 2024 and 2025) while
+        keeping semantically different percentages separate.
+        """
+        family = str(metric or "").strip().lower()
+        family = re.sub(r"[（(][^）)]*[）)]", "", family)
+        family = re.sub(
+            r"(?:19|20)\d{2}\s*(?:年|q[1-4]|上半年|下半年)?", "", family,
+            flags=re.IGNORECASE,
+        )
+        family = re.sub(r"\s+", "", family)
+        family = re.sub(r"[：:，,。.!！?？、/\\_-]+", "", family)
+        return family
+
     def _html_charts_from_datapoints(self, research_result: Dict[str, Any]) -> None:
         """从 data_points 结构化数据生成图表（最可靠）"""
         try:
@@ -1398,12 +1538,24 @@ class DocumentGenerationAgent(FixedAgent):
 
             categories = []
             values = []
+            units = []
+            year_points = []
+            metric_families = []
             for dp in data_points:
                 metric = dp.get("metric", "")
                 value = dp.get("value", "")
                 unit = dp.get("unit", "")
                 try:
-                    v = float(re.sub(r'[^\d.\-]', '', str(value)))
+                    raw_value = str(value).strip().replace(',', '')
+                    is_parenthesized = raw_value.startswith('(') and raw_value.endswith(')')
+                    if is_parenthesized:
+                        raw_value = raw_value[1:-1].strip()
+                    numeric_text = re.sub(r'[^\d.\-]', '', raw_value)
+                    if not numeric_text:
+                        raise ValueError("empty numeric value")
+                    v = float(numeric_text)
+                    if is_parenthesized:
+                        v = -v
                 except (ValueError, TypeError):
                     continue
                 # 语义校验：跳过明显不合理的数据点
@@ -1412,6 +1564,12 @@ class DocumentGenerationAgent(FixedAgent):
                     continue
                 categories.append(metric[:15])
                 values.append(v)
+                units.append(str(unit).strip())
+                metric_families.append(DocumentGenerationAgent._chart_metric_family(metric))
+                year_match = re.search(r"(?<!\d)((?:19|20)\d{2})(?:年|\b)", metric)
+                year_points.append((year_match.group(1), re.sub(
+                    r"\s*(?:19|20)\d{2}年?\s*", "", metric
+                ).strip() if year_match else "") if year_match else None)
 
             if len(categories) < 2:
                 continue
@@ -1423,39 +1581,72 @@ class DocumentGenerationAgent(FixedAgent):
                     titles = [s.get("title", "") for s in section_sources if isinstance(s, dict) and s.get("title")]
                     if titles:
                         source_str = "；".join(titles[:3])
-                
-                # P2: Detect chart type from data point metrics
-                chart_type = ChartType.BAR
-                metrics_lower = [dp.get("metric", "").lower() for dp in data_points]
-                has_year = any("年" in m or "year" in m or "time" in m for m in metrics_lower)
-                has_share = any("份额" in m or "share" in m or "占比" in m or "rate" in m for m in metrics_lower)
-                
-                if has_year and len(categories) >= 3:
-                    chart_type = ChartType.LINE
-                elif has_share and len(categories) <= 6:
-                    chart_type = ChartType.PIE
-                # else default BAR
-                
-                config = ChartConfig(
-                    chart_type=chart_type,
-                    title=f"{section.get('title', '')[:40]} - 关键数据",
-                    data={"categories": categories[:10], "values": values[:10]},
-                    xlabel="指标",
-                    ylabel="数值",
-                    source=source_str,
-                )
-                result = chart_gen.generate(config)
-                if result.success and result.image_path:
-                    existing = section.get("charts", []) or []
-                    existing.append({
-                        "path": result.image_path,
-                        "caption": f"{section.get('title', '')} - 关键数据",
-                        "section_title": section.get("title", ""),
-                        "insertion_anchor": "",
-                        "anchor_type": "section_end",
-                    })
-                    section["charts"] = existing
-                    logger.info(f"Generated data_points chart: {result.image_path}")
+
+                # A chart must have one unit.  Keep the original order while
+                # splitting mixed financial, volume, and percentage metrics.
+                groups = {}
+                for category, value, unit, year_point, family in zip(
+                    categories, values, units, year_points, metric_families,
+                ):
+                    if unit in {"", "未注明单位", "时间", "时间点", "位", "排名", "名", "年", "日期"}:
+                        continue
+                    if not family:
+                        continue
+                    groups.setdefault((unit or "未注明单位", family), []).append(
+                        {"category": category, "value": value, "year_point": year_point}
+                    )
+
+                for (unit, family), points in groups.items():
+                    if len(points) < 2:
+                        continue
+                    group_categories = [point["category"] for point in points[:10]]
+                    group_values = [point["value"] for point in points[:10]]
+                    group_year_points = [point["year_point"] for point in points]
+                    metrics_lower = [category.lower() for category in group_categories]
+                    has_year = any("年" in metric or "year" in metric or "time" in metric for metric in metrics_lower)
+                    has_share = any("份额" in metric or "share" in metric or "占比" in metric or "构成" in metric for metric in metrics_lower)
+                    all_percent = unit in {"%", "％", "百分比", "百分点"}
+
+                    chart_type = ChartType.BAR
+                    usable_year_points = [point for point in group_year_points if point is not None and point[1]]
+                    if has_year and len(usable_year_points) == len(group_values) and len(group_values) >= 8:
+                        chart_type = ChartType.LINE
+                    elif has_share and all_percent and len(group_categories) <= 6:
+                        chart_type = ChartType.PIE
+
+                    if chart_type is ChartType.LINE:
+                        years = [year for year, _ in usable_year_points[:10]]
+                        series_name = usable_year_points[0][1]
+                        chart_data = {"years": years, "scenarios": {series_name: group_values[:len(years)]}}
+                    else:
+                        chart_data = {"categories": group_categories, "values": group_values}
+
+                    config = ChartConfig(
+                        chart_type=chart_type,
+                        title=f"{section.get('title', '')[:40]} - 关键数据（{unit}）",
+                        data=chart_data,
+                        xlabel="指标",
+                        ylabel=unit,
+                        source=source_str,
+                        unit=unit,
+                    )
+                    result = chart_gen.generate(config)
+                    if result.success and result.image_path:
+                        existing = section.get("charts", []) or []
+                        existing.append({
+                            "path": result.image_path,
+                            "chart_id": f"{section.get('id', section.get('title', 'section'))}:data_points:{unit}",
+                            "chart_type": chart_type.value,
+                            "caption": f"{section.get('title', '')} - 关键数据（{unit}）",
+                            "section_title": section.get("title", ""),
+                            "data_ref": "section.data_points",
+                            "source": source_str,
+                            "unit": unit,
+                            "insertion_anchor": "",
+                            "anchor_type": "section_end",
+                        })
+                        section["charts"] = existing
+                        logger.info(f"Generated data_points chart: {result.image_path} unit={unit}")
             except Exception:
                 logger.exception(f"data_points chart failed: {section.get('title', '')}")
 
@@ -1476,6 +1667,11 @@ class DocumentGenerationAgent(FixedAgent):
             content = section.get("content", "")
             data_points = section.get("data_points", [])
 
+            # Structured data generation is authoritative.  Do not generate
+            # a second chart from the same section's prose after it succeeds.
+            if section.get("charts"):
+                continue
+
             skip_keywords = ["概述", "总结", "结论", "建议", "方法论", "附录", "参考文献", "目录", "摘要"]
             if any(kw in title for kw in skip_keywords):
                 continue
@@ -1492,8 +1688,12 @@ class DocumentGenerationAgent(FixedAgent):
                         existing = section.get("charts", []) or []
                         existing.append({
                             "path": chart_path,
+                            "chart_id": f"{section.get('id', title)}:content:{len(existing)}",
+                            "chart_type": suggestion.chart_type.value,
                             "caption": suggestion.caption or title,
                             "section_title": title,
+                            "data_ref": "section.content",
+                            "source": "content extraction candidate",
                             "insertion_anchor": "",
                             "anchor_type": "section_end",
                         })
@@ -1566,7 +1766,7 @@ class DocumentGenerationAgent(FixedAgent):
         """
         try:
             from docx import Document
-            from docx.shared import Pt
+            from docx.shared import Inches
             from docx.enum.text import WD_ALIGN_PARAGRAPH
             
             doc = Document()
@@ -2035,7 +2235,7 @@ class DocumentGenerationAgent(FixedAgent):
             warning="SKELETON_IMPLEMENTATION: Export logic pending (Week 24)"
         ).to_dict()
     
-    def _handle_get_preview(
+    async def _handle_get_preview(
         self,
         request: DocumentGenerationRequest
     ) -> Dict[str, Any]:
@@ -2058,6 +2258,13 @@ class DocumentGenerationAgent(FixedAgent):
             research_result = self._load_research_result(task_id)
         
         if not research_result:
+            if request.task_id:
+                return DocumentGenerationResult(
+                    success=True,
+                    task_id=task_id,
+                    output_format=request.output_format,
+                    warning="PENDING: research result is not available yet",
+                ).to_dict()
             return DocumentGenerationResult(
                 success=False,
                 task_id=task_id,
@@ -2066,7 +2273,7 @@ class DocumentGenerationAgent(FixedAgent):
             ).to_dict()
         
         # 2. Generate charts for HTML before creating preview
-        research_result = self._generate_charts_for_html(research_result)
+        research_result = await self._generate_charts_for_html(research_result)
         
         # 3. Use ContentOrchestrator to generate HTML preview
         try:
@@ -2081,9 +2288,13 @@ class DocumentGenerationAgent(FixedAgent):
                 output_format=html_layout,
                 output_dir=str(PreviewStorage.NEW_DIR)  # External chart images
             )
+            html_content = self._prepare_html_chart_assets(
+                html_content, PreviewStorage.NEW_DIR,
+            )
             
             # 3. Save HTML file to serving directory
             PreviewStorage.write(task_id, html_content)
+            html_path = PreviewStorage.path(task_id)
             
             logger.info(f"Generated HTML preview for {task_id}")
             
@@ -2091,7 +2302,7 @@ class DocumentGenerationAgent(FixedAgent):
                 success=True,
                 task_id=task_id,
                 output_format=request.output_format,
-                document_path=str(html_path),  # Fix: Use document_path for orchestrator compatibility
+                document_path=str(html_path),
                 preview_path=str(html_path)
             ).to_dict()
             

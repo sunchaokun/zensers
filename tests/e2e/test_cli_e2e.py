@@ -36,39 +36,45 @@ def _skip_if_no_server():
         pytest.skip("API server not reachable")
 
 
+@pytest.fixture
+def api_server():
+    """Require the external API only for tests that actually call it."""
+    _skip_if_no_server()
+
+
 # =========================================================================
 # Test 1: API health + version (no LLM needed)
 # =========================================================================
 class TestAPIBasic:
-    def test_health(self):
+    def test_health(self, api_server):
         import httpx
         r = httpx.get(f"{API_URL}/api/v1/health", timeout=5)
         assert r.status_code == 200
         data = r.json()
         assert data["status"] == "ok"
 
-    def test_version(self):
+    def test_version(self, api_server):
         import httpx
         r = httpx.get(f"{API_URL}/api/v1/version", timeout=5)
         assert r.status_code == 200
         data = r.json()
         assert "local_version" in data or "version" in data
 
-    def test_llm_models(self):
+    def test_llm_models(self, api_server):
         import httpx
         r = httpx.get(f"{API_URL}/api/v1/llm/models", timeout=5)
         assert r.status_code == 200
         data = r.json()
         assert "providers" in data or "models" in data
 
-    def test_llm_config(self):
+    def test_llm_config(self, api_server):
         import httpx
         r = httpx.get(f"{API_URL}/api/v1/llm/config", timeout=5)
         assert r.status_code == 200
         data = r.json()
         assert "provider" in data or "model" in data
 
-    def test_llm_health(self):
+    def test_llm_health(self, api_server):
         import httpx
         r = httpx.get(f"{API_URL}/api/v1/llm/health", timeout=15)
         assert r.status_code == 200
@@ -81,21 +87,21 @@ class TestAPIBasic:
 # =========================================================================
 class TestClientE2E:
     @pytest.mark.asyncio
-    async def test_client_health(self):
+    async def test_client_health(self, api_server):
         from cli.client import ZensersClient
         async with ZensersClient(base_url=API_URL) as client:
             result = await client.version_info()
             assert "local_version" in result or "version" in result
 
     @pytest.mark.asyncio
-    async def test_client_llm_models(self):
+    async def test_client_llm_models(self, api_server):
         from cli.client import ZensersClient
         async with ZensersClient(base_url=API_URL) as client:
             result = await client.llm_models()
             assert "providers" in result or "models" in result
 
     @pytest.mark.asyncio
-    async def test_client_research_sessions_empty(self):
+    async def test_client_research_sessions_empty(self, api_server):
         from cli.client import ZensersClient
         async with ZensersClient(base_url=API_URL) as client:
             result = await client.research_sessions(limit=5)
@@ -107,7 +113,7 @@ class TestClientE2E:
 # =========================================================================
 class TestResearchSessionE2E:
     @pytest.mark.asyncio
-    async def test_start_session_and_interact(self):
+    async def test_start_session_and_interact(self, api_server):
         """
         Full E2E: start a research session via API, verify LLM responds,
         then check session status and message history.
@@ -196,7 +202,7 @@ class TestCLISubprocessE2E:
         )
         assert result.returncode == 0, f"CLI config show failed: {result.stderr}"
 
-    def test_cli_session_list(self):
+    def test_cli_session_list(self, api_server):
         import subprocess
         env = os.environ.copy()
         env["ZENSERS_API_URL"] = API_URL
@@ -208,7 +214,7 @@ class TestCLISubprocessE2E:
         )
         assert result.returncode == 0, f"CLI session list failed: {result.stderr}"
 
-    def test_cli_llm_config(self):
+    def test_cli_llm_config(self, api_server):
         import subprocess
         env = os.environ.copy()
         env["ZENSERS_API_URL"] = API_URL
@@ -220,7 +226,7 @@ class TestCLISubprocessE2E:
         )
         assert result.returncode == 0, f"CLI llm config failed: {result.stderr}"
 
-    def test_cli_llm_health(self):
+    def test_cli_llm_health(self, api_server):
         import subprocess
         env = os.environ.copy()
         env["ZENSERS_API_URL"] = API_URL
@@ -232,7 +238,7 @@ class TestCLISubprocessE2E:
         )
         assert result.returncode == 0, f"CLI llm health failed: {result.stderr}"
 
-    def test_cli_task_status_no_args(self):
+    def test_cli_task_status_no_args(self, api_server):
         import subprocess
         env = os.environ.copy()
         env["ZENSERS_API_URL"] = API_URL
@@ -249,7 +255,7 @@ class TestCLISubprocessE2E:
 # Test 5: Research start via CLI subprocess (real LLM)
 # =========================================================================
 class TestCLIResearchE2E:
-    def test_cli_research_no_interactive(self):
+    def test_cli_research_no_interactive(self, api_server):
         """
         Start a research session via CLI with --no-interactive.
         In non-interactive mode, the CLI starts the session and prints the session ID,

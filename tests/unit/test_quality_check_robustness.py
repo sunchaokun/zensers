@@ -86,8 +86,8 @@ class TestQualityCheckWithRealContent:
         assert passed, f"正常内容应通过，得分 {score}"
 
     @pytest.mark.asyncio
-    async def test_one_short_section_passes(self):
-        """一个章节内容极短 → 不应全盘崩溃"""
+    async def test_one_placeholder_section_blocks_delivery(self):
+        """一个章节是占位内容 → 必须阻断完整通过"""
         agent = QualityCheckAgent(agent_id="test", storage_path="/tmp")
         contents = dict(SECTION_CONTENTS)
         contents["财务健康、风险评估与季度业绩波动"] = "数据不足，本章节待补充。"
@@ -106,8 +106,22 @@ class TestQualityCheckWithRealContent:
         for i in result.get("issues", []):
             print(f"  [{i.get('severity','?')}] {i.get('message','')[:80]}")
 
-        # 7 个章节完整 + 1 个短 → word_count 仍大幅超过 1000，应通过
-        assert passed, f"仅一章较短时仍应通过，得分 {score}"
+        assert not passed, f"占位章节不能通过完整质量门禁，得分 {score}"
+
+    @pytest.mark.asyncio
+    async def test_top_level_content_cannot_mask_empty_sections(self):
+        """顶层摘要有内容时，空章节仍必须被识别。"""
+        agent = QualityCheckAgent(agent_id="test", storage_path="/tmp")
+        result = await agent.execute({
+            "report": {
+                "title": "masked report",
+                "content": "这是一个很长的报告摘要，不能替代章节正文。" * 200,
+                "sections": [{"title": "空章节", "content": ""}] * 3,
+            },
+            "standards": None,
+        })
+        assert result["passed"] is False
+        assert any(i.get("type") == "chapter_content_missing" for i in result["issues"])
 
     @pytest.mark.asyncio
     async def test_no_hallucination_false_positive(self):

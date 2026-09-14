@@ -164,7 +164,7 @@ class TestReportCheckerSearchAudit:
     def test_no_violation(self):
         data = {
             "execution_logs": [
-                {"section_id": "A", "skills_used": ["llm_skill"]},
+                {"section_id": "A", "skills_used": ["intrinsic_llm"]},
             ],
         }
         context = {"synthesis_section_ids": ["A"]}
@@ -174,7 +174,7 @@ class TestReportCheckerSearchAudit:
     def test_violation_detected(self):
         data = {
             "execution_logs": [
-                {"section_id": "A", "skills_used": ["search_skill", "llm_skill"]},
+                {"section_id": "A", "skills_used": ["search_skill", "intrinsic_llm"]},
             ],
         }
         context = {"synthesis_section_ids": ["A"]}
@@ -198,7 +198,7 @@ class TestReportCheckerIntegration:
                 {"section_id": "C", "core_claims": ["消费稳定增长"]},
             ],
             "execution_logs": [
-                {"section_id": "A", "skills_used": ["llm_skill"]},
+                {"section_id": "A", "skills_used": ["intrinsic_llm"]},
             ],
         }
         context = {"synthesis_section_ids": ["A"]}

@@ -191,7 +191,7 @@ class TestStage1UserInputToFramework:
 
         with patch("src.api.research_api.session_manager") as mock_sm:
             mock_sm.get.return_value = session
-            with patch("src.skills.llm_skill.LLMSkill", return_value=mock_llm):
+            with patch("src.api.research_api.call_llm", new=mock_llm.execute):
                 with patch("src.core.progress_streamer.ProgressStreamer"):
                     result = await api._handle_chat_mode(session_id, FIXTURE_TOPIC)
 
@@ -214,7 +214,7 @@ class TestStage1UserInputToFramework:
 
         with patch("src.api.research_api.session_manager") as mock_sm:
             mock_sm.get.return_value = session
-            with patch("src.skills.llm_skill.LLMSkill", return_value=mock_llm):
+            with patch("src.api.research_api.call_llm", new=mock_llm.execute):
                 with patch("src.core.progress_streamer.ProgressStreamer"):
                     result = await api._llm_converse(session_id, "新能源汽车市场怎么样？")
 
@@ -738,7 +738,7 @@ class TestAllPromptsRender:
 
         with patch("src.api.research_api.session_manager") as mock_sm:
             mock_sm.get.return_value = session
-            with patch("src.skills.llm_skill.LLMSkill", return_value=mock_llm):
+            with patch("src.api.research_api.call_llm", new=mock_llm.execute):
                 with patch("src.config.settings.settings") as mock_settings:
                     mock_settings.llm.model = "test"
                     mock_settings.llm.max_tokens = 1024
@@ -763,7 +763,7 @@ class TestAllPromptsRender:
 
         with patch("src.api.research_api.session_manager") as mock_sm:
             mock_sm.get.return_value = session
-            with patch("src.skills.llm_skill.LLMSkill", return_value=mock_llm):
+            with patch("src.api.research_api.call_llm", new=mock_llm.execute):
                 with patch("src.config.settings.settings") as mock_settings:
                     mock_settings.llm.model = "test"
                     mock_settings.llm.max_tokens = 1024
@@ -786,7 +786,7 @@ class TestAllPromptsRender:
 
         with patch("src.api.research_api.session_manager") as mock_sm:
             mock_sm.get.return_value = session
-            with patch("src.skills.llm_skill.LLMSkill", return_value=mock_llm):
+            with patch("src.api.research_api.call_llm", new=mock_llm.execute):
                 with patch("src.config.settings.settings") as mock_settings:
                     mock_settings.llm.model = "test"
                     mock_settings.llm.max_tokens = 1024
@@ -811,7 +811,7 @@ class TestAllPromptsRender:
 
         with patch("src.api.research_api.session_manager") as mock_sm:
             mock_sm.get.return_value = session
-            with patch("src.skills.llm_skill.LLMSkill", return_value=mock_llm):
+            with patch("src.api.research_api.call_llm", new=mock_llm.execute):
                 with patch("src.config.settings.settings") as mock_settings:
                     mock_settings.llm.model = "test"
                     mock_settings.llm.max_tokens = 1024
@@ -839,7 +839,7 @@ class TestAllPromptsRender:
 
         with patch("src.api.research_api.session_manager") as mock_sm:
             mock_sm.get.return_value = session
-            with patch("src.skills.llm_skill.LLMSkill", return_value=mock_llm):
+            with patch("src.api.research_api.call_llm", new=mock_llm.execute):
                 with patch("src.config.settings.settings") as mock_settings:
                     mock_settings.llm.model = "test"
                     mock_settings.llm.max_tokens = 1024
@@ -861,7 +861,7 @@ class TestAllPromptsRender:
 
         with patch("src.api.research_api.session_manager") as mock_sm:
             mock_sm.get.return_value = session
-            with patch("src.skills.llm_skill.LLMSkill", return_value=mock_llm):
+            with patch("src.api.research_api.call_llm", new=mock_llm.execute):
                 with patch("src.config.settings.settings") as mock_settings:
                     mock_settings.llm.model = "test"
                     mock_settings.llm.max_tokens = 1024
@@ -883,7 +883,7 @@ class TestAllPromptsRender:
 
         with patch("src.api.research_api.session_manager") as mock_sm:
             mock_sm.get.return_value = session
-            with patch("src.skills.llm_skill.LLMSkill", return_value=mock_llm):
+            with patch("src.api.research_api.call_llm", new=mock_llm.execute):
                 with patch("src.config.settings.settings") as mock_settings:
                     mock_settings.llm.model = "test"
                     mock_settings.llm.max_tokens = 1024
@@ -929,9 +929,10 @@ class TestAllPromptsRender:
         with patch("src.config.settings.settings") as mock_settings:
             mock_settings.llm.model = "test"
             mock_settings.llm.max_tokens = 1024
-            result = await api._retry_json_only(
-                mock_llm, "system prompt", {"model": "test"}, "test_prompt_030"
-            )
+            with patch("src.api.research_api.call_llm", new=mock_llm.execute):
+                result = await api._retry_json_only(
+                    "system prompt", {"model": "test"}, "test_prompt_030"
+                )
 
         assert result is not None
 
@@ -946,7 +947,7 @@ class TestAllPromptsRender:
 
         with patch("src.api.research_api.session_manager") as mock_sm:
             mock_sm.get.return_value = session
-            with patch("src.skills.llm_skill.LLMSkill", return_value=mock_llm):
+            with patch("src.api.research_api.call_llm", new=mock_llm.execute):
                 with patch("src.core.orchestrator.execution.coordinator.cancel_manager.get_cancel_manager") as mock_cm:
                     mock_cm.return_value.is_paused.return_value = False
                     with patch("src.core.session_streamer.SessionStreamer"):
@@ -992,7 +993,8 @@ class TestBuildInitialPromptBugFix:
 # ============================================================================
 
 class TestHandleQualityActionReturnsDict:
-    def test_returns_error_dict_when_no_quality_state(self):
+    @pytest.mark.asyncio
+    async def test_returns_error_dict_when_no_quality_state(self):
         from src.api.research_api import ResearchAPI
         api = ResearchAPI.__new__(ResearchAPI)
         api._session_locks = {}
@@ -1002,11 +1004,12 @@ class TestHandleQualityActionReturnsDict:
         with patch("src.api.research_api.session_manager") as mock_sm:
             mock_sm.get.return_value = _make_session(mode="research")
             with patch.object(api, "_get_quality_lock", return_value=MagicMock()):
-                result = asyncio.get_event_loop().run_until_complete(api.handle_quality_action(mock_request))
+                result = await api.handle_quality_action(mock_request)
         assert isinstance(result, dict), "Must always return dict, never None"
         assert "error" in result
 
-    def test_returns_error_dict_when_no_sections(self):
+    @pytest.mark.asyncio
+    async def test_returns_error_dict_when_no_sections(self):
         from src.api.research_api import ResearchAPI
         api = ResearchAPI.__new__(ResearchAPI)
         api._session_locks = {}
@@ -1022,16 +1025,16 @@ class TestHandleQualityActionReturnsDict:
             lock.__aenter__ = AsyncMock(return_value=None)
             lock.__aexit__ = AsyncMock(return_value=None)
             with patch.object(api, "_get_quality_lock", return_value=lock):
-                result = asyncio.get_event_loop().run_until_complete(api.handle_quality_action(mock_request))
+                result = await api.handle_quality_action(mock_request)
         assert isinstance(result, dict)
 
 
 # ============================================================================
-# Bug Fix: _on_sse_disconnect stores task reference
+# Contract: _on_sse_disconnect is transport-only
 # ============================================================================
 
 class TestSSEDisconnectTaskStorage:
-    def test_disconnect_stores_task_reference(self):
+    def test_disconnect_does_not_spawn_duplicate_task(self):
         from src.api.research_api import ResearchAPI
         api = ResearchAPI.__new__(ResearchAPI)
         api._background_tasks = {}
@@ -1041,13 +1044,22 @@ class TestSSEDisconnectTaskStorage:
 
         with patch("src.api.research_api.session_manager") as mock_sm:
             mock_sm.get.return_value = session
-            with patch("src.api.research_api.asyncio") as mock_aio:
+            with patch("src.api.research_api.safe_create_task") as mock_create_task:
                 mock_task = MagicMock()
-                mock_aio.create_task.return_value = mock_task
+
+                def _capture_task(coro, **kwargs):
+                    coro.close()
+                    return mock_task
+
+                mock_create_task.side_effect = _capture_task
                 api._on_sse_disconnect("test_sse_001")
 
-        assert mock_aio.create_task.called
-        assert len(api._background_tasks) > 0, "Task reference must be stored"
+        # The executor task is created when research starts and is tracked in
+        # _executor_tasks. A transport disconnect must not launch a second
+        # background task or alter the business execution state.
+        assert not mock_create_task.called
+        assert session["research_result"]["status"] == "running"
+        assert api._background_tasks == {}
 
 
 # ============================================================================
@@ -1061,28 +1073,28 @@ class TestExtractJsonFromLlmContent:
         return ResearchAPI.__new__(ResearchAPI)
 
     def test_json_in_code_fence(self, api):
-        result = api._extract_json_from_llm_content('```json\n{"action": "ok"}\n```')
+        result, _thinking = api._extract_json_from_llm_content('```json\n{"action": "ok"}\n```')
         assert result == '{"action": "ok"}'
 
     def test_raw_json_object(self, api):
-        result = api._extract_json_from_llm_content('{"action": "ok", "message": "hi"}')
+        result, _thinking = api._extract_json_from_llm_content('{"action": "ok", "message": "hi"}')
         assert result is not None
         assert '"action"' in result
 
     def test_json_with_think_tags(self, api):
-        result = api._extract_json_from_llm_content('<think>reasoning</think>\n{"action": "ok"}')
+        result, _thinking = api._extract_json_from_llm_content('<think>reasoning</think>\n{"action": "ok"}')
         assert result is not None
 
     def test_json_embedded_in_text(self, api):
-        result = api._extract_json_from_llm_content('Here is the result:\n{"action": "ok"}\nEnd.')
+        result, _thinking = api._extract_json_from_llm_content('Here is the result:\n{"action": "ok"}\nEnd.')
         assert result is not None
 
     def test_no_json_returns_none(self, api):
-        result = api._extract_json_from_llm_content("Just plain text with no JSON.")
+        result, _thinking = api._extract_json_from_llm_content("Just plain text with no JSON.")
         assert result is None
 
     def test_nested_braces(self, api):
-        result = api._extract_json_from_llm_content('{"outer": {"inner": "value"}}')
+        result, _thinking = api._extract_json_from_llm_content('{"outer": {"inner": "value"}}')
         assert result is not None
 
 
@@ -1193,7 +1205,7 @@ class TestSectionsTreePreservation:
 
         with patch("src.api.research_api.session_manager") as mock_sm:
             mock_sm.get.return_value = session
-            with patch("src.skills.llm_skill.LLMSkill", return_value=mock_llm):
+            with patch("src.api.research_api.call_llm", new=mock_llm.execute):
                 with patch("src.config.settings.settings") as mock_settings:
                     mock_settings.llm.model = "test"
                     mock_settings.llm.max_tokens = 1024
@@ -1229,11 +1241,19 @@ class TestSectionsTreePreservation:
 
         with patch("src.api.research_api.session_manager") as mock_sm:
             mock_sm.get.return_value = session
-            with patch("src.skills.llm_skill.LLMSkill", return_value=mock_llm):
+            with patch("src.api.research_api.call_llm", new=mock_llm.execute):
                 with patch("src.config.settings.settings") as mock_settings:
                     mock_settings.llm.model = "test"
                     mock_settings.llm.max_tokens = 1024
-                    result = await api._handle_framework_mode(session_id, "确认")
+                    mock_executor = MagicMock()
+                    mock_executor.execute = AsyncMock(return_value={"status": "completed"})
+                    with patch("src.api.research_executor.get_executor", return_value=mock_executor):
+                        with patch("src.api.research_api.safe_create_task") as mock_create_task:
+                            def _close_coro(coro, **kwargs):
+                                coro.close()
+                                return MagicMock()
+                            mock_create_task.side_effect = _close_coro
+                            result = await api._handle_framework_mode(session_id, "确认")
 
         fw = session["research_context"].get("framework", {})
         assert fw.get("sections_tree") is not None, "sections_tree must be preserved when sections match"
@@ -1266,7 +1286,7 @@ class TestSectionsTreePreservation:
 
         with patch("src.api.research_api.session_manager") as mock_sm:
             mock_sm.get.return_value = session
-            with patch("src.skills.llm_skill.LLMSkill", return_value=mock_llm):
+            with patch("src.api.research_api.call_llm", new=mock_llm.execute):
                 with patch("src.config.settings.settings") as mock_settings:
                     mock_settings.llm.model = "test"
                     mock_settings.llm.max_tokens = 1024
@@ -1311,7 +1331,7 @@ class TestSectionsTreePreservation:
 
         with patch("src.api.research_api.session_manager") as mock_sm:
             mock_sm.get.return_value = session
-            with patch("src.skills.llm_skill.LLMSkill", return_value=mock_llm):
+            with patch("src.api.research_api.call_llm", new=mock_llm.execute):
                 with patch("src.config.settings.settings") as mock_settings:
                     mock_settings.llm.model = "test"
                     mock_settings.llm.max_tokens = 1024

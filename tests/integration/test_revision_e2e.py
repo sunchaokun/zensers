@@ -349,6 +349,26 @@ class TestE2EPreconditionAndGate:
         assert "预览不存在" in str(result) or "重新生成" in str(result)
 
     @pytest.mark.asyncio
+    async def test_legacy_revision_endpoint_forwards_base_report_version(self):
+        from src.api.research_api import ResearchAPI
+
+        api = ResearchAPI.__new__(ResearchAPI)
+        api._handle_v2_revision = AsyncMock(return_value={"status": "conflict"})
+
+        result = await api.revise_sections("sid", ["市场规模"], "更新数据", 4)
+
+        assert result == {"status": "conflict"}
+        api._handle_v2_revision.assert_awaited_once_with(
+            "sid",
+            {
+                "adjustment": "更新数据",
+                "aspects": ["市场规模"],
+                "revision_type": "section",
+                "base_report_version": 4,
+            },
+        )
+
+    @pytest.mark.asyncio
     async def test_handle_v2_revision_rejects_concurrent_task(self):
         from src.api.research_api import ResearchAPI
         with patch("src.api.research_api.ResearchOrchestrator"), \
@@ -377,6 +397,37 @@ class TestE2EPreconditionAndGate:
             result = await api._handle_v2_revision("sid", {"adjustment": "修改"})
 
         assert "正在执行" in str(result) or "等待" in str(result)
+
+    @pytest.mark.asyncio
+    async def test_handle_v2_revision_rejects_stale_report_version(self):
+        from src.api.research_api import ResearchAPI
+        with patch("src.api.research_api.ResearchOrchestrator"), \
+             patch("src.api.research_api.PreviewGenerator"), \
+             patch("src.api.research_api.ConversationToolSet"):
+            api = ResearchAPI()
+        api._revision_task = None
+        api._executor_tasks = {}
+
+        session = {
+            "research_result": {
+                "status": "completed",
+                "report": {"sections": [{"id": "ch1", "title": "A", "content": "B"}]},
+            },
+            "report_context": {"report_version": 3, "report_phase": "completed"},
+            "quality_state": {"phase": "reviewing", "section_scores": {}},
+        }
+
+        with patch("src.api.research_api.session_manager") as sm, \
+             patch("src.api.research_api.PreviewStorage") as mock_ps:
+            sm.get.return_value = session
+            mock_ps.path.return_value.exists.return_value = True
+            result = await api._handle_v2_revision(
+                "sid", {"adjustment": "修改", "base_report_version": 2}
+            )
+
+        assert result["status"] == "conflict"
+        assert result["error_code"] == "REPORT_VERSION_CONFLICT"
+        assert result["current_report_version"] == 3
 
     @pytest.mark.asyncio
     async def test_gate_blocks_all_invalid_states(self):

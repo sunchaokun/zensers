@@ -42,6 +42,16 @@ class TestSearchSkill:
         assert result["success"] is False
 
     @pytest.mark.asyncio
+    async def test_search_accepts_list_query_from_llm_payload(self, skill):
+        with patch.object(skill, "_do_search", new_callable=AsyncMock) as mock_search:
+            mock_search.return_value = []
+            result = await skill.execute(query=["市场规模", "2025", "中国"], max_results=5)
+
+        assert result["success"] is True
+        assert result["query"] == "市场规模 2025 中国"
+        assert mock_search.call_args.kwargs["query"] == "市场规模 2025 中国"
+
+    @pytest.mark.asyncio
     async def test_search_with_site_filter(self, skill):
         """测试站点过滤"""
         with patch.object(skill, "_do_search", new_callable=AsyncMock) as mock_search:
@@ -91,3 +101,36 @@ class TestSearchSkill:
         assert result["success"] is True
         assert "query" in result
         assert result["query"] == "测试关键词"
+
+
+class TestMultiSearchOptionalProviders:
+    def test_missing_baidu_package_is_cached_as_unavailable(self, monkeypatch):
+        from src.skills.search_skill import MultiSearchSkill
+
+        monkeypatch.setattr(MultiSearchSkill, "_BAIDU_API_AVAILABLE", None)
+        with patch.dict("sys.modules", {"baidu_serp_api": None}):
+            assert MultiSearchSkill._baidu_api_available() is False
+            # The second check must use the cached capability result rather
+            # than importing/retrying the broken optional provider again.
+            assert MultiSearchSkill._baidu_api_available() is False
+
+    @pytest.mark.asyncio
+    async def test_baidu_http_200_is_success(self, monkeypatch):
+        from src.skills.search_skill import MultiSearchSkill
+
+        skill = MultiSearchSkill()
+        monkeypatch.setattr(
+            "asyncio.to_thread",
+            AsyncMock(return_value={
+                "code": 200, "msg": "ok",
+                "data": {"results": [{
+                    "title": "测试结果", "url": "https://example.test",
+                    "description": "测试摘要",
+                }]},
+            }),
+        )
+        results = await skill._search_with_baidu_api("测试", 3)
+        assert results == [{
+            "title": "测试结果", "href": "https://example.test",
+            "body": "测试摘要",
+        }]

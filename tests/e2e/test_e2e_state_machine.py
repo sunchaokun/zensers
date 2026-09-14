@@ -37,11 +37,11 @@ class TestStateMachineInvalidTransitions:
         with pytest.raises(Exception):
             sm.transition(ConversationState.PREVIEWING)
 
-    def test_cancelled_to_executing_raises(self):
+    def test_cancelled_to_executing_is_allowed_for_checkpoint_resume(self):
         sm = ConversationStateMachine(research_id="test_2_1e")
         sm.transition(ConversationState.CANCELLED)
-        with pytest.raises(Exception):
-            sm.transition(ConversationState.EXECUTING)
+        sm.transition(ConversationState.EXECUTING)
+        assert sm.current_state == ConversationState.EXECUTING
 
     def test_completed_to_executing_raises(self):
         sm = ConversationStateMachine(research_id="test_2_1f")
@@ -104,20 +104,20 @@ class TestFrameworkConfirmWhilePaused:
 
 
 class TestResumeFromCancelled:
-    """Scenario 2.4: Resume from CANCELLED — not allowed"""
+    """Scenario 2.4: CANCELLED is resumable only through an explicit checkpoint."""
 
-    def test_cancelled_state_is_terminal(self):
+    def test_cancelled_state_allows_only_explicit_resume_paths(self):
         sm = ConversationStateMachine(research_id="test_2_4")
         sm.transition(ConversationState.CANCELLED)
-        with pytest.raises(Exception):
-            sm.transition(ConversationState.EXECUTING)
+        assert sm.can_transition_to(ConversationState.EXECUTING)
+        assert sm.can_transition_to(ConversationState.PAUSED)
         with pytest.raises(Exception):
             sm.transition(ConversationState.FRAMEWORK_CONFIRM)
         with pytest.raises(Exception):
             sm.transition(ConversationState.COMPLETED)
 
     @pytest.mark.asyncio
-    async def test_cancelled_session_resume_returns_error(self, client, cleanup_test_sessions):
+    async def test_cancelled_session_resume_starts_new_generation(self, client, cleanup_test_sessions):
         start_result = await client.quick_start(
             user_input="test cancel resume",
             template_id="industry_research",
@@ -135,8 +135,8 @@ class TestResumeFromCancelled:
 
         resume_result = await client.resume_research(session_id)
         resume_status = resume_result.get("status", "")
-        assert resume_status in ("cancelled", "failed"), \
-            f"Cancelled session should not resume: got {resume_status}"
+        assert resume_status == "resumed", \
+            f"A cancelled session with a saved checkpoint should resume: got {resume_status}"
 
 
 class TestDoubleConfirmIdempotent:

@@ -68,6 +68,10 @@ class DataCollectionAgent(FixedAgent):
             "description": "News API",
         },
     }
+
+    def __init__(self, *args, search_gateway=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.search_gateway = search_gateway
     
     def validate_input(self, task_input: Dict[str, Any]) -> tuple[bool, str]:
         """Validate input parameters."""
@@ -108,7 +112,16 @@ class DataCollectionAgent(FixedAgent):
         for source in data_sources:
             try:
                 if source == "web_search":
-                    result = self._collect_from_web(query, max_results, filters)
+                    if self.search_gateway is not None:
+                        result = await self._collect_from_gateway(query, max_results, filters)
+                    else:
+                        result = {
+                            "success": False,
+                            "data": [],
+                            "source": "web_search",
+                            "error": "SearchGateway is required for web_search; mock data is disabled",
+                            "error_class": "gateway_required",
+                        }
                 elif source == "industry_db":
                     result = self._collect_from_database(query, max_results, filters)
                 elif source == "news_api":
@@ -182,50 +195,54 @@ class DataCollectionAgent(FixedAgent):
             "errors": errors,
         }
     
-    def _collect_from_web(
-        self, 
-        query: str, 
-        max_results: int, 
-        filters: Dict
+    async def _collect_from_gateway(
+        self,
+        query: str,
+        max_results: int,
+        filters: Dict,
     ) -> Dict[str, Any]:
-        """Collect data from web search.
-        
-        Actual implementation can integrate search engine APIs (e.g., Google, Bing, Baidu).
-        This provides a simplified implementation.
-        """
-        # Simulated search results
-        # Actual implementation should call search engine API
-        
-        # Generate richer mock data
-        templates = [
-            f"In-depth analysis report on {query}: Market size continues to grow, with an expected CAGR exceeding 15% over the next three years.",
-            f"{query} industry competitive landscape analysis: Leading companies hold concentrated market share, with CR5 reaching 65%, showing clear industry consolidation trends.",
-            f"{query} technology development trends: Intelligence, digitalization, and green technology are the main directions, with continuous R&D investment growth.",
-            f"{query} policy environment analysis: Multiple support policies introduced, including financial subsidies and tax incentives.",
-            f"{query} value chain analysis: Upstream supply is stable, midstream manufacturing capacity is improving, downstream application scenarios are expanding.",
-        ]
-        
-        mock_data = [
+        """Collect real results through the task-scoped SearchGateway."""
+        from src.core.search import SearchRequest
+
+        response = await self.search_gateway.search(
+            SearchRequest(
+                query=query,
+                objective="data_collection",
+                max_results=max(1, int(max_results)),
+                allowed_domains=filters.get("allowed_domains"),
+                time_range=filters.get("time_range") or filters.get("date_range"),
+            ),
+            scope="data_collection",
+        )
+        data = [
             {
-                "title": f"{query} - Research Report {i+1}",
-                "url": f"https://example.com/result/{query}/{i+1}",
-                "snippet": templates[i % len(templates)] + f" Detailed data shows that {query} related indicators show positive development trends." * 5,
-                "content": templates[i % len(templates)] + f"\n\nDetailed Analysis:\n\n" + f"In-depth research on {query} indicates this field has broad development prospects." * 20,
-                "source": "web_search",
-                "relevance_score": 0.95 - i * 0.02,
+                "title": item.title,
+                "url": item.url,
+                "snippet": item.snippet,
+                "content": item.snippet,
+                "source": item.source,
+                "quality_score": item.quality_score,
+                "published_at": item.published_at,
+                # Preserve the gateway's auditable evidence object fields.
+                # Downstream grounding must not reconstruct provenance from
+                # a display title or URL after this boundary.
+                "evidence_id": item.evidence_id,
+                "provenance_id": item.provenance_id,
+                "evidence_excerpt": item.excerpt or item.snippet,
+                "locator": item.locator or item.url,
+                "task_id": item.task_id,
+                "request_id": item.request_id,
+                "retrieved_at": item.retrieved_at,
                 "collected_at": datetime.now().isoformat(),
-                "data_points": {
-                    "market_size": f"{100 + i * 50} Billion CNY",
-                    "growth_rate": f"{15 + i * 2}%",
-                }
             }
-            for i in range(min(max_results, 20))  # Increased to 20 items
+            for item in response.results
         ]
-        
         return {
-            "success": True,
-            "data": mock_data,
-            "source": "web_search",
+            "success": response.success,
+            "data": data[:max_results],
+            "source": response.provider,
+            "error": response.message,
+            "search_response": response,
         }
     
     def _collect_from_database(

@@ -182,7 +182,10 @@ class RequirementAnalysisAgent(FixedAgent):
         
         # Identify research type
         research_type = "market_research"  # Default
-        if any(kw in user_input_lower for kw in ["invest", "valuation", "financing", "pitch"]):
+        if any(kw in user_input_lower for kw in [
+            "invest", "investment", "valuation", "financing", "pitch",
+            "投资", "估值", "融资", "募资", "投资机会",
+        ]):
             research_type = "investment"
         elif any(kw in user_input_lower for kw in ["policy", "regulation", "compliance"]):
             research_type = "policy"

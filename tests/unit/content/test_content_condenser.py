@@ -168,6 +168,13 @@ class TestContentCondenserCondense:
         assert isinstance(result["items"], list)
         assert len(result["items"]) >= 2
         assert len(result["items"]) <= 5
+        assert len(result["all_items"]) >= len(result["items"])
+
+    def test_all_items_keeps_late_facts_for_pagination(self, condenser):
+        content = "。".join(f"第{i}个事实：市场数据{i}万辆" for i in range(1, 9)) + "。"
+        result = condenser.condense(content, title="完整事实")
+        assert len(result["all_items"]) == 8
+        assert "第8个事实" in " ".join(result["all_items"])
     
     def test_condense_preserves_key_numbers(self, condenser):
         content = (
@@ -189,6 +196,17 @@ class TestContentCondenserCondense:
         result = condenser.condense(content, title="竞争格局", table_data=table_data)
         assert "chart_suggestions" in result
         assert len(result["chart_suggestions"]) >= 1
+
+    def test_condense_preserves_late_facts_in_english_revision(self, condenser):
+        """English long-form revisions must not lose facts after the first line."""
+        content = (
+            "Asia Pacific reached 5.1B USD in 2024, driven by China's 3.2B "
+            "and India's 0.8B markets. The region's CAGR of 24.3% outpaces "
+            "the global average of 18.2%. Key verticals: semiconductor "
+            "manufacturing (+31%), enterprise SaaS (+27%), fintech (+22%)."
+        )
+        result = condenser.condense(content, title="Market Overview")
+        assert "semiconductor" in " ".join(result["items"])
 
 
 class TestContentCondenserIntegration:
@@ -229,3 +247,30 @@ class TestContentCondenserIntegration:
         list_items = html.count('<li>')
         assert list_items > 0, "PPT output should contain <li> bullet items, not just <p> paragraphs"
         assert list_items >= long_paragraphs, "PPT should prefer <li> over <p> for content"
+
+    def test_long_ppt_section_is_paginated_instead_of_truncated(self):
+        from src.content.content_orchestrator import ContentOrchestrator
+        orchestrator = ContentOrchestrator()
+        facts = "。".join(f"第{i}项事实：市场规模{i}亿元" for i in range(1, 9)) + "。"
+        html = orchestrator.transform_to_html({
+            "title": "长章节",
+            "sections": [{"id": "s1", "title": "完整分析", "content": facts}],
+        }, output_format="pptx")
+        assert html.count('data-type="content"') >= 2
+        assert "第8项事实" in html
+
+    def test_ppt_page_numbers_are_contiguous_after_section_expansion(self):
+        from src.content.content_orchestrator import ContentOrchestrator
+        import re
+
+        html = ContentOrchestrator().transform_to_html({
+            "title": "页码测试",
+            "sections": [
+                {"id": "s1", "title": "第一章", "content": "2024年销量950万辆，同比增长37.5%。"},
+                {"id": "s2", "title": "第二章", "content": "结论一。结论二。结论三。结论四。结论五。结论六。"},
+            ],
+        }, output_format="pptx")
+        pages = [int(value) for value in re.findall(r'data-page="(\d+)"', html)]
+        assert pages == list(range(1, len(pages) + 1))
+        assert "目录" not in html  # two sections do not need a TOC slide
+        assert "报告结论" in html

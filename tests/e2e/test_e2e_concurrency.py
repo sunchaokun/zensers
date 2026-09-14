@@ -8,6 +8,7 @@ interact-during-execution scenarios.
 
 import asyncio
 import logging
+import os
 import pytest
 
 from tests.e2e.helpers.assertion_helpers import (
@@ -19,8 +20,10 @@ logger = logging.getLogger(__name__)
 
 pytestmark = [pytest.mark.e2e, pytest.mark.slow, pytest.mark.requires_llm]
 
-COMPLETION_TIMEOUT = 600
-POLL_INTERVAL = 5
+# Keep production-like defaults, but allow diagnostic runs to impose a bounded
+# wait without editing the test. This is intentionally test-only configuration.
+COMPLETION_TIMEOUT = float(os.environ.get("E2E_COMPLETION_TIMEOUT", "600"))
+POLL_INTERVAL = float(os.environ.get("E2E_POLL_INTERVAL", "5"))
 
 
 class TestConcurrentQualityActions:

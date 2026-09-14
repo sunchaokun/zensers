@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import asyncio
+import time
 import json
 import logging
 from typing import Any, Dict, List, Optional
@@ -188,16 +189,21 @@ class ZensersClient:
         timeout: float = 600,
         poll_interval: float = 5,
     ) -> Dict[str, Any]:
+        started = time.monotonic()
         elapsed = 0.0
-        while elapsed < timeout:
-            status = await self.get_status(task_id)
+        deadline = started + timeout
+        while (remaining := deadline - time.monotonic()) > 0:
+            try:
+                status = await asyncio.wait_for(self.get_status(task_id), timeout=remaining)
+            except asyncio.TimeoutError:
+                break
             cur = status.get("status", "unknown")
             if cur in ("completed", "completed_with_warnings"):
                 return status
             if cur in ("failed", "error", "cancelled"):
                 return status
-            await asyncio.sleep(poll_interval)
-            elapsed += poll_interval
+            await asyncio.sleep(min(poll_interval, max(0.0, deadline - time.monotonic())))
+            elapsed = time.monotonic() - started
         return {"status": "timeout", "task_id": task_id, "elapsed": elapsed}
 
     async def wait_for_research_result(
@@ -207,15 +213,19 @@ class ZensersClient:
         poll_interval: float = 30,
     ) -> Dict[str, Any]:
         from src.core.session_manager import SessionManager
+        started = time.monotonic()
         elapsed = 0.0
+        deadline = started + timeout
         last_progress = -1.0
         stall_count = 0
-        while elapsed < timeout:
+        while (remaining := deadline - time.monotonic()) > 0:
             try:
-                status = await self.get_status(task_id)
+                status = await asyncio.wait_for(self.get_status(task_id), timeout=remaining)
+            except asyncio.TimeoutError:
+                break
             except Exception:
-                await asyncio.sleep(poll_interval)
-                elapsed += poll_interval
+                await asyncio.sleep(min(poll_interval, max(0.0, deadline - time.monotonic())))
+                elapsed = time.monotonic() - started
                 continue
             cur = status.get("status", "unknown")
             prog = status.get("progress", 0)
@@ -249,8 +259,8 @@ class ZensersClient:
                     session_status = session.get("status", "")
                     if session_status in ("completed", "completed_with_warnings"):
                         return await self.get_research_detail(task_id)
-            await asyncio.sleep(poll_interval)
-            elapsed += poll_interval
+            await asyncio.sleep(min(poll_interval, max(0.0, deadline - time.monotonic())))
+            elapsed = time.monotonic() - started
         sm = SessionManager.get_instance()
         session = sm.get(task_id)
         if session:

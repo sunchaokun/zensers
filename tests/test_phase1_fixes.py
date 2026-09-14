@@ -41,6 +41,10 @@ class TestStateMachineFix(unittest.TestCase):
     def test_invalid_transition_still_fails(self):
         from src.core.dialogue.state_machine import ConversationStateMachine, ConversationState
         sm = ConversationStateMachine()
+        sm.transition(ConversationState.CLARIFYING)
+        sm.transition(ConversationState.FRAMEWORK_CONFIRM)
+        sm.transition(ConversationState.EXECUTING)
+        sm.transition(ConversationState.COMPLETED)
         with self.assertRaises(Exception):
             sm.transition(ConversationState.CANCELLED)
 
@@ -198,10 +202,10 @@ class TestBuildResearchRunningContext(unittest.TestCase):
         }
         result = api._build_research_running_context(session)
         self.assertIn("Chinese pet market", result)
-        self.assertIn("data_collection", result)
-        self.assertIn("1/2 phases completed", result)
+        self.assertIn("Research Status: RUNNING", result)
+        self.assertIn("Current phase:", result)
         self.assertIn("modify_research", result)
-        self.assertIn("IMPORTANT", result)
+        self.assertIn("Rules for changes during research", result)
 
 
 class TestSSEDisconnectDelayedPause(unittest.TestCase):

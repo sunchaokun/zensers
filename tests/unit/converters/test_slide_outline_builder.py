@@ -1,4 +1,3 @@
-import pytest
 from src.converters.slide_outline_builder import SlideOutlineBuilder, SlideOutlineItem, SlideOutline
 
 
@@ -63,6 +62,20 @@ class TestSlideOutlineBuilder:
                               images=[{"src": "/charts/bar_revenue.png", "alt": "Revenue"}])
         outline = SlideOutlineBuilder().build([sd], task_id="t1")
         assert outline.slides[0].chart_type == "bar"
+
+    def test_explicit_chart_type_wins_over_filename_inference(self):
+        sd = _make_slide_data(
+            "data",
+            "Revenue",
+            images=[{
+                "src": "/artifacts/opaque-image-name.png",
+                "alt": "Revenue",
+                "image_type": "chart",
+                "chart_type": "waterfall",
+            }],
+        )
+        outline = SlideOutlineBuilder().build([sd], task_id="t1")
+        assert outline.slides[0].chart_type == "waterfall"
 
     def test_no_chart_returns_none(self):
         sd = _make_slide_data("content", "Overview")

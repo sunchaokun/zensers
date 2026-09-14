@@ -90,6 +90,17 @@ class StockDataSkill(Skill):
         
         if not symbol:
             return self._failure("Please provide a stock symbol, e.g. 600519 (Kweichow Moutai)")
+
+        # The Skill is also called directly by report/data-collection flows,
+        # so it cannot assume the orchestrator already canonicalized the
+        # identifier. AkShare endpoints require a code, while users and LLM
+        # plans commonly provide a company short/full name.
+        symbol = await self._canonicalize_symbol(str(symbol).strip())
+        if not symbol:
+            return self._failure(
+                "Unable to resolve company name to an A-share code; "
+                "provide a six-digit stock code"
+            )
         
         cache_key = (symbol, action)
         if cache_key in self._memory_cache:
@@ -120,6 +131,22 @@ class StockDataSkill(Skill):
             return self._failure("akshare not installed: pip install akshare")
         except Exception as e:
             return self._failure(f"Data retrieval failed: {e}")
+
+    async def _canonicalize_symbol(self, symbol: str) -> str:
+        if symbol.isdigit() and len(symbol) == 6:
+            return symbol
+        try:
+            from src.core.entity_resolver import get_entity_resolver
+
+            entities = await get_entity_resolver().resolve(symbol)
+            for entity in entities:
+                code = getattr(entity, "resolved_code", None)
+                if isinstance(code, str) and code.isdigit() and len(code) == 6:
+                    logger.info("StockDataSkill: resolved '%s' -> '%s'", symbol, code)
+                    return code
+        except Exception as exc:
+            logger.debug("StockDataSkill: symbol resolution failed for '%s': %s", symbol, exc)
+        return ""
     
     async def _price_history(self, ak, symbol: str) -> Dict[str, Any]:
         """Retrieve stock price history data (for chart generation)"""

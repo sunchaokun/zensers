@@ -150,9 +150,9 @@ class TestDocumentGenerationAgentExecute:
             storage_path=temp_storage
         )
     
-    def test_execute_produce_document_with_research_result(self, agent):
+    async def test_execute_produce_document_with_research_result(self, agent):
         """测试使用研究结果生成文档"""
-        result = agent.execute({
+        result = await agent.execute({
             "action": "produce_document",
             "research_result": {
                 "title": "新能源汽车市场研究",
@@ -168,9 +168,9 @@ class TestDocumentGenerationAgentExecute:
         assert "task_id" in result
         assert result["output_format"] == "docx"
     
-    def test_execute_produce_document_with_task_id(self, agent):
+    async def test_execute_produce_document_with_task_id(self, agent):
         """测试使用历史task_id生成文档（延迟生成）"""
-        result = agent.execute({
+        result = await agent.execute({
             "action": "produce_document",
             "task_id": "research_abc123",
             "output_format": "pptx"
@@ -180,9 +180,9 @@ class TestDocumentGenerationAgentExecute:
         assert result["success"] is True
         assert result["task_id"] == "research_abc123"
     
-    def test_execute_list_versions(self, agent):
+    async def test_execute_list_versions(self, agent):
         """测试列出版本"""
-        result = agent.execute({
+        result = await agent.execute({
             "action": "list_versions",
             "task_id": "test_001",
             "output_format": "docx"
@@ -191,9 +191,9 @@ class TestDocumentGenerationAgentExecute:
         assert result["success"] is True
         assert "versions" in result
     
-    def test_execute_rollback_version(self, agent):
+    async def test_execute_rollback_version(self, agent):
         """测试回滚版本"""
-        result = agent.execute({
+        result = await agent.execute({
             "action": "rollback_version",
             "task_id": "test_001",
             "output_format": "docx",
@@ -202,9 +202,9 @@ class TestDocumentGenerationAgentExecute:
         
         assert result["success"] is True
     
-    def test_execute_compare_versions(self, agent):
+    async def test_execute_compare_versions(self, agent):
         """测试对比版本"""
-        result = agent.execute({
+        result = await agent.execute({
             "action": "compare_versions",
             "task_id": "test_001",
             "output_format": "docx",
@@ -215,9 +215,9 @@ class TestDocumentGenerationAgentExecute:
         assert result["success"] is True
         assert "diff_result" in result
     
-    def test_execute_export_document(self, agent):
+    async def test_execute_export_document(self, agent):
         """测试导出文档"""
-        result = agent.execute({
+        result = await agent.execute({
             "action": "export_document",
             "task_id": "test_001",
             "output_format": "docx",
@@ -227,9 +227,9 @@ class TestDocumentGenerationAgentExecute:
         
         assert result["success"] is True
     
-    def test_execute_get_preview(self, agent):
+    async def test_execute_get_preview(self, agent):
         """测试获取预览"""
-        result = agent.execute({
+        result = await agent.execute({
             "action": "get_preview",
             "task_id": "test_001",
             "output_format": "pptx",
@@ -238,9 +238,9 @@ class TestDocumentGenerationAgentExecute:
         
         assert result["success"] is True
     
-    def test_execute_adjust_content(self, agent):
+    async def test_execute_adjust_content(self, agent):
         """测试调整内容"""
-        result = agent.execute({
+        result = await agent.execute({
             "action": "adjust_content",
             "task_id": "test_001",
             "output_format": "docx",
@@ -271,9 +271,9 @@ class TestDocumentGenerationAgentSession:
             storage_path=temp_storage
         )
     
-    def test_session_context_in_request(self, agent):
+    async def test_session_context_in_request(self, agent):
         """测试请求中包含Session上下文"""
-        result = agent.execute({
+        result = await agent.execute({
             "action": "produce_document",
             "output_format": "docx",
             "task_id": "test_session_001",
@@ -285,7 +285,7 @@ class TestDocumentGenerationAgentSession:
         
         assert result["success"] is True
     
-    def test_agent_supports_shared_memory(self, agent):
+    async def test_agent_supports_shared_memory(self, agent):
         """测试Agent支持SharedMemory"""
         from unittest.mock import MagicMock
         
@@ -320,9 +320,9 @@ class TestDocumentGenerationAgentErrorHandling:
             storage_path=temp_storage
         )
     
-    def test_execute_with_invalid_input(self, agent):
+    async def test_execute_with_invalid_input(self, agent):
         """测试无效输入执行"""
-        result = agent.run({
+        result = await agent.run({
             # 缺少 action
             "output_format": "docx"
         })
@@ -330,26 +330,26 @@ class TestDocumentGenerationAgentErrorHandling:
         assert result["success"] is False
         assert "error" in result
     
-    def test_execute_with_unsupported_format(self, agent):
+    async def test_execute_with_unsupported_format(self, agent):
         """测试不支持的格式"""
-        result = agent.execute({
+        result = await agent.execute({
             "action": "produce_document",
             "output_format": "unsupported_format"
         })
         
         assert result["success"] is False
     
-    def test_run_method_catches_exception(self, agent):
+    async def test_run_method_catches_exception(self, agent):
         """测试run方法捕获异常"""
         # 模拟execute抛出异常
         original_execute = agent.execute
         
-        def mock_execute(task_input):
+        async def mock_execute(task_input):
             raise RuntimeError("测试异常")
         
         agent.execute = mock_execute
         
-        result = agent.run({
+        result = await agent.run({
             "action": "produce_document",
             "output_format": "docx"
         })
@@ -380,10 +380,10 @@ class TestDocumentGenerationAgentIntegration:
             storage_path=temp_storage
         )
     
-    def test_full_produce_workflow(self, agent):
+    async def test_full_produce_workflow(self, agent):
         """测试完整生成流程"""
         # 1. 生成文档
-        result = agent.execute({
+        result = await agent.execute({
             "action": "produce_document",
             "research_result": {
                 "title": "完整流程测试报告",
@@ -400,7 +400,7 @@ class TestDocumentGenerationAgentIntegration:
         task_id = result["task_id"]
         
         # 2. 列出版本
-        versions_result = agent.execute({
+        versions_result = await agent.execute({
             "action": "list_versions",
             "task_id": task_id,
             "output_format": "docx"
@@ -408,7 +408,7 @@ class TestDocumentGenerationAgentIntegration:
         
         assert versions_result["success"] is True
     
-    def test_multiple_format_generation(self, agent):
+    async def test_multiple_format_generation(self, agent):
         """测试多格式生成"""
         research_result = {
             "title": "多格式测试",
@@ -420,7 +420,7 @@ class TestDocumentGenerationAgentIntegration:
         results = []
         
         for fmt in formats:
-            result = agent.execute({
+            result = await agent.execute({
                 "action": "produce_document",
                 "research_result": research_result,
                 "output_format": fmt

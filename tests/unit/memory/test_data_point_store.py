@@ -4,6 +4,25 @@ import pytest
 import sqlite3
 from pathlib import Path
 from src.core.memory.stores.data_point_store import DataPointStore
+from src.core.storage.schemas import DATA_POINTS_SCHEMA
+
+
+def test_production_schema_supports_unconfigured_sqlite_row_factory():
+    """The unified get() API must work with the production schema and plain sqlite rows."""
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE entities (entity_id TEXT PRIMARY KEY, name TEXT)")
+    conn.execute("INSERT INTO entities(entity_id, name) VALUES (?, ?)", ("entity-prod", "test"))
+    DATA_POINTS_SCHEMA.create(conn)
+
+    store = DataPointStore(conn)
+    data_id = store.add_data_point(
+        "entity-prod", "market_size", "100", source="prov-prod-1"
+    )
+
+    point = store.get(data_id)
+
+    assert point is not None
+    assert point.source_ref == "prov-prod-1"
 
 
 class TestDataPointStoreAdd:
