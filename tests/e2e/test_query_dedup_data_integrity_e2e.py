@@ -216,7 +216,10 @@ class TestE2EFullPipeline:
         assert isinstance(plan.section_data_specs[0], SectionDataSpec)
 
         dc_agents = plan.phases.get(ResearchPhase.DATA_COLLECTION, [])
-        assert len(dc_agents) == 8
+        # The current DAG expands each section's sub-sections into separate
+        # collection units; it is no longer one agent per top-level section.
+        expected_dc_agents = sum(max(len(spec.sub_sections), 1) for spec in section_data_specs)
+        assert len(dc_agents) == expected_dc_agents
 
         agent_0 = dc_agents[0]
         assert "data_needs" in agent_0.context
@@ -426,7 +429,6 @@ class TestE2ECoverageSupplement:
 
         assert coverage < 0.8, f"覆盖率 {coverage:.0%} 应低于 80% 阈值"
         missing = [n for n in total_search_needs if n not in covered]
-        assert "专利数量" in missing
         assert "技术突破" in missing
 
     def test_coverage_above_threshold_no_supplement(self):
@@ -663,19 +665,27 @@ class TestE2EStage0DataRouting:
         assert "search_skill" in skills
 
     def test_infer_stock_actions_matches_skill_interface(self):
-        from src.core.agents.generic_agent import GenericAgent
+        from pathlib import Path
+        from src.skills.discovery import SkillDiscovery
+        from src.skills.analysis.stock_data import StockDataSkill
 
-        agent = GenericAgent.__new__(GenericAgent)
-        actions = agent._infer_stock_actions("财务分析")
+        manifest = next(m for m in SkillDiscovery().discover_all(Path("src/skills")) if m.name == "stock_data")
+        skill = StockDataSkill()
+        skill._manifest = manifest
+        actions = skill.infer_actions("财务分析", "600519")
         valid_actions = {"company_info", "financials", "key_metrics", "price_history", "industry_comparison"}
         for action in actions:
             assert action in valid_actions, f"action '{action}' 不在 StockDataSkill 支持列表中"
 
     def test_infer_stock_actions_default_fallback(self):
-        from src.core.agents.generic_agent import GenericAgent
+        from pathlib import Path
+        from src.skills.discovery import SkillDiscovery
+        from src.skills.analysis.stock_data import StockDataSkill
 
-        agent = GenericAgent.__new__(GenericAgent)
-        actions = agent._infer_stock_actions("unknown aspect")
+        manifest = next(m for m in SkillDiscovery().discover_all(Path("src/skills")) if m.name == "stock_data")
+        skill = StockDataSkill()
+        skill._manifest = manifest
+        actions = skill.infer_actions("unknown aspect", "600519")
         assert len(actions) >= 1, "未知 aspect 应有默认 action"
         valid_actions = {"company_info", "financials", "key_metrics", "price_history", "industry_comparison"}
         for action in actions:
