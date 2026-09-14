@@ -1,6 +1,7 @@
 """TDD contracts for auditable research phase manifests."""
 
 import json
+from unittest import mock
 
 import pytest
 
@@ -41,7 +42,7 @@ def test_manifest_rejects_boundary_event_without_phase(tmp_path):
 def test_progress_phase_events_are_written_to_manifest():
     from src.core.progress_streamer import ProgressStreamer
 
-    with __import__("unittest").mock.patch(
+    with mock.patch(
         "src.core.progress_streamer.PhaseManifestStore", create=True
     ) as manifest_cls:
         ProgressStreamer.start_phase("manifest-task", "analysis", "Analysis")
