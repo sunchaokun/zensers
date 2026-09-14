@@ -150,7 +150,7 @@ class TestResultCalibrationAgent:
         capabilities = agent.get_capabilities()
         
         assert len(capabilities) > 0
-        assert "分布校准" in capabilities or "distribution_calibration" in capabilities
+        assert "Distribution calibration" in capabilities
     
     def test_validate_input(self):
         """测试输入验证"""
@@ -315,7 +315,8 @@ class TestResultCalibrationAgent:
         assert ci["lower"] >= 0.35
         assert ci["upper"] <= 0.65
     
-    def test_execute_calibration(self):
+    @pytest.mark.asyncio
+    async def test_execute_calibration(self):
         """测试执行校准"""
         survey = self._create_test_survey()
         
@@ -338,7 +339,7 @@ class TestResultCalibrationAgent:
             name="结果校准Agent"
         )
         
-        result = agent.execute({
+        result = await agent.execute({
             "responses": responses,
             "survey": survey,
             "target_distribution": target_distribution,
@@ -367,7 +368,8 @@ class TestResultCalibrationAgent:
         assert len(recommendations) > 0
         assert any("样本量" in r or "sample" in r for r in recommendations)
     
-    def test_empty_responses(self):
+    @pytest.mark.asyncio
+    async def test_empty_responses(self):
         """测试空回答列表"""
         survey = self._create_test_survey()
         
@@ -376,7 +378,7 @@ class TestResultCalibrationAgent:
             name="结果校准Agent"
         )
         
-        result = agent.execute({
+        result = await agent.execute({
             "responses": [],
             "survey": survey,
             "target_distribution": {}
@@ -458,7 +460,7 @@ class TestCalibrationIntegration:
             name="结果校准Agent"
         )
         
-        result = agent.execute({
+        result = await agent.execute({
             "responses": responses,
             "survey": survey,
             "target_distribution": target_distribution,
@@ -469,7 +471,8 @@ class TestCalibrationIntegration:
         assert "calibration_report" in result
         assert len(result["calibrated_responses"]) == 30
     
-    def test_calibration_with_quality_validator(self):
+    @pytest.mark.asyncio
+    async def test_calibration_with_quality_validator(self):
         """测试校准与质量校验集成"""
         from src.survey.services.response_quality_validator import ResponseQualityValidator
         
@@ -520,7 +523,7 @@ class TestCalibrationIntegration:
             name="结果校准Agent"
         )
         
-        result = agent.execute({
+        result = await agent.execute({
             "responses": valid_responses,
             "survey": survey,
             "target_distribution": {"age": {"18-30": 0.5}},
