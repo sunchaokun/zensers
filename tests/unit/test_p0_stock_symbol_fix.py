@@ -134,9 +134,11 @@ class TestResolveCompanyToCode:
             code = self.agent._resolve_company_to_code("不存在的公司xyz")
         assert code == ""
 
-    def test_akshare_import_error_returns_empty(self):
-        """akshare 未安装应返回空字符串"""
-        with patch.dict("sys.modules", {"akshare": None}):
+    def test_unresolvable_company_returns_empty(self):
+        """无法通过实体解析或 AkShare 解析时返回空字符串"""
+        GenericAgent._AKSHARE_RESOLVE_CACHE.pop("比亚迪", None)
+        with patch.object(self.agent, "_resolve_via_entity_resolver", return_value=""), \
+             patch.object(self.agent, "_resolve_via_akshare", return_value=""):
             code = self.agent._resolve_company_to_code("比亚迪")
         assert code == ""
 
@@ -149,33 +151,25 @@ class TestResolveCompanyToCode:
         assert code == "002594", f"'比亚迪财务分析' 应通过子串匹配到002594，实际: {code}"
 
 
-class TestFetchStructuredDataLogging:
-    """_fetch_structured_data 应在关键步骤记录日志"""
-
-    def setup_method(self):
-        GenericAgent._STOCK_CODE_CACHE.clear()
+class TestStockDataCanonicalizationLogging:
+    """公司名规范化在 StockDataSkill 边界完成并记录解析结果。"""
 
     @pytest.mark.asyncio
     async def test_symbol_resolution_logged(self):
-        """symbol 解析结果应被记录"""
-        agent = GenericAgent.__new__(GenericAgent)
-        agent.agent_id = "test_agent"
-        agent.agent_type = "research"
-        agent.topic = "比亚迪财务分析"
+        from src.skills.analysis.stock_data import StockDataSkill
+        from src.core.entity_resolver import EntityInfo
 
-        mock_skill = AsyncMock()
-        mock_skill.execute.return_value = {"success": False, "error": "test"}
+        skill = StockDataSkill()
+        resolver = MagicMock()
+        resolver.resolve = AsyncMock(return_value=[
+            EntityInfo(name="比亚迪", stock_code="002594", is_listed=True)
+        ])
+        with patch("src.core.entity_resolver.get_entity_resolver", return_value=resolver), \
+             patch("src.skills.analysis.stock_data.logger") as mock_logger:
+            code = await skill._canonicalize_symbol("比亚迪")
 
-        with patch.object(agent, '_extract_stock_symbol', return_value="002594"):
-            with patch("src.core.agents.generic_agent.logger") as mock_logger:
-                result = await agent._fetch_structured_data(
-                    mock_skill, "比亚迪财务分析", "财务"
-                )
-                logged = any(
-                    "002594" in str(call)
-                    for call in mock_logger.info.call_args_list
-                )
-                assert logged, "symbol 解析结果应被记录到日志"
+        assert code == "002594"
+        assert any("002594" in str(call) for call in mock_logger.info.call_args_list)
 
 
 class TestStockDataSkillWithNumericCode:
@@ -194,13 +188,26 @@ class TestStockDataSkillWithNumericCode:
         assert "success" in result
 
     @pytest.mark.asyncio
-    async def test_chinese_name_rejected_gracefully(self):
-        """中文名应返回失败而非异常"""
+    async def test_unresolved_chinese_name_degrades_gracefully(self):
+        """中文名解析失败时应返回结构化失败，而不是抛异常"""
         from src.skills.analysis.stock_data import StockDataSkill
         skill = StockDataSkill()
-        result = await skill.execute(action="company_info", symbol="比亚迪")
+        with patch.object(skill, "_canonicalize_symbol", new=AsyncMock(return_value="")):
+            result = await skill.execute(action="company_info", symbol="未知公司")
         assert result is not None
-        assert result.get("success") is False or "error" in result or "data" in result
+        assert result.get("success") is False
+
+    @pytest.mark.asyncio
+    async def test_stock_data_skill_canonicalizes_company_name(self):
+        from src.skills.analysis.stock_data import StockDataSkill
+
+        skill = StockDataSkill()
+        with patch.object(skill, "_canonicalize_symbol", new=AsyncMock(return_value="000725")), \
+             patch.object(skill, "_company_info", new=AsyncMock(return_value={"success": True, "symbol": "000725"})), \
+             patch.dict("sys.modules", {"akshare": MagicMock()}):
+            result = await skill.execute(action="company_info", symbol="京东方")
+
+        assert result.get("symbol") == "000725"
 
 
 if __name__ == "__main__":

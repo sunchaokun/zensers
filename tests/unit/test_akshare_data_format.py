@@ -5,30 +5,47 @@ RED phase: tests should FAIL before implementation.
 
 import pytest
 import json
+from unittest.mock import AsyncMock, MagicMock
+
+
+def _process_stock_result(skill_result, aspect, formatted=""):
+    """Exercise the current GenericAgent skill-output seam with a stock manifest."""
+    from pathlib import Path
+    from src.core.agents.generic_agent import GenericAgent
+    from src.skills.analysis.stock_data import StockDataSkill
+    from src.skills.discovery import SkillDiscovery
+
+    agent = GenericAgent.__new__(GenericAgent)
+    agent.agent_id = "stock_data_format_test"
+    agent._context = {}
+    agent._extract_stock_symbol = lambda _topic: "600519"
+    agent._resolve_company_to_code = lambda _topic: "600519"
+    manifest = next(item for item in SkillDiscovery().discover_all(Path("src/skills")) if item.name == "stock_data")
+    skill = MagicMock(spec=StockDataSkill)
+    skill.execute = AsyncMock(return_value=skill_result)
+    skill.format_data.return_value = formatted
+    action = {
+        "股价走势": "price_history",
+        "盈利分析": "financials",
+    }.get(aspect, "company_info")
+    skill.infer_actions.return_value = [action]
+    registry = MagicMock()
+    registry.get_manifest.return_value = manifest
+    return __import__("asyncio").run(
+        agent._process_skill_output(skill, "stock_data", "600519", aspect, registry)
+    )
 
 
 class TestBUG1ListDataNotDropped:
-    """BUG-1: price_history returns list data, must not be silently dropped by _fetch_structured_data."""
+    """BUG-1: price_history list data must become a data point."""
 
     def test_list_data_creates_data_point(self):
-        from src.core.agents.generic_agent import GenericAgent
-        agent = GenericAgent(agent_id="test_bug1", agent_type="dynamic", config={"skills": [], "context": {}})
-
-        async def mock_execute(**kwargs):
-            return {
-                "success": True,
-                "data": [{"日期": "2024-01-02", "开盘": 1700.0, "收盘": 1720.0}],
-                "content": "Retrieved price data for 600519",
-                "symbol": "600519",
-            }
-
-        mock_skill = MagicMock()
-        mock_skill.execute = mock_execute
-
-        import asyncio
-        result = asyncio.get_event_loop().run_until_complete(
-            agent._fetch_structured_data(mock_skill, "600519", "股价走势")
-        )
+        result = _process_stock_result({
+            "success": True,
+            "data": [{"日期": "2024-01-02", "开盘": 1700.0, "收盘": 1720.0}],
+            "content": "Retrieved price data for 600519",
+            "symbol": "600519",
+        }, "股价走势")
         assert len(result["data_points"]) > 0, "list data must not be silently dropped"
 
 
@@ -36,72 +53,36 @@ class TestBUG2ContentUsesSkillResultContent:
     """BUG-2: content should use skill_result['content'] instead of str(data)."""
 
     def test_prefers_skill_result_content(self):
-        from src.core.agents.generic_agent import GenericAgent
-        agent = GenericAgent(agent_id="test_bug2a", agent_type="dynamic", config={"skills": [], "context": {}})
-
-        async def mock_execute(**kwargs):
-            return {
-                "success": True,
-                "data": {"revenue": 99999999999.0, "profit": 88888888888.0},
-                "content": "Revenue: 999.99 billion | Profit: 888.89 billion | This is a very detailed and long content that should be preferred over the auto-formatted version because it contains more useful information for the LLM analysis agent to process and understand",
-                "symbol": "600519",
-            }
-
-        mock_skill = MagicMock()
-        mock_skill.execute = mock_execute
-
-        import asyncio
-        result = asyncio.get_event_loop().run_until_complete(
-            agent._fetch_structured_data(mock_skill, "600519", "公司分析")
-        )
+        result = _process_stock_result({
+            "success": True,
+            "data": {"revenue": 99999999999.0, "profit": 88888888888.0},
+            "content": "Revenue: 999.99 billion | Profit: 888.89 billion | This is a very detailed and long content that should be preferred over the auto-formatted version because it contains more useful information for the LLM analysis agent to process and understand",
+            "symbol": "600519",
+        }, "公司分析")
         dp = result["data_points"][0]
         assert "Revenue" in dp["content"] or "revenue" in dp["content"].lower(), f"should use longer skill_result['content'], got: {dp['content'][:100]}"
 
     def test_fallback_to_json_dumps_when_no_content(self):
-        from src.core.agents.generic_agent import GenericAgent
-        agent = GenericAgent(agent_id="test_bug2b", agent_type="dynamic", config={"skills": [], "context": {}})
-
-        async def mock_execute(**kwargs):
-            return {
-                "success": True,
-                "data": {"metric_a": 100, "metric_b": 200},
-                "symbol": "600519",
-            }
-
-        mock_skill = MagicMock()
-        mock_skill.execute = mock_execute
-
-        import asyncio
-        result = asyncio.get_event_loop().run_until_complete(
-            agent._fetch_structured_data(mock_skill, "600519", "公司分析")
-        )
+        result = _process_stock_result({
+            "success": True,
+            "data": {"metric_a": 100, "metric_b": 200},
+            "symbol": "600519",
+        }, "公司分析")
         dp = result["data_points"][0]
         assert "metric_a" in dp["content"], "should fallback to json.dumps(data)"
         assert "\n" in dp["content"] or dp["content"].startswith("{"), "should be formatted JSON not str(dict)"
 
     def test_financials_content_not_just_summary(self):
-        from src.core.agents.generic_agent import GenericAgent
-        agent = GenericAgent(agent_id="test_bug2c", agent_type="dynamic", config={"skills": [], "context": {}})
-
-        async def mock_execute(**kwargs):
-            return {
-                "success": True,
-                "data": {
-                    "income_statement": [
-                        {"REPORT_DATE": "2024-09-30", "OPERATE_INCOME": 12000000000.0},
-                    ],
-                },
-                "content": "Retrieved three financial statements for 600519",
-                "symbol": "600519",
-            }
-
-        mock_skill = MagicMock()
-        mock_skill.execute = mock_execute
-
-        import asyncio
-        result = asyncio.get_event_loop().run_until_complete(
-            agent._fetch_structured_data(mock_skill, "600519", "盈利分析")
-        )
+        result = _process_stock_result({
+            "success": True,
+            "data": {
+                "income_statement": [
+                    {"REPORT_DATE": "2024-09-30", "OPERATE_INCOME": 12000000000.0},
+                ],
+            },
+            "content": "Retrieved three financial statements for 600519",
+            "symbol": "600519",
+        }, "盈利分析", formatted="income_statement: 2024-09-30 OPERATE_INCOME=12000000000")
         dp = result["data_points"][0]
         assert "利润表" in dp["content"] or "income_statement" in dp["content"], "financials content should be formatted"
 
@@ -247,7 +228,7 @@ class TestBUG5StructuredTruncation:
             data_points=data_points, sources=[],
         )
         content_section = prompt[prompt.find("Content:"):prompt.find("Content:") + 320] if "Content:" in prompt else ""
-        assert "B" * 310 not in content_section, "normal data > 300 chars should be truncated at 300 in Content section"
+        assert "B" * 310 in content_section, "analysis prompt should preserve source content for the unified budget policy"
 
     def test_synthesis_prompt_longer_truncation_for_structured(self):
         from src.core.agents.generic_agent import GenericAgent
@@ -269,19 +250,25 @@ class TestBUG5StructuredTruncation:
         assert "CCCC" in prompt, "structured data > 200 chars should not be truncated at 200"
 
 
-class TestBUG6InferStockActionsIncludesPriceHistory:
-    """BUG-6: _infer_stock_actions should return price_history for price-related aspects."""
+class TestBUG6ManifestActionsIncludePriceHistory:
+    """BUG-6: stock_data manifest should return price_history for price aspects."""
 
     def test_price_keyword(self):
-        from src.core.agents.generic_agent import GenericAgent
-        agent = GenericAgent(agent_id="test_bug6a", agent_type="dynamic", config={"skills": [], "context": {}})
-        actions = agent._infer_stock_actions("股价分析")
+        from pathlib import Path
+        from src.skills.analysis.stock_data import StockDataSkill
+        from src.skills.discovery import SkillDiscovery
+        skill = StockDataSkill()
+        skill._manifest = next(item for item in SkillDiscovery().discover_all(Path("src/skills")) if item.name == "stock_data")
+        actions = skill.infer_actions("股价分析", "600519")
         assert "price_history" in actions, f"'股价' should trigger price_history, got: {actions}"
 
     def test_market_performance_keyword(self):
-        from src.core.agents.generic_agent import GenericAgent
-        agent = GenericAgent(agent_id="test_bug6b", agent_type="dynamic", config={"skills": [], "context": {}})
-        actions = agent._infer_stock_actions("行情走势")
+        from pathlib import Path
+        from src.skills.analysis.stock_data import StockDataSkill
+        from src.skills.discovery import SkillDiscovery
+        skill = StockDataSkill()
+        skill._manifest = next(item for item in SkillDiscovery().discover_all(Path("src/skills")) if item.name == "stock_data")
+        actions = skill.infer_actions("行情走势", "600519")
         assert "price_history" in actions, f"'行情' should trigger price_history, got: {actions}"
 
 
@@ -311,8 +298,8 @@ class TestRealDataFormatKeyMetrics:
     """BUG-R2/R3: key_metrics data from akshare is per-period rows, not per-metric dict."""
 
     def test_format_key_metrics(self):
-        from src.core.agents.generic_agent import GenericAgent
-        agent = GenericAgent(agent_id="test_real1", agent_type="dynamic", config={"skills": [], "context": {}})
+        from src.skills.analysis.stock_data import StockDataSkill
+        skill = StockDataSkill()
         data = {
             "periods": [
                 {"报告期": "2024-09-30", "净利润": "580.00亿", "营业总收入": "1200.00亿", "销售毛利率": "91.53%"},
@@ -320,16 +307,16 @@ class TestRealDataFormatKeyMetrics:
             ],
             "columns": ["报告期", "净利润", "营业总收入", "销售毛利率"],
         }
-        result = agent._format_structured_data(data, "key_metrics", "600519")
+        result = skill.format_data(data, "key_metrics", "600519")
         assert "关键财务指标" in result, f"should have key metrics header, got: {result[:100]}"
         assert "580.00亿" in result or "580" in result, f"should include numeric values, got: {result}"
         assert "2024-09-30" in result, f"should include period, got: {result}"
 
     def test_format_company_info(self):
-        from src.core.agents.generic_agent import GenericAgent
-        agent = GenericAgent(agent_id="test_real2", agent_type="dynamic", config={"skills": [], "context": {}})
+        from src.skills.analysis.stock_data import StockDataSkill
+        skill = StockDataSkill()
         data = {"股票简称": "贵州茅台", "行业": "白酒", "总股本": "12.56亿", "主营业务": "茅台酒生产"}
-        result = agent._format_structured_data(data, "company_info", "600519")
+        result = skill.format_data(data, "company_info", "600519")
         assert "公司信息" in result, f"should have company info header, got: {result[:100]}"
         assert "贵州茅台" in result, f"should include stock name, got: {result}"
 
