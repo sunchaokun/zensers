@@ -82,7 +82,7 @@ def _is_safe_path(filepath: str, allowed_dirs: Set[str]) -> tuple[bool, str]:
             except ValueError:
                 continue
         
-        return False, f"Path is outside allowed range. Allowed directories: {', '.join(allowed_dirs)}"
+        return False, f"路径禁止访问（Path is outside allowed range. Allowed directories: {', '.join(allowed_dirs)}）"
         
     except Exception as e:
         return False, f"Path validation failed: {str(e)}"
@@ -260,7 +260,10 @@ class FileSkill(Skill):
         if path.is_dir():
             # Check if directory is empty
             if any(path.iterdir()):
-                return self._failure(f"Directory not empty, refusing to delete: {filepath}", "Please clear the directory contents first")
+                return self._failure(
+                    f"目录不为空，禁止删除（Directory not empty, refusing to delete: {filepath}）",
+                    "Please clear the directory contents first"
+                )
             path.rmdir()
         else:
             path.unlink()

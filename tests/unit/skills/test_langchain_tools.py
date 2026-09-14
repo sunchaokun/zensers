@@ -258,11 +258,8 @@ class TestClearCache:
     @patch("src.skills.builtin.langchain_tools._RESEARCH_TOOLS_CACHE", {"test": "data"})
     def test_clear_research_tools_cache(self):
         """测试清除缓存"""
-        from src.skills.builtin.langchain_tools import (
-            clear_research_tools_cache,
-            _RESEARCH_TOOLS_CACHE,
-        )
-        
-        clear_research_tools_cache()
-        
-        assert _RESEARCH_TOOLS_CACHE is None
+        import src.skills.builtin.langchain_tools as langchain_tools
+
+        langchain_tools.clear_research_tools_cache()
+
+        assert langchain_tools._RESEARCH_TOOLS_CACHE is None

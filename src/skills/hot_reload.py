@@ -104,7 +104,7 @@ class SkillHotReloader:
     ):
         p = Path(skill_dir)
         if not p.exists():
-            raise ValueError(f"Skill directory does not exist: {skill_dir}")
+            raise ValueError(f"技能目录不存在（Skill directory does not exist: {skill_dir}）")
 
         self.skill_dir = str(p.resolve())
         self.registry = registry if registry is not None else get_registry()

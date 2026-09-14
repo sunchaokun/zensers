@@ -66,7 +66,7 @@ def _validate_url(url: str) -> tuple[bool, str]:
         
         # Check scheme
         if parsed.scheme not in ALLOWED_SCHEMES:
-            return False, f"Disallowed scheme: {parsed.scheme}, only {', '.join(ALLOWED_SCHEMES)} supported"
+            return False, f"协议不允许（Disallowed scheme: {parsed.scheme}, only {', '.join(ALLOWED_SCHEMES)} supported）"
         
         # Check hostname
         if not parsed.hostname:
@@ -74,12 +74,12 @@ def _validate_url(url: str) -> tuple[bool, str]:
         
         # Check if private address
         if _is_private_hostname(parsed.hostname):
-            return False, f"Internal network address not allowed: {parsed.hostname}"
+            return False, f"内网地址不允许（Internal network address not allowed: {parsed.hostname}）"
         
         return True, ""
         
     except Exception as e:
-        return False, f"URL validation failed: {str(e)}"
+        return False, f"验证失败（URL validation failed: {str(e)}）"
 
 
 class HTTPSkill(Skill):
