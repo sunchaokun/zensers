@@ -19,6 +19,7 @@ Configuration system integration:
 import os
 import json
 import uuid
+import re
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from datetime import datetime, timedelta
@@ -417,11 +418,19 @@ class TaskPersistenceManager:
     
     def _get_task_path(self, task_id: str) -> Path:
         """Get task file path"""
+        self._validate_task_id(task_id)
         return self.tasks_dir / f"{task_id}.json"
-    
+
     def _get_history_path(self, task_id: str) -> Path:
         """Get history file path"""
+        self._validate_task_id(task_id)
         return self.history_dir / f"{task_id}_history.json"
+
+    @staticmethod
+    def _validate_task_id(task_id: str) -> None:
+        """Reject path-like task IDs before they reach the filesystem."""
+        if not isinstance(task_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", task_id):
+            raise ValueError(f"Invalid task_id: {task_id!r}")
     
     def _generate_task_id(self) -> str:
         """Generate task ID"""
@@ -475,10 +484,9 @@ class TaskPersistenceManager:
                     f.flush()
                     os.fsync(f.fileno())
                 
-                # Atomic rename
-                if task_path.exists():
-                    task_path.unlink()
-                os.rename(temp_path, task_path)
+                # Atomic replacement.  Unlinking the destination first creates
+                # a crash window in which the previous valid state is lost.
+                os.replace(temp_path, task_path)
                 
                 logger.debug(f"Saved task: {task.task_id}")
             

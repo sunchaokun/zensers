@@ -245,6 +245,11 @@ class TestTaskPersistenceManager:
         manager = TaskPersistenceManager(str(tmp_path))
         
         assert manager.storage_path.exists()
+
+    def test_rejects_path_like_task_id(self, tmp_path):
+        manager = TaskPersistenceManager(str(tmp_path))
+        with pytest.raises(ValueError):
+            manager.load_task("..\\outside")
     
     def test_create_task(self, tmp_path):
         """测试创建任务"""

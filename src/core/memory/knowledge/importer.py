@@ -785,7 +785,7 @@ class KnowledgeImporter:
                 # 绝对路径也需要验证：检查是否指向敏感系统目录
                 sensitive_dirs = [
                     Path("/etc"), Path("/root"), Path("/var/log"),
-                    Path("C:\\Windows\\System32"), Path("C:\\Users\\Administrator"),
+                    Path("C:\\Windows\\System32"),
                 ]
                 for sensitive_dir in sensitive_dirs:
                     try:

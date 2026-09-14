@@ -460,7 +460,7 @@ class ExecutionScheduler:
                 raise ValueError(f"依赖 Agent 不存在，拒绝静默忽略: {dep}")
             raise ValueError(f"依赖 {dep} 匹配到多个 Agent，拒绝猜测: {candidates}")
         
-        return list(set(resolved))  # 去重
+        return list(dict.fromkeys(resolved))  # 稳定去重
     
     def _convert_dependency_ids(
         self,
@@ -491,7 +491,9 @@ class ExecutionScheduler:
             # 模糊匹配：提取章节名关键词
             spec_parts = spec_dep_id.lower().split('_')
             if len(spec_parts) < 3:  # 至少要有 type_index_section 格式
-                continue
+                raise ValueError(
+                    f"依赖格式非法，拒绝静默跳过: {spec_dep_id}"
+                )
             
             # 提取章节名（最后一个部分）
             spec_section = spec_parts[-1]

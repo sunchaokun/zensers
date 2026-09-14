@@ -74,7 +74,11 @@ class CrossValidator:
         tolerance = tolerance or self.DEFAULT_TOLERANCE
         
         # 1. 检查来源数量
-        valid_sources = [s for s in sources if s.get("value")]
+        valid_sources = [
+            s for s in sources
+            if s.get("value") is not None
+            and (not isinstance(s.get("value"), str) or s.get("value").strip() != "")
+        ]
         
         if len(valid_sources) < self.min_sources:
             return ValidationResult(
@@ -95,6 +99,23 @@ class CrossValidator:
         if not numerical_consistent:
             conflicts = self._detect_value_conflicts(valid_sources, tolerance)
         
+        # 时间口径不一致时不能继续作为 verified 传播，即使数值碰巧一致。
+        if not time_consistent:
+            return ValidationResult(
+                status="inconsistent",
+                message="数据时间口径不一致，请先统一时间范围",
+                confidence="low",
+                conflicts=[{
+                    "type": "time_mismatch",
+                    "times": [s.get("time") for s in valid_sources if s.get("time")],
+                }],
+                details={
+                    "numerical_consistency": numerical_consistent,
+                    "time_consistency": False,
+                    "source_count": len(valid_sources),
+                },
+            )
+
         # 5. 计算置信度
         if conflicts:
             return ValidationResult(
@@ -238,7 +259,11 @@ class CrossValidator:
     ) -> List[Dict[str, Any]]:
         """检测数值冲突"""
         conflicts = []
-        values = [(s.get("name"), s.get("value")) for s in sources if s.get("value")]
+        values = [
+            (s.get("name"), s.get("value")) for s in sources
+            if s.get("value") is not None
+            and (not isinstance(s.get("value"), str) or s.get("value").strip() != "")
+        ]
         
         for i, (name1, val1) in enumerate(values):
             for name2, val2 in values[i+1:]:

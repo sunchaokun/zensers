@@ -68,6 +68,10 @@ def normalize_task_structure_runtime_ids(task_structure: "TaskStructure") -> Dic
     for dependency in task_structure.dependencies:
         dependency.from_section = resolve(dependency.from_section)
         dependency.to_section = resolve(dependency.to_section)
+    for section in task_structure.sections:
+        section.content_dependency = list(dict.fromkeys(
+            resolve(item) for item in (section.content_dependency or [])
+        ))
     task_structure.execution_graph = {
         resolve(key): [resolve(item) for item in values]
         for key, values in (task_structure.execution_graph or {}).items()

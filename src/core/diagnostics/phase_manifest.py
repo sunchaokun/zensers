@@ -4,6 +4,8 @@ import json
 import logging
 import os
 import threading
+import tempfile
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -27,6 +29,8 @@ class PhaseManifestStore:
         run_id: Optional[str] = None,
     ) -> None:
         self.task_id = str(task_id)
+        if not self.task_id or Path(self.task_id).name != self.task_id or self.task_id in {".", ".."}:
+            raise ValueError(f"Invalid task_id: {task_id!r}")
         self.session_id = str(session_id)
         self.run_id = str(run_id or "")
         self.path = (Path(root) / self.task_id / "diagnostic_manifest.json").resolve()
@@ -37,13 +41,14 @@ class PhaseManifestStore:
         with self._locks_guard:
             lock = self._locks[str(self.path)]
         with lock:
-            if not self.path.exists():
-                self._write({
-                    "session_id": self.session_id,
-                    "task_id": self.task_id,
-                    "run_id": self.run_id,
-                    "phases": [],
-                })
+            with self._interprocess_lock():
+                if not self.path.exists():
+                    self._write({
+                        "session_id": self.session_id,
+                        "task_id": self.task_id,
+                        "run_id": self.run_id,
+                        "phases": [],
+                    })
 
     def record(self, event: str, *, phase: str = "", batch_id: str = "",
                agent_id: str = "", section_id: str = "",
@@ -69,9 +74,10 @@ class PhaseManifestStore:
         with self._locks_guard:
             lock = self._locks[str(self.path)]
         with lock:
-            manifest = self._read()
-            manifest.setdefault("phases", []).append(item)
-            self._write(manifest)
+            with self._interprocess_lock():
+                manifest = self._read()
+                manifest.setdefault("phases", []).append(item)
+                self._write(manifest)
         logger.info(
             "%s session_id=%s task_id=%s run_id=%s phase=%s batch_id=%s agent_id=%s section_id=%s checkpoint_id=%s",
             event, self.session_id, self.task_id, self.run_id, phase,
@@ -87,6 +93,43 @@ class PhaseManifestStore:
                     "run_id": self.run_id, "phases": []}
 
     def _write(self, data: Dict[str, Any]) -> None:
-        temp = self.path.with_suffix(".tmp")
-        temp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(temp, self.path)
+        temp_name = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=self.path.parent,
+                prefix=f".{self.path.stem}.", suffix=".tmp", delete=False
+            ) as handle:
+                temp_name = handle.name
+                json.dump(data, handle, ensure_ascii=False, indent=2)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_name, self.path)
+        finally:
+            if temp_name and os.path.exists(temp_name):
+                os.unlink(temp_name)
+
+    @contextmanager
+    def _interprocess_lock(self):
+        """Serialize read-modify-write across processes on the same host."""
+        lock_path = self.path.with_suffix(".lock")
+        with open(lock_path, "a+b") as lock_file:
+            if lock_file.tell() == 0:
+                lock_file.write(b"0")
+                lock_file.flush()
+            lock_file.seek(0)
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                yield
+            finally:
+                if os.name == "nt":
+                    import msvcrt
+                    lock_file.seek(0)
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)

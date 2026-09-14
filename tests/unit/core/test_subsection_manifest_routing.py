@@ -4,6 +4,20 @@ from types import SimpleNamespace
 
 from src.core.dynamic_orchestrator import DynamicPhaseOrchestrator, PhaseType
 from src.core.task_structure import SectionRole, SectionSpec, TaskStructure
+from src.core.task_structure import normalize_task_structure_runtime_ids
+
+
+def test_runtime_id_normalization_updates_section_content_dependencies():
+    upstream = SectionSpec("section_1_上游", "上游", SectionRole.ANALYSIS)
+    downstream = SectionSpec(
+        "section_0_下游", "下游", SectionRole.ANALYSIS,
+        content_dependency=["section_1_上游", "section_1_上游"],
+    )
+    structure = TaskStructure("t-normalize", "测试", [downstream, upstream])
+
+    normalize_task_structure_runtime_ids(structure)
+
+    assert downstream.content_dependency == ["section_1"]
 
 
 def test_dynamic_router_expands_data_specs_into_leaf_agents_and_manifest():

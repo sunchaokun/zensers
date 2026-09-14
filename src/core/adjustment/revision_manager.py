@@ -298,8 +298,14 @@ class RevisionManager:
             if r.task_id == task_id
         ]
         
-        # 按时间倒序
-        task_revisions.sort(key=lambda r: r.created_at, reverse=True)
+        # 按时间倒序；高速连续创建修订时，时间戳可能相同，
+        # 因此用版本号和修订 ID 稳定打破平局。
+        def _version_order(record: RevisionRecord) -> tuple:
+            match = re.search(r"(\d+)$", record.version_id or "")
+            version_number = int(match.group(1)) if match else -1
+            return record.created_at, version_number, record.revision_id
+
+        task_revisions.sort(key=_version_order, reverse=True)
         
         return task_revisions[:limit]
     

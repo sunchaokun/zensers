@@ -39,6 +39,13 @@ def test_manifest_rejects_boundary_event_without_phase(tmp_path):
         store.record("PHASE_COMPLETE")
 
 
+def test_manifest_rejects_path_like_task_id(tmp_path):
+    from src.core.diagnostics.phase_manifest import PhaseManifestStore
+
+    with pytest.raises(ValueError):
+        PhaseManifestStore("..\\outside", "session-1", tmp_path)
+
+
 def test_progress_phase_events_are_written_to_manifest():
     from src.core.progress_streamer import ProgressStreamer
 

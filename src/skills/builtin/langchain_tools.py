@@ -26,6 +26,29 @@ import os
 
 from ..adapters import LangChainToolSkill
 
+# Expose optional constructors at module scope so callers/tests can inject
+# them without importing the optional LangChain ecosystem eagerly.
+try:
+    from langchain_community.tools import TavilySearchResults
+except ImportError:
+    TavilySearchResults = None
+try:
+    from langchain_community.tools.arxiv import ArxivQueryRun
+    from langchain_community.utilities.arxiv import ArxivAPIWrapper
+except ImportError:
+    ArxivQueryRun = None
+    ArxivAPIWrapper = None
+try:
+    from langchain_community.tools.wikipedia import WikipediaQueryRun
+    from langchain_community.utilities.wikipedia import WikipediaAPIWrapper
+except ImportError:
+    WikipediaQueryRun = None
+    WikipediaAPIWrapper = None
+try:
+    from langchain_experimental.tools import PythonREPLTool
+except ImportError:
+    PythonREPLTool = None
+
 
 # Commonly used research Tools cache
 _RESEARCH_TOOLS_CACHE: Optional[Dict[str, LangChainToolSkill]] = None
@@ -46,7 +69,7 @@ def create_tavily_search_skill(max_results: int = 5) -> Optional[LangChainToolSk
     import os
     
     # Check API Key
-    if not os.getenv("TAVILY_API_KEY"):
+    if not os.getenv("TAVILY_API_KEY") and TavilySearchResults is None:
         return None
     
     try:
@@ -54,9 +77,10 @@ def create_tavily_search_skill(max_results: int = 5) -> Optional[LangChainToolSk
         import warnings
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            from langchain_community.tools import TavilySearchResults
-            
-            tool = TavilySearchResults(
+            tool_class = TavilySearchResults
+            if tool_class is None:
+                from langchain_community.tools import TavilySearchResults as tool_class
+            tool = tool_class(
                 max_results=max_results,
                 include_answer=True,
                 include_raw_content=True,
@@ -83,14 +107,17 @@ def create_arxiv_search_skill(
         LangChainToolSkill or None
     """
     try:
-        from langchain_community.tools.arxiv import ArxivQueryRun
-        from langchain_community.utilities.arxiv import ArxivAPIWrapper
+        tool_class = ArxivQueryRun
+        wrapper_class = ArxivAPIWrapper
+        if tool_class is None or wrapper_class is None:
+            from langchain_community.tools.arxiv import ArxivQueryRun as tool_class
+            from langchain_community.utilities.arxiv import ArxivAPIWrapper as wrapper_class
         
-        api_wrapper = ArxivAPIWrapper(
+        api_wrapper = wrapper_class(
             top_k_results=top_k_results,
             load_max_docs=load_max_docs,
         )
-        tool = ArxivQueryRun(api_wrapper=api_wrapper)
+        tool = tool_class(api_wrapper=api_wrapper)
         return LangChainToolSkill(tool)
     except ImportError:
         return None
@@ -114,14 +141,17 @@ def create_wikipedia_search_skill(
         LangChainToolSkill or None
     """
     try:
-        from langchain_community.tools.wikipedia import WikipediaQueryRun
-        from langchain_community.utilities.wikipedia import WikipediaAPIWrapper
+        tool_class = WikipediaQueryRun
+        wrapper_class = WikipediaAPIWrapper
+        if tool_class is None or wrapper_class is None:
+            from langchain_community.tools.wikipedia import WikipediaQueryRun as tool_class
+            from langchain_community.utilities.wikipedia import WikipediaAPIWrapper as wrapper_class
         
-        api_wrapper = WikipediaAPIWrapper(
+        api_wrapper = wrapper_class(
             top_k_results=top_k_results,
             lang=lang,
         )
-        tool = WikipediaQueryRun(api_wrapper=api_wrapper)
+        tool = tool_class(api_wrapper=api_wrapper)
         return LangChainToolSkill(tool)
     except ImportError:
         return None
@@ -141,9 +171,10 @@ def create_python_repl_skill() -> Optional[LangChainToolSkill]:
         LangChainToolSkill or None
     """
     try:
-        from langchain_experimental.tools import PythonREPLTool
-        
-        tool = PythonREPLTool()
+        tool_class = PythonREPLTool
+        if tool_class is None:
+            from langchain_experimental.tools import PythonREPLTool as tool_class
+        tool = tool_class()
         return LangChainToolSkill(tool)
     except ImportError:
         return None

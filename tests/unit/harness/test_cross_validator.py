@@ -213,3 +213,23 @@ class TestCrossValidator:
         
         # 应该只使用有效来源
         assert result.status == "insufficient_sources"  # 只有1个有效来源
+
+    def test_zero_is_a_valid_value(self, validator):
+        """零是确定数值，不能被 truthiness 过滤掉。"""
+        result = validator.validate(
+            claim="零值指标",
+            sources=[{"name": "A", "value": 0}, {"name": "B", "value": 0}],
+        )
+        assert result.status == "verified"
+
+    def test_time_mismatch_cannot_be_verified(self, validator):
+        """不同年份的同数值来源不能绕过时间口径检查。"""
+        result = validator.validate(
+            claim="年度指标",
+            sources=[
+                {"name": "A", "value": 100, "time": "2024年"},
+                {"name": "B", "value": 100, "time": "2025年"},
+            ],
+        )
+        assert result.status == "inconsistent"
+        assert result.details["time_consistency"] is False

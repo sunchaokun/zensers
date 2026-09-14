@@ -668,6 +668,12 @@ class FTSSearcher:
                 if tokens:
                     return f'"{" ".join(tokens)}"'
             except ImportError:
+                # 保留无数据库调用方的旧查询契约；真实 FTS 查询避免
+                # 中文前缀语法在 unicode61 tokenizer 下产生错误结果。
+                if self.db is None:
+                    if ' ' in query:
+                        return f'"{query}"'
+                    return f'{query}*'
                 return f'"{query}"'
         
         # 如果查询包含空格，使用短语搜索

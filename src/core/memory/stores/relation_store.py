@@ -138,6 +138,13 @@ class RelationStore(SQLiteStore[Relation]):
             'relation_id', 'source_entity', 'target_entity', 'relation_type',
             'context', 'source_ref', 'valid_from', 'valid_until', 'confidence', 'created_at'
         ]
+
+    def _has_column(self, column_name: str) -> bool:
+        """检查当前数据库是否包含旧版本兼容列。"""
+        return any(
+            row[1] == column_name
+            for row in self.db.execute("PRAGMA table_info(relations)").fetchall()
+        )
     
     # === 公共方法 ===
     
@@ -160,23 +167,17 @@ class RelationStore(SQLiteStore[Relation]):
         relation_id = f"relation_{uuid.uuid4().hex[:12]}"
         now = datetime.now().isoformat()
         
-        self.db.execute("""
+        source_column = "source" if self._has_column("source") else "source_ref"
+        self.db.execute(
+            f"""
             INSERT INTO relations (
                 relation_id, source_entity, target_entity, relation_type,
-                context, source_ref, valid_from, valid_until, confidence, created_at
+                context, {source_column}, valid_from, valid_until, confidence, created_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            relation_id,
-            source_entity,
-            target_entity,
-            relation_type,
-            context,
-            source,
-            now,
-            None,
-            str(confidence),
-            now
-        ))
+            """,
+            (relation_id, source_entity, target_entity, relation_type,
+             context, source, now, None, confidence, now)
+        )
         
         self.db.commit()
         return relation_id
@@ -242,6 +243,27 @@ class RelationStore(SQLiteStore[Relation]):
             (confidence, relation_id)
         )
         self.db.commit()
+
+    def update_context(self, relation_id: str, context: str) -> None:
+        """更新关系上下文（遗留接口兼容）。"""
+        self.db.execute(
+            "UPDATE relations SET context = ? WHERE relation_id = ?",
+            (context, relation_id)
+        )
+        self.db.commit()
+
+    def delete_relation(self, relation_id: str) -> None:
+        """删除关系（遗留接口兼容）。"""
+        self.db.execute("DELETE FROM relations WHERE relation_id = ?", (relation_id,))
+        self.db.commit()
+
+    def get_relations_for_entity(self, entity_id: str) -> List[Dict[str, Any]]:
+        """获取实体作为源或目标的全部关系。"""
+        return self.search_relations(entity_id=entity_id)
+
+    def get_relations_by_type(self, relation_type: str) -> List[Dict[str, Any]]:
+        """按关系类型获取关系。"""
+        return self.search_relations(relation_type=relation_type)
     
     def invalidate(self, relation_id: str) -> None:
         """使关系失效"""
@@ -259,13 +281,18 @@ class RelationStore(SQLiteStore[Relation]):
     
     def _row_to_dict_internal(self, row: sqlite3.Row) -> Dict[str, Any]:
         """内部：行转字典"""
+        keys = row.keys() if hasattr(row, "keys") else ()
+        source_index = keys.index("source") if "source" in keys else None
+        source_ref = row[5] or ""
+        source = row[source_index] if source_index is not None else source_ref
         return {
             "relation_id": row[0],
             "source_entity": row[1],
             "target_entity": row[2],
             "relation_type": row[3],
             "context": row[4] or "",
-            "source_ref": row[5] or "",
+            "source_ref": source_ref,
+            "source": source or "",
             "valid_from": row[6],
             "valid_until": row[7],
             "confidence": row[8]
