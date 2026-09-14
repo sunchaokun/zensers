@@ -68,7 +68,7 @@ from src.core.agents.generic_agent import GenericAgent
 from src.core.agents.batch_structures import BatchCreationResult
 from src.core.agents.lifecycle_state import AgentLifecycleState
 from src.skills.registry import SkillRegistry
-from src.core.communication import MessageBus, SharedMemory
+from src.core.communication import MessageBus, SharedMemory, resolve_shared_memory
 from src.core.agents.session_persistence import SessionPersistenceManager
 
 if TYPE_CHECKING:
@@ -135,6 +135,7 @@ class DynamicAgentFactory(AgentFactory):
         shared_memory: Optional[SharedMemory] = None,
         persistence: Optional[SessionPersistenceManager] = None,
         mcp_handler: Optional[Any] = None,
+        search_gateway: Optional[Any] = None,
     ):
         super().__init__()
         self._skill_registry = skill_registry or SkillRegistry()
@@ -145,9 +146,10 @@ class DynamicAgentFactory(AgentFactory):
             logger.info(f"DynamicAgentFactory: 自动注册了 {registered} 个核心 Skills")
         
         self._message_bus = message_bus or MessageBus()
-        self._shared_memory = shared_memory or SharedMemory()
+        self._shared_memory = resolve_shared_memory(shared_memory)
         self._persistence = persistence
         self._mcp_handler = mcp_handler
+        self._search_gateway = search_gateway
         self._agents: Dict[str, AgentType] = {}
         self._created_count = 0
         
@@ -280,6 +282,9 @@ class DynamicAgentFactory(AgentFactory):
             # MCP tool configuration
             "mcp_handler": self._mcp_handler,
             "mcp_tools": capability.mcp_tools,
+            # Route all agent-level web searches through AnySearch + local fallback.
+            "use_search_gateway": True,
+            "search_gateway": self._search_gateway,
         }
         
         # 将 context 中的 category 提升到 config 顶层（用于 Agent 分类）
@@ -860,6 +865,8 @@ class DynamicAgentFactory(AgentFactory):
             "context": agent_template.get("context", {}),
             "role": capability.get("role", ""),
             "goal": capability.get("goal", ""),
+            "use_search_gateway": True,
+            "search_gateway": self._search_gateway,
         }
         
         # 创建Agent实例

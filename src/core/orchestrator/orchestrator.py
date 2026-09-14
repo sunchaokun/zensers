@@ -36,6 +36,10 @@ Usage example:
 
 Design doc: docs/USER_INTERACTION_INTEGRATION_PLAN.md
 """
+import asyncio
+import hashlib
+import json
+
 from src.core.workflow import PreviewRevisionWorkflow, FeedbackRequest, WorkflowStatus
 from src.core.adjustment import RevisionService
 from src.core.preview.preview_generator import PreviewGenerator
@@ -47,7 +51,7 @@ from src.core.orchestrator.smart_clarifier import (
     OutputType,
     OutputFormat,
 )
-from src.core.communication import MessageBus, SharedMemory
+from src.core.communication import MessageBus, SharedMemory, resolve_shared_memory
 from src.agents.fixed_agents.quality_check_agent import QualityCheckAgent
 from src.agents.fixed_agents.document_models import DocumentFormat, GenerationAction
 from src.agents.fixed_agents.document_generation_agent import DocumentGenerationAgent
@@ -77,14 +81,18 @@ from src.core.orchestrator.aggregation import (
     WisdomRecorderConfig,
 )
 from src.core.storage.research_result_store import ResearchResultStore, ResearchStatus
+from src.core.manifest_contract import ManifestContractError, validate_manifest_contract
 from src.core.orchestrator.execution.scheduler import ExecutionScheduler
+from src.core.search import AnySearchProvider, LocalSkillProvider, SearchGateway, get_search_config
 from src.core.orchestrator.execution import (
     ExecutionEngine,
     ExecutionConfig,
 )
 from src.core.intent_types import IntentType, TaskComplexity
+from src.core.research_type import ResearchType, infer_research_composition
 from src.core.prompt_manager import PromptManager
 from src.core.wisdom import WisdomStore
+from src.config.settings import settings
 import logging
 import os
 import re
@@ -96,6 +104,410 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union, Callable, Tuple, TYPE_CHECKING
 
 logger = logging.getLogger(__name__)
+
+
+def _canonical_runtime_section_id(section_id: Any) -> str:
+    """Normalize legacy routing IDs to the runtime section identity.
+
+    Intelligent routing historically emitted IDs such as
+    ``section_0_market_size`` while the decomposition/report pipeline uses
+    ``section_0``.  The suffix is useful metadata but must not participate in
+    cross-stage joins.
+    """
+    value = str(section_id or "").strip()
+    match = re.match(r"^(section|synthesis)_(\d+)(?:_|$)", value)
+    return f"{match.group(1)}_{match.group(2)}" if match else value
+
+
+def _validate_report_generation_output(report: Dict[str, Any]) -> Dict[str, Any]:
+    """Reject an empty report before it can be cached or marked completed."""
+    sections = report.get("sections") if isinstance(report, dict) else None
+    if not isinstance(sections, list) or not sections:
+        raise ValueError("Report generation produced no sections")
+    if any(not isinstance(section, dict) for section in sections):
+        raise ValueError("Report generation produced invalid sections")
+    return report
+
+
+_REPORT_PLACEHOLDER_MARKERS = (
+    "本章节数据不足，无法生成完整分析",
+    "数据不足，无法生成",
+    "数据不足，本章节待补充",
+    "本章节待补充",
+    "暂无足够数据",
+    "摘要生成失败",
+    "章节生成失败",
+    "insufficient data",
+    "not enough data",
+    "[数据获取尝试]",
+    "改写说明",
+    "JSON解析失败，输出格式不规范",
+    "如果您需要更简练或突出某方面信息",
+)
+
+
+def _collect_report_coverage_warnings(
+    report: Dict[str, Any], task_structure: Optional[Dict[str, Any]] = None
+) -> List[Dict[str, Any]]:
+    """Detect missing/placeholder chapters at delivery without matching evidence."""
+    if not isinstance(report, dict):
+        return [{"type": "coverage", "severity": "high", "message": "报告结果不是有效对象"}]
+
+    warnings: List[Dict[str, Any]] = []
+    sections = report.get("sections") or []
+
+    def _walk_sections(items: Any) -> List[Dict[str, Any]]:
+        flattened: List[Dict[str, Any]] = []
+        if not isinstance(items, list):
+            return flattened
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            flattened.append(item)
+            for child_key in ("subsections", "sub_sections", "children", "sections"):
+                flattened.extend(_walk_sections(item.get(child_key) or []))
+        return flattened
+
+    actual_sections = _walk_sections(sections)
+    actual_ids = {
+        str(section.get("section_id") or section.get("id") or "").strip()
+        for section in actual_sections
+    }
+    structure = task_structure if isinstance(task_structure, dict) else {}
+    expected_manifest = structure.get("section_manifest") or []
+    expected_sections = structure.get("sections", [])
+    expected_items = [item for item in expected_manifest if isinstance(item, dict) and item.get("section_id")]
+    if not expected_items:
+        expected_items = _walk_sections(expected_sections)
+    for expected in expected_items:
+        if not isinstance(expected, dict):
+            continue
+        expected_id = str(expected.get("section_id") or expected.get("id") or "").strip()
+        output_slot = str(expected.get("output_slot") or "").strip().lower()
+        if output_slot == "exec_summary":
+            if not str(report.get("exec_summary") or "").strip():
+                warnings.append({
+                    "type": "missing_chapter", "severity": "high",
+                    "section": expected.get("title") or expected_id,
+                    "section_id": expected_id,
+                    "message": f"报告缺少执行摘要槽位：{expected.get('title') or expected_id}",
+                })
+            continue
+        if output_slot == "conclusion":
+            if not str(report.get("conclusion") or "").strip():
+                warnings.append({
+                    "type": "missing_chapter", "severity": "high",
+                    "section": expected.get("title") or expected_id,
+                    "section_id": expected_id,
+                    "message": f"报告缺少研究结论槽位：{expected.get('title') or expected_id}",
+                })
+            continue
+        if expected_id and expected_id not in actual_ids:
+            warnings.append({
+                "type": "missing_chapter", "severity": "high",
+                "section": expected.get("title") or expected_id,
+                "section_id": expected_id,
+                "message": f"报告缺少规划章节：{expected.get('title') or expected_id}",
+            })
+
+    def _section_text(section: Dict[str, Any]) -> str:
+        parts = [str(section.get(key) or "") for key in ("content", "body", "text")]
+        for child_key in ("subsections", "sub_sections", "children", "sections"):
+            for child in _walk_sections(section.get(child_key) or []):
+                parts.extend(str(child.get(key) or "") for key in ("content", "body", "text"))
+        return " ".join(parts)
+
+    for section in actual_sections:
+        if not isinstance(section, dict):
+            continue
+        title = str(section.get("title") or section.get("name") or section.get("section_id") or "未命名章节")
+        content = _section_text(section)
+        own_content = " ".join(str(section.get(key) or "") for key in ("content", "body", "text"))
+        if not own_content.strip():
+            warnings.append({
+                "type": "chapter_content_missing", "severity": "high", "section": title,
+                "message": f"章节没有可交付内容：{title}",
+            })
+        if any(marker.lower() in content.lower() for marker in _REPORT_PLACEHOLDER_MARKERS):
+            warnings.append({
+                "type": "placeholder_content", "severity": "high", "section": title,
+                "message": f"章节仍包含数据不足占位内容：{title}",
+            })
+    return warnings
+
+
+def _audit_report_manifest_contract(
+    requirement: Any,
+    task_structure: Optional[Dict[str, Any]],
+    created_agents: Any,
+    execution_results: Any,
+    report: Dict[str, Any],
+    artifacts: Any = None,
+) -> Dict[str, Any]:
+    """Run the hard report contract audit at the report boundary.
+
+    ``section_data_specs`` is preferred over the already-expanded runtime
+    sections because it retains the user-confirmed framework tree.  Results
+    are normalized to one stable result identity per producer execution while
+    coverage is still checked by section ID.
+    """
+    structure = task_structure if isinstance(task_structure, dict) else {}
+    manifest = structure.get("section_manifest") or []
+    if not manifest:
+        return {"status": "skipped", "reason": "no_manifest"}
+    framework_tree = (
+        structure.get("framework_tree")
+        or structure.get("section_data_specs")
+        or getattr(requirement, "section_details", None)
+        or structure.get("sections")
+    )
+    normalized_results = []
+    values = execution_results.values() if isinstance(execution_results, dict) else (execution_results or [])
+    for index, raw in enumerate(values):
+        if not isinstance(raw, dict):
+            continue
+        section_id = raw.get("section_id") or raw.get("_section_id")
+        if not section_id:
+            continue
+        item = dict(raw)
+        item["section_id"] = section_id
+        item.setdefault(
+            "result_id",
+            f"{raw.get('agent_id') or raw.get('producer_agent_id') or 'result'}::{section_id}::{index}",
+        )
+        normalized_results.append(item)
+    result = validate_manifest_contract(
+        framework_tree=framework_tree,
+        manifest=manifest,
+        created_agents=created_agents,
+        execution_results=normalized_results,
+        report=report,
+        artifacts=artifacts or [],
+    )
+    return {
+        "status": result.status,
+        "framework_leaf_ids": sorted(result.framework_leaf_ids),
+        "planned_body_ids": sorted(result.planned_body_ids),
+        "actual_body_ids": sorted(result.actual_body_ids),
+        "manifest_synthesis_ids": sorted(result.manifest_synthesis_ids),
+        "report_slot_ids": sorted(result.report_slot_ids),
+    }
+
+
+def _normalize_task_structure_runtime_ids(task_structure: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize task-structure section IDs and every dependency reference."""
+    if not isinstance(task_structure, dict):
+        return task_structure
+    normalized = dict(task_structure)
+    sections = []
+    id_map: Dict[str, str] = {}
+    for section in task_structure.get("sections", []) or []:
+        if not isinstance(section, dict):
+            continue
+        item = dict(section)
+        old_id = str(item.get("section_id", "") or "")
+        new_id = _canonical_runtime_section_id(old_id)
+        if old_id and new_id != old_id:
+            item.setdefault("legacy_section_id", old_id)
+        item["section_id"] = new_id
+        id_map[old_id] = new_id
+        sections.append(item)
+    normalized["sections"] = sections
+
+    def _map(value: Any) -> Any:
+        if isinstance(value, str):
+            return id_map.get(value, _canonical_runtime_section_id(value))
+        if isinstance(value, list):
+            return [_map(item) for item in value]
+        return value
+
+    for key in ("critical_path", "parallel_groups"):
+        if key in normalized:
+            normalized[key] = _map(normalized[key])
+    # Manifest is the report identity contract and must be normalized in the
+    # same transaction as SectionSpec IDs.  Leaving it untouched creates a
+    # split-brain plan where routing uses section_0 but report coverage still
+    # expects section_0_market_size.
+    normalized_manifest = []
+    for manifest_item in (task_structure.get("section_manifest", []) or []):
+        if not isinstance(manifest_item, dict):
+            continue
+        item = dict(manifest_item)
+        for key in ("section_id", "parent_section_id"):
+            if item.get(key):
+                item[key] = _map(item[key])
+        producers = item.get("producer_agent_ids")
+        if isinstance(producers, dict):
+            item["producer_agent_ids"] = dict(producers)
+        normalized_manifest.append(item)
+    if "section_manifest" in task_structure or normalized_manifest:
+        normalized["section_manifest"] = normalized_manifest
+    normalized["dependencies"] = [
+        {
+            **dependency,
+            "from_section": _map(dependency.get("from_section", "")),
+            "to_section": _map(dependency.get("to_section", "")),
+        }
+        for dependency in (task_structure.get("dependencies", []) or [])
+        if isinstance(dependency, dict)
+    ]
+    for section in normalized["sections"]:
+        section["content_dependency"] = _map(section.get("content_dependency", []))
+    return normalized
+
+
+def _normalize_report_section_ids(report: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep report ``id`` and result-store ``section_id`` joins equivalent.
+
+    The framework report uses ``id`` while the legacy result/replan APIs read
+    ``section_id``.  Both report-upgrade and mechanical fallback payloads must
+    expose the same stable chapter identity.
+    """
+    if not isinstance(report, dict):
+        return report
+    sections = report.get("sections")
+    if not isinstance(sections, list):
+        return report
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        section_id = str(
+            section.get("section_id") or section.get("id") or ""
+        ).strip()
+        if section_id:
+            section["section_id"] = section_id
+            section.setdefault("id", section_id)
+    return report
+
+
+def _publish_report_phase(session_id: Optional[str], phase: str) -> None:
+    """Publish a report phase without making orchestration fail on telemetry."""
+    if not session_id:
+        return
+    try:
+        from src.core.session_manager import SessionManager
+        from src.core.report_context import update_report_context
+        session = SessionManager.get_instance().get(session_id)
+        if session:
+            update_report_context(session_id, session, phase=phase)
+    except Exception as exc:
+        logger.warning("Report phase context update failed for %s: %s", session_id, exc)
+
+
+def _update_research_result_terminal_state(
+    task_id: str,
+    storage_path: Union[str, Path],
+    status: ResearchStatus,
+    output_format: Optional[str] = None,
+    document_path: Optional[str] = None,
+    final_result: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Close the persisted result written by the execution batches.
+
+    Collection batches create the durable result record first.  The report
+    workflow must close that same record instead of leaving it in
+    ``collecting`` after the orchestrator has returned.  Missing records are
+    tolerated because some legacy/non-persistent callers only use the in
+    memory ``ResearchResult``.
+    """
+    if not task_id:
+        return
+    try:
+        store = ResearchResultStore(storage_path=str(storage_path))
+        if store.load_metadata(task_id) is None:
+            return
+        # The collection result is written before report generation.  When a
+        # report is produced, persist that final payload into the same record
+        # before closing metadata; otherwise result.json can remain in the
+        # collecting state with empty sections while DOCX/HTML already exists.
+        if isinstance(final_result, dict):
+            # Keep the terminal payload and the file actually returned to the
+            # caller in one durable contract.  In particular, a revision may
+            # create v2 while the in-memory report still contains the v1 path.
+            terminal_result = dict(final_result)
+            resolved_path = str(document_path or terminal_result.get("document_path") or terminal_result.get("output_path") or "")
+            terminal_result["document_path"] = resolved_path
+            terminal_result["output_path"] = resolved_path
+            artifacts = list(terminal_result.get("artifacts") or terminal_result.get("artifact_manifest") or [])
+            artifact_path = Path(resolved_path) if resolved_path else None
+            content_hash = None
+            if artifact_path and artifact_path.is_file():
+                digest = hashlib.sha256()
+                with artifact_path.open("rb") as artifact_file:
+                    for chunk in iter(lambda: artifact_file.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                content_hash = digest.hexdigest()
+            def _stable_payload_hash(payload: Any) -> str:
+                encoded = json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
+                ).encode("utf-8")
+                return hashlib.sha256(encoded).hexdigest()
+
+            manifest_hash = str(terminal_result.get("manifest_hash") or "")
+            if not manifest_hash:
+                manifest_hash = _stable_payload_hash(terminal_result.get("section_manifest") or [])
+            report_content_hash = str(terminal_result.get("report_content_hash") or "")
+            if not report_content_hash:
+                report_content_hash = _stable_payload_hash({
+                    key: value for key, value in terminal_result.items()
+                    if key not in {"artifacts", "artifact_manifest", "output_path", "document_path"}
+                })
+            terminal_result["manifest_hash"] = manifest_hash
+            terminal_result["report_content_hash"] = report_content_hash
+            artifact = {
+                "artifact_id": f"{task_id}:{artifact_path.suffix.lstrip('.') if artifact_path else 'unknown'}",
+                "version": str(terminal_result.get("report_version") or "latest"),
+                "format": str(output_format or (artifact_path.suffix.lstrip('.') if artifact_path else "")),
+                "path": resolved_path,
+                "content_hash": content_hash,
+                "artifact_hash": content_hash,
+                "manifest_hash": manifest_hash,
+                "report_content_hash": report_content_hash,
+                "parent_version": terminal_result.get("parent_version"),
+                "status": "ready" if content_hash else "missing",
+            }
+            enriched_artifacts = []
+            for existing_artifact in artifacts:
+                if not isinstance(existing_artifact, dict) or existing_artifact.get("path") == resolved_path:
+                    continue
+                enriched = dict(existing_artifact)
+                existing_path = Path(str(enriched.get("path") or ""))
+                existing_hash = None
+                if existing_path.is_file():
+                    existing_digest = hashlib.sha256()
+                    with existing_path.open("rb") as existing_file:
+                        for chunk in iter(lambda: existing_file.read(1024 * 1024), b""):
+                            existing_digest.update(chunk)
+                    existing_hash = existing_digest.hexdigest()
+                enriched["artifact_hash"] = existing_hash or enriched.get("artifact_hash") or enriched.get("content_hash")
+                enriched["content_hash"] = existing_hash or enriched.get("content_hash")
+                enriched.setdefault("manifest_hash", manifest_hash)
+                enriched.setdefault("report_content_hash", report_content_hash)
+                enriched.setdefault("version", str(terminal_result.get("report_version") or "latest"))
+                enriched_artifacts.append(enriched)
+            artifacts = enriched_artifacts
+            if resolved_path:
+                artifacts.append(artifact)
+            terminal_result["artifacts"] = artifacts
+            terminal_result["artifact_manifest"] = artifacts
+            store.save_result(task_id, terminal_result, status=status)
+        store.update_result(
+            task_id,
+            status=status,
+            generated_format=output_format,
+            document_path=document_path,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to close persisted research result %s as %s: %s",
+            task_id,
+            getattr(status, "value", status),
+            exc,
+        )
 
 # Imports in TYPE_CHECKING block (for type annotations only)
 if TYPE_CHECKING:
@@ -178,6 +590,125 @@ class ResearchResult:
 
 
 class ResearchOrchestrator:
+    @staticmethod
+    def _build_quality_adjustments(
+        issues: List[Dict[str, Any]],
+        suggestions: Optional[List[Any]] = None,
+        document_path: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Convert only explicitly structured quality issues into edits.
+
+        A defense finding is diagnostic by default.  It becomes executable
+        only when it identifies a stable chapter/section id and carries a
+        machine-readable ``repair`` (or legacy ``adjustment``) operation.
+        Free-form messages and suggestions must never be appended to report
+        prose as if that fixed the underlying evidence problem.
+        """
+        adjustments: List[Dict[str, Any]] = []
+        suggestions = suggestions or []
+        for issue in (issues or [])[:3]:
+            if not isinstance(issue, dict):
+                continue
+            if issue.get("auto_fixable") is False or issue.get("type") == "format":
+                continue
+
+            section_id = issue.get("section_id") or issue.get("chapter_id")
+            section = issue.get("section") or section_id
+            if not section:
+                continue
+
+            operation = issue.get("repair") or issue.get("adjustment")
+            if not isinstance(operation, dict):
+                matching_suggestion = next(
+                    (suggestion for suggestion in suggestions if isinstance(suggestion, dict)),
+                    None,
+                )
+                operation = matching_suggestion
+            if not isinstance(operation, dict):
+                continue
+            if not (
+                isinstance(operation.get("replace"), str)
+                and isinstance(operation.get("replacement"), str)
+            ) and not isinstance(operation.get("remove"), str):
+                continue
+
+            adjustments.append({
+                "section": section,
+                "section_id": section_id or section,
+                "adjustment": operation,
+                "document_path": document_path,
+                "revision_type": "minor",
+            })
+        return adjustments
+
+    @staticmethod
+    def _apply_quality_adjustment(section: Dict[str, Any], adjustment: Any) -> bool:
+        """Apply only machine-executable content edits, never prose notes."""
+        if not isinstance(adjustment, dict):
+            return False
+        content = str(section.get("content", "") or "")
+        if "replace" in adjustment and "replacement" in adjustment:
+            old = str(adjustment["replace"])
+            if old and old in content:
+                section["content"] = content.replace(
+                    old, str(adjustment["replacement"]), 1
+                )
+                return True
+        if "remove" in adjustment:
+            old = str(adjustment["remove"])
+            if old and old in content:
+                section["content"] = content.replace(old, "", 1)
+                return True
+        return False
+
+    @staticmethod
+    def _latest_preview_path(current_path: Optional[str], result: Dict[str, Any]) -> Optional[str]:
+        """Return the newest generated preview path when a repair succeeds."""
+        if isinstance(result, dict):
+            return result.get("document_path") or result.get("output_path") or current_path
+        return current_path
+
+    @staticmethod
+    def _quality_allows_formal_export(
+        quality_passed: bool,
+        artifact_kind: str = "formal",
+        structural_passed: bool = True,
+    ) -> bool:
+        """Gate formal export on structure, while preserving low-score delivery.
+
+        ``quality_passed`` is a user-facing quality signal.  A low score may
+        still be a useful auxiliary report.  Missing/empty/placeholder
+        chapters are a separate structural gate and are the only reason this
+        helper blocks a formal artifact (apart from diagnostic policy).
+        """
+        if artifact_kind == "diagnostic":
+            return True
+        return bool(structural_passed)
+
+    @staticmethod
+    def _survey_result_to_research_result(
+        task_id: str,
+        requirement: ResearchRequirement,
+        survey_result: Optional[Dict[str, Any]],
+        started_at: datetime,
+    ) -> ResearchResult:
+        """Adapt the canonical survey workflow result to the research result contract."""
+        survey_result = survey_result or {}
+        analysis = survey_result.get("analysis", {}) or {}
+        success = bool(survey_result.get("success") and survey_result.get("status") == "completed")
+        summary = analysis.get("report") or survey_result.get("error", "")
+        return ResearchResult(
+            task_id=task_id,
+            status="completed" if success else "failed",
+            topic=requirement.topic,
+            agents_used=["survey_integration"],
+            stages_completed=len(survey_result.get("steps", [])),
+            summary=summary,
+            created_at=started_at,
+            completed_at=datetime.now(),
+            report=analysis if isinstance(analysis, dict) else {},
+        )
+
     """
     Research Task Master Scheduler (Simplified)
 
@@ -238,7 +769,11 @@ class ResearchOrchestrator:
         enable_dual_track: bool = False,
 
         # Execution concurrency
-        max_parallel: int = 5,
+        # MIMO-compatible providers have materially higher per-call latency.
+        # Ten concurrent agents keeps a 10+ section report from being
+        # needlessly serialized into multiple waves while the coordinator's
+        # own limit still provides the final safety bound.
+        max_parallel: int = 10,
 
         # Intelligent routing parameters (Phase 2: enabled by default)
         use_intelligent_routing: bool = True,
@@ -262,7 +797,7 @@ class ResearchOrchestrator:
 
         # Communication components
         self._message_bus = message_bus or MessageBus()
-        self._shared_memory = shared_memory or SharedMemory()
+        self._shared_memory = resolve_shared_memory(shared_memory)
 
         # P0-4 fix: SkillRegistry (ensures Agents can access Skills)
         # If not provided, create a new SkillRegistry and register via discovery
@@ -357,6 +892,7 @@ class ResearchOrchestrator:
             shared_memory=self._shared_memory,
             persistence=self._persistence,
         )
+        self._search_gateways: Dict[str, SearchGateway] = {}
 
         logger.info(
             f"Orchestrator: AgentFactory created, SkillRegistry contains {
@@ -413,6 +949,45 @@ class ResearchOrchestrator:
 
         logger.info("ResearchOrchestrator initialized (Integrated Interactive Version)")
 
+    def _configure_task_search_gateway(self, task_id: str) -> SearchGateway:
+        """Create and distribute one Gateway for a research task."""
+        existing = self._search_gateways.get(task_id)
+        if existing is not None:
+            return existing
+
+        search_skill = self._skill_registry.get("search_skill")
+        providers = {"anysearch": AnySearchProvider()}
+        if search_skill is not None:
+            providers["local"] = LocalSkillProvider(search_skill, name="local")
+        fallback = ["local"] if "local" in providers else []
+        search_config = get_search_config()
+        gateway = SearchGateway(
+            task_id=task_id,
+            providers=providers,
+            primary_provider="anysearch",
+            fallback_providers=fallback,
+            task_max_searches=search_config.task_max_searches,
+            default_scope_max_searches=search_config.default_scope_max_searches,
+            scope_max_searches={
+                "report_repair": 2,
+                "report_generation": 12,
+                "report_revision": 8,
+                "conflict_resolver": 2,
+                "ppt_supplement": 2,
+            },
+            # 40 preserves the existing local-search quality contract during
+            # migration; the final task quality gate remains separate.
+            quality_threshold=40.0,
+            max_provider_retries=1,
+            max_provider_switches=1,
+        )
+        self._search_gateways[task_id] = gateway
+        self._execution_engine.search_gateway = gateway
+        if hasattr(self._agent_factory, "_search_gateway"):
+            self._agent_factory._search_gateway = gateway
+        logger.info("[%s] task SearchGateway configured", task_id)
+        return gateway
+
     async def research(
         self,
         user_input: Union[str, Dict[str, Any]],
@@ -464,8 +1039,16 @@ class ResearchOrchestrator:
         Returns:
             ResearchResult: Research result
         """
-        task_id = f"research_{uuid.uuid4().hex[:8]}"
+        # The API executor already owns a stable session identity. Reuse it
+        # for orchestration and ResearchResultStore persistence so timeout,
+        # resume and terminal-state updates address the same record.
+        _requested_session_id = (
+            user_input.get("session_id", "")
+            if isinstance(user_input, dict) else ""
+        )
+        task_id = str(_requested_session_id or f"research_{uuid.uuid4().hex[:8]}")
         start_time = datetime.now()
+        self._configure_task_search_gateway(task_id)
 
         # Determine whether to use intelligent routing
         use_routing = (
@@ -504,6 +1087,8 @@ class ResearchOrchestrator:
             }
             research_task = self._task_persistence.create_task(
                 "research", task_input, task_id=task_id)
+            _requested_run_id = user_input.get("_run_id") if isinstance(user_input, dict) else None
+            research_task.claim_execution(run_id=_requested_run_id, owner="research-orchestrator", process_id=os.getpid())
             self._task_persistence.save_task(research_task)
             self._task_persistence.update_task_state(
                 task_id, TaskState.RUNNING, progress=0.0, message="Research task started")
@@ -775,7 +1360,7 @@ class ResearchOrchestrator:
             for _agent in agents:
                 _asec = getattr(_agent, 'section_id', None) or ''
                 if _asec:
-                    agent_section_map[_agent.agent_id] = _asec
+                    agent_section_map[_agent.agent_id] = _canonical_runtime_section_id(_asec)
                 _agent._current_session_id = _session_id_for_agents
             session_registry = self._agent_factory.get_registry(task_id)
             if session_registry:
@@ -812,6 +1397,7 @@ class ResearchOrchestrator:
                     requirement={
                         "topic": requirement.topic,
                         "aspects": requirement.aspects,
+                        "section_manifest": getattr(decomposition_plan, "section_manifest", []),
                         "region": requirement.region,
                         "task_id": task_id,
                         "session_id": _sid,
@@ -829,6 +1415,7 @@ class ResearchOrchestrator:
                     requirement={
                         "topic": requirement.topic,
                         "aspects": requirement.aspects,
+                        "section_manifest": getattr(decomposition_plan, "section_manifest", []),
                         "region": requirement.region,
                         "task_id": task_id,  # For ResearchResultStore persistence
                         "session_id": _sid,
@@ -884,8 +1471,8 @@ class ResearchOrchestrator:
                     else:
                         if _sid:
                             try:
-                                from src.core.progress_streamer import fail_task as _fail_task
-                                _fail_task(_sid, "Research cancelled, no partial data")
+                                from src.core.progress_streamer import cancel_task as _cancel_task
+                                _cancel_task(_sid, "Research cancelled, no partial data")
                             except Exception:
                                 pass
                         return ResearchResult(
@@ -978,12 +1565,16 @@ class ResearchOrchestrator:
                     pass
 
             # 6. Aggregate results (aggregation layer) - pass framework section structure
+            aggregation_sections = self._aggregation_section_details(
+                requirement.section_details,
+                getattr(decomposition_plan, "section_manifest", []),
+            )
             aggregated = self._result_aggregator.aggregate(
                 results_for_aggregation,
-                section_details=requirement.section_details,
+                section_details=aggregation_sections,
             )
             logger.info(
-                f"[{task_id}] Aggregation complete, section_details={len(requirement.section_details)} framework sections")
+                f"[{task_id}] Aggregation complete, section_details={len(aggregation_sections)} manifest sections")
 
             # 6.5 Signal cross-synthesis to dynamic orchestrator (routing
             # system handles execution order)
@@ -1033,6 +1624,7 @@ class ResearchOrchestrator:
                 try:
                     from src.core.progress_streamer import start_phase as _start_phase, update_progress as _update_progress
                     _start_phase(_sid, "report_generation", "Report Generation", description="Generating research report...")
+                    _publish_report_phase(_sid, "report_generating")
                     _update_progress(_sid, 0.8, phase_id="report_generation", message="Generating report...")
                 except Exception:
                     pass
@@ -1043,30 +1635,34 @@ class ResearchOrchestrator:
                 from src.agents.fixed_agents.report_upgrade.chapter_writer import ChapterWriter
                 from src.agents.fixed_agents.report_upgrade.chapter_reviewer import ChapterReviewAgent
                 from src.agents.fixed_agents.report_upgrade.global_reviewer import GlobalReviewAgent
-                from src.agents.fixed_agents.report_upgrade.data_repair import DataRepairAgent, ConflictResolver
+                from src.agents.fixed_agents.report_upgrade.data_repair import ConflictResolver
                 from src.agents.fixed_agents.report_upgrade.prompt_manager import PromptManager
                 from src.core.research_framework_manager import get_framework_config
+                from src.services.chart_planner import ChartPlannerAgent
+                from src.services.chart_generator import ChartGenerator
 
                 _search_skill = self._skill_registry.get("search_skill")
                 _web_scraper_skill = self._skill_registry.get("web_scraper")
+                _task_gateway = self._configure_task_search_gateway(task_id)
 
                 _pm = PromptManager()
                 _ro = ReportOrchestrator(
                     chapter_writer=ChapterWriter(prompt_manager=_pm),
                     chapter_reviewer=ChapterReviewAgent(prompt_manager=_pm),
                     global_reviewer=GlobalReviewAgent(prompt_manager=_pm),
-                    data_repair_agent=DataRepairAgent(
-                        search_skill=_search_skill,
-                        web_scraper_skill=_web_scraper_skill,
-                        prompt_manager=_pm,
-                    ),
                     conflict_resolver=ConflictResolver(
                         search_skill=_search_skill,
                         web_scraper_skill=_web_scraper_skill,
                         prompt_manager=_pm,
+                        search_gateway=_task_gateway,
                     ),
                     prompt_manager=_pm,
                     skill_registry=self._skill_registry,
+                    search_gateway=_task_gateway,
+                    search_skill=_search_skill,
+                    web_scraper_skill=_web_scraper_skill,
+                    chart_planner=ChartPlannerAgent(search_gateway=_task_gateway),
+                    chart_generator=ChartGenerator(),
                 )
 
                 _output_type_value = requirement.output_type.value if hasattr(
@@ -1099,13 +1695,17 @@ class ResearchOrchestrator:
                     requirement.section_details, requirement.topic, task_id
                 )
 
-                research_result_data = await _ro.generate_report(
+                _report_call = _ro.generate_report(
                     task_structure=_task_structure_dict,
                     framework_config=_fc_dict,
                     aggregated_result=aggregated,
                     topic=requirement.topic,
                     task_id=task_id,
                 )
+                # Report generation is an Agent lifecycle operation.  Do not
+                # impose a hidden fixed deadline here: long chapter synthesis
+                # must finish or be explicitly cancelled by task control.
+                research_result_data = await _report_call
                 if "title" not in research_result_data:
                     research_result_data["title"] = requirement.topic
                 try:
@@ -1146,6 +1746,7 @@ class ResearchOrchestrator:
                 # Fallback: use Markdown/HTML generation
                 self._report_generator._sections = []
                 aggregated_dict = aggregated.to_dict()
+                aggregated_dict.setdefault("title", requirement.topic)
                 sections_data = aggregated_dict.get("sections", [])
 
                 for section_data in sections_data:
@@ -1202,6 +1803,7 @@ class ResearchOrchestrator:
                     from src.core.progress_streamer import start_phase as _start_phase, update_progress as _update_progress, complete_phase as _complete_phase
                     _complete_phase(_sid, "report_generation")
                     _start_phase(_sid, "quality_check", "Quality Check", description="Checking report quality...")
+                    _publish_report_phase(_sid, "quality_checking")
                     _update_progress(_sid, 0.9, phase_id="quality_check", message="Running quality checks...")
                 except Exception:
                     pass
@@ -1212,7 +1814,7 @@ class ResearchOrchestrator:
             
             for _retry in range(2):  # initial + 1 retry max
                 try:
-                    check_input = {"report": aggregated.to_dict(), "standards": None}
+                    check_input = {"report": research_result_data, "standards": None}
                     if output_path and Path(output_path).exists():
                         try:
                             with open(output_path, "r", encoding="utf-8") as _f:
@@ -1227,27 +1829,30 @@ class ResearchOrchestrator:
                         issues = quality_result.get("issues", [])
                         suggestions = quality_result.get("suggestions", [])
 
+                        # Final-report L1-L5 defense is a hard gate.  The
+                        # legacy checker may pass a structurally complete
+                        # report, but it cannot override a failed evidence
+                        # audit attached by ReportOrchestrator.
+                        defense = check_input["report"].get("defense_audit", {})
+                        if defense and not defense.get("passed", False):
+                            quality_passed = False
+                            quality_score = min(quality_score, float(defense.get("score", 0)))
+                            issues.extend({
+                                "type": "defense_audit",
+                                "message": item.get("message", "L1-L5 evidence defense failed"),
+                                "severity": "high",
+                                "layer": item.get("layer", "L1-L5"),
+                            } for item in defense.get("issues", [])[:20])
+
                         logger.info(f"[{task_id}] Quality check: score={quality_score:.1f}, passed={quality_passed}")
                         if quality_passed:
                             break
 
                         # Not passed: try auto-repair once
                         if _retry == 0 and issues:
-                            adjustments = []
-                            for issue in issues[:3]:
-                                if issue.get("auto_fixable") is False:
-                                    continue
-                                if issue.get("type") == "format":
-                                    continue
-                                section = issue.get("section")
-                                if section:
-                                    adjustments.append({
-                                        "section": section,
-                                        "section_id": issue.get("section_id"),
-                                        "adjustment": suggestions[0] if suggestions else issue.get("message", ""),
-                                        "document_path": output_path,
-                                        "revision_type": "minor",
-                                    })
+                            adjustments = self._build_quality_adjustments(
+                                issues, suggestions, output_path
+                            )
                             if not adjustments:
                                 logger.warning(f"[{task_id}] No auto-fixable issues, stopping")
                                 break  # no empty retries
@@ -1257,11 +1862,26 @@ class ResearchOrchestrator:
                                 if sec_name:
                                     for s in aggregated.data.get("sections", []):
                                         if s.get("title") == sec_name or s.get("id") == sec_name:
-                                            s["content"] = f"{s.get('content', '')}\n\n[修复] {adj.get('adjustment', '')}"
+                                            applied = self._apply_quality_adjustment(
+                                                s, adj.get("adjustment")
+                                            )
+                                            if not applied:
+                                                logger.warning(
+                                                    f"[{task_id}] Ignoring non-structured quality adjustment "
+                                                    f"for section {sec_name}"
+                                                )
+                            # The quality checker reads research_result_data,
+                            # while machine edits are applied to aggregated.
+                            # Re-materialize the single canonical report
+                            # object before rendering or the next audit;
+                            # otherwise a successful repair is invisible to
+                            # validation and persistence.
+                            research_result_data = aggregated.to_dict()
+                            research_result_data.setdefault("title", requirement.topic)
                             # Regenerate preview with fixed content
                             preview_input = {
                                 "action": "produce_document",
-                                "research_result": aggregated.to_dict(),
+                                "research_result": research_result_data,
                                 "output_format": "html",
                                 "output_dir": str(Path(output_path).parent),
                                 "task_id": task_id,
@@ -1272,6 +1892,7 @@ class ResearchOrchestrator:
                                 new_path = new_result.get("document_path") or new_result.get("output_path", "")
                                 if new_path and Path(new_path).exists():
                                     output_path = new_path
+                                    preview_path = self._latest_preview_path(preview_path, new_result)
                                     logger.info(f"[{task_id}] Auto-repair: regenerated with {len(adjustments)} fixes")
                                     # Copy repaired preview to serving directory
                                     try:
@@ -1303,7 +1924,7 @@ class ResearchOrchestrator:
                     logger.warning(f"  - {issue.get('type', 'unknown')}: {issue.get('message', '')[:100]}")
 
             if exec_result.status == "cancelled":
-                result_status = "completed_with_warnings"
+                result_status = "cancelled"
             elif quality_passed:
                 result_status = "completed"
             else:
@@ -1486,8 +2107,24 @@ class ResearchOrchestrator:
             # Requirement: must go through HTML preview + user confirmation before generating Word document
             # Interactive mode: preview → user confirmation → generate Word (already implemented in revision loop)
             # Non-interactive mode: preview → auto-generate Word (no interactive user)
-            if not final_document_generated and output_format in (
-                    "docx", "pptx", "pdf"):
+            coverage_warnings = _collect_report_coverage_warnings(
+                research_result_data,
+                locals().get("_task_structure_dict"),
+            )
+            structural_passed = not any(
+                str(item.get("severity", "")).lower() in {"high", "critical"}
+                for item in coverage_warnings
+                if isinstance(item, dict)
+            )
+            if coverage_warnings:
+                research_result_data["coverage_warnings"] = coverage_warnings
+            if (
+                not final_document_generated
+                and output_format in ("docx", "pptx", "pdf")
+                and self._quality_allows_formal_export(
+                    quality_passed, "formal", structural_passed=structural_passed,
+                )
+            ):
                 if interaction_mode:
                     # Interactive mode: wait for user confirmation (already handled in revision loop above)
                     logger.info(f"[{task_id}] HTML preview generated: {preview_path}")
@@ -1515,6 +2152,12 @@ class ResearchOrchestrator:
                     else:
                         logger.warning(
                             f"[{task_id}] Final document generation failed: {doc_result.get('error')}, using preview version")
+
+            if not quality_passed:
+                logger.error(
+                    f"[{task_id}] Formal export blocked by quality gate; "
+                    "diagnostic/preview artifact remains available"
+                )
 
             # 9. Store results (output layer)
             self._storage_manager.save(
@@ -1564,13 +2207,14 @@ class ResearchOrchestrator:
                 )
 
             # Build result
+            legacy_result_status = "completed" if quality_passed else "completed_with_warnings"
             result = ResearchResult(
                 task_id=task_id,
-                status="completed",
+                status=legacy_result_status,
                 topic=requirement.topic,
                 agents_used=[a.agent_id for a in agents],
                 stages_completed=len(results_for_aggregation),
-                output_path=preview_path or output_path,
+                output_path=output_path or preview_path,
                 summary=self._generate_summary(aggregated, requirement),
                 created_at=start_time,
                 completed_at=datetime.now(),
@@ -1583,7 +2227,7 @@ class ResearchOrchestrator:
                 revision_count=revision_count,
                 interaction_enabled=interaction_mode,
                 # P1-4 fix: populate report and document_path fields
-                report=aggregated.to_dict(),  # Structured report data
+                report={**aggregated.to_dict(), "title": requirement.topic},  # Structured report data
                 document_path=output_path if output_path and Path(
                     output_path).exists() else None,
             )
@@ -1591,11 +2235,25 @@ class ResearchOrchestrator:
             # R1 fix: update task persistence state to completed
             try:
                 self._task_persistence.update_task_state(
-                    task_id, TaskState.COMPLETED, progress=1.0,
-                    message=f"Research complete, {len(results_for_aggregation)} stages"
+                    task_id,
+                    TaskState.COMPLETED if quality_passed else TaskState.COMPLETED_WITH_WARNINGS,
+                    progress=1.0,
+                    message=(
+                        f"Research complete, {len(results_for_aggregation)} stages"
+                        if quality_passed
+                        else f"Research complete with quality warnings, {len(results_for_aggregation)} stages"
+                    ),
                 )
             except Exception as e:
                 logger.warning(f"[{task_id}] Failed to update task completion state: {e}")
+            _update_research_result_terminal_state(
+                task_id,
+                self._storage_path,
+                ResearchStatus.COMPLETED
+                if quality_passed else ResearchStatus.COMPLETED_WITH_WARNINGS,
+                output_format=str(output_format or ""),
+                document_path=str(output_path or ""),
+            )
 
             self._task_history.append({
                 "task_id": task_id,
@@ -1610,6 +2268,11 @@ class ResearchOrchestrator:
 
         except Exception as e:
             logger.error(f"[{task_id}] Research failed: {e}")
+            _update_research_result_terminal_state(
+                task_id,
+                self._storage_path,
+                ResearchStatus.FAILED,
+            )
             # R1 fix: update task state to failed
             try:
                 self._task_persistence.update_task_state(
@@ -1678,10 +2341,19 @@ class ResearchOrchestrator:
         if self._routing_adapter is None:
             logger.error(
                 f"[{task_id}] _routing_adapter is None, cannot execute intelligent routing")
+            _failed_requirement = locals().get("requirement")
+            _failed_topic = (
+                _failed_requirement.get("topic")
+                if isinstance(_failed_requirement, dict)
+                else getattr(_failed_requirement, "topic", None)
+            ) or user_input
             return ResearchResult(
                 task_id=task_id,
                 status="failed",
-                topic=str(user_input)[:50],
+                # Preserve the parsed requirement topic even when a later
+                # report-stage validation fails; callers use this identity
+                # to correlate the failed execution and its diagnostics.
+                topic=str(_failed_topic)[:50],
                 agents_used=[],
                 stages_completed=0,
                 summary="Intelligent routing adapter unavailable",
@@ -1698,6 +2370,8 @@ class ResearchOrchestrator:
             }
             research_task = self._task_persistence.create_task(
                 "research", task_input, task_id=task_id)
+            _requested_run_id = user_input.get("_run_id") if isinstance(user_input, dict) else None
+            research_task.claim_execution(run_id=_requested_run_id, owner="research-orchestrator", process_id=os.getpid())
             self._task_persistence.save_task(research_task)
             self._task_persistence.update_task_state(
                 task_id, TaskState.RUNNING, progress=0.0, message="Intelligent routing task started")
@@ -1709,6 +2383,7 @@ class ResearchOrchestrator:
 
         # Initialize state machine
         state_machine = ConversationStateMachine(research_id=task_id)
+        routing_result = None
 
         try:
             # === Phase 1: Requirement parsing ===
@@ -1823,13 +2498,70 @@ class ResearchOrchestrator:
                 "topic": requirement.topic,
                 "aspects": requirement.aspects,
                 "output_type": requirement.output_type.value if hasattr(requirement.output_type, 'value') else str(requirement.output_type),
+                "include_survey": getattr(requirement, "include_survey", False),
+                "enable_questionnaire": getattr(requirement, "enable_questionnaire", False),
+                "survey_mode": getattr(requirement, "survey_mode", None),
+                "survey_target_count": getattr(requirement, "survey_target_count", None),
             }
 
             routing_result = self._routing_adapter.analyze(
-                user_request=requirement.topic,
+                user_request=user_input if isinstance(user_input, str) else str(user_input),
                 requirement=requirement_dict,
                 topic=requirement.topic,
             )
+
+            # Intelligent routing must pass the plan-level DAG audit before
+            # any Agent is created or any execution fallback is selected.
+            # A rejected plan is returned as a routing error with the
+            # structured revision feedback, rather than being silently
+            # downgraded to the legacy execution path.
+            dag_audit = getattr(routing_result, "dag_audit", None)
+            if dag_audit is not None and not dag_audit.passed:
+                feedback = "; ".join(dag_audit.revision_feedback) or "请修订任务依赖和执行顺序"
+                raise ValueError(f"DAG计划审查未通过: {feedback}")
+
+            # Convert all routing signals into the canonical composition used
+            # by the runtime.  The composition, rather than an incidental
+            # keyword check, decides whether this is pure survey or composite
+            # industry-research + survey execution.
+            composition = infer_research_composition(
+                requirement=requirement,
+                intent_result=routing_result.intent_result,
+                user_request=user_input if isinstance(user_input, str) else str(user_input),
+            )
+            requirement.dynamic_fields["research_composition"] = composition.to_dict()
+            logger.info(
+                f"[{task_id}] Research composition: "
+                f"template={composition.get_workflow_template_id()}, "
+                f"phases={composition.get_execution_phases()}"
+            )
+
+            # A pure survey must not create industry-research agents.  It uses
+            # the existing canonical SurveyIntegrationAgent, whose simulation
+            # path is PersonaV2 + SimulationExecutor.
+            if composition.primary is ResearchType.SURVEY and not composition.secondary:
+                try:
+                    survey_result = await self._execute_survey_integration(requirement, task_id)
+                except Exception as exc:
+                    logger.error(f"[{task_id}] Pure survey workflow failed: {exc}", exc_info=True)
+                    survey_result = {
+                        "success": False,
+                        "status": "failed",
+                        "error": str(exc),
+                    }
+                result = self._survey_result_to_research_result(
+                    task_id, requirement, survey_result, start_time
+                )
+                try:
+                    self._task_persistence.update_task_state(
+                        task_id,
+                        TaskState.COMPLETED if result.status == "completed" else TaskState.FAILED,
+                        progress=1.0,
+                        message="Pure survey workflow completed" if result.status == "completed" else "Pure survey workflow failed",
+                    )
+                except Exception:
+                    pass
+                return result
 
             # R-FIX-3/4: 缓存意图结果，供后续增量/重新分析融合使用
             self._cache_intent_for_task(task_id, routing_result.intent_result)
@@ -1878,27 +2610,11 @@ class ResearchOrchestrator:
             requirement.recommended_skills = list(set(recommended_skills))
             logger.info(f"[{task_id}] Recommended Skills: {requirement.recommended_skills}")
 
-            # 3c. Survey integration check (same as research() path)
+            # 3c. The survey stage is executed after the industry-research
+            # execution below.  This preserves the declared sequential
+            # industry_with_survey workflow instead of running the survey
+            # before its upstream analysis exists.
             survey_result = None
-            _survey_triggers = [
-                "survey", "questionnaire", "poll", "research study",
-                "questionnaire survey", "consumer survey", "user research",
-            ]
-            _user_input_lower = requirement.topic.lower() if hasattr(requirement, 'topic') else ""
-            _has_survey_intent = (
-                getattr(requirement, 'include_survey', False)
-                or getattr(requirement, 'enable_questionnaire', False)
-                or any(kw in _user_input_lower for kw in _survey_triggers)
-            )
-            if _has_survey_intent:
-                logger.info(f"[{task_id}] Survey intent detected, starting survey workflow")
-                try:
-                    survey_result = await self._execute_survey_integration(requirement, task_id)
-                    if survey_result:
-                        logger.info(f"[{task_id}] Survey completed: {survey_result.get('status', 'unknown')}")
-                except Exception as e:
-                    logger.error(f"[{task_id}] Survey integration failed: {e}")
-                    survey_result = None
 
             # 4.3 Knowledge reference for routing (delegated to _phase2_knowledge_for_routing)
             if self._knowledge_manager:
@@ -1941,7 +2657,7 @@ class ResearchOrchestrator:
             for _agent in agents:
                 _asec = getattr(_agent, 'section_id', None) or ''
                 if _asec:
-                    agent_section_map[_agent.agent_id] = _asec
+                    agent_section_map[_agent.agent_id] = _canonical_runtime_section_id(_asec)
                 _agent._current_session_id = _session_id_for_agents
 
             # Update progress: Agent creation complete
@@ -2003,6 +2719,9 @@ class ResearchOrchestrator:
                     requirement={
                         "topic": requirement.topic,
                         "aspects": requirement.aspects,
+                        "section_manifest": getattr(
+                            routing_result.decomposition_plan, "section_manifest", []
+                        ),
                         "region": getattr(requirement, 'region', ''),
                         "task_id": task_id,
                         "session_id": getattr(requirement, 'session_id', task_id),
@@ -2061,14 +2780,14 @@ class ResearchOrchestrator:
                         exec_result.stage_results["recovered"] = recovered
                         logger.info(f"[{task_id}] Recovered {len(recovered)} results from cancelled agents, continuing aggregation")
                     else:
-                        self._task_persistence.update_task_state(
-                            task_id, TaskState.FAILED, progress=0.0,
-                            message="Research cancelled, no partial data"
-                        )
+                        _cancelled_task = self._task_persistence.load_task(task_id)
+                        if _cancelled_task:
+                            _cancelled_task.cancel("Research cancelled, no partial data")
+                            self._task_persistence.save_task(_cancelled_task)
                         if _sid:
                             try:
-                                from src.core.progress_streamer import fail_task as _fail_task
-                                _fail_task(_sid, "Research cancelled, no partial data")
+                                from src.core.progress_streamer import cancel_task as _cancel_task
+                                _cancel_task(_sid, "Research cancelled, no partial data")
                             except Exception:
                                 pass
                         return ResearchResult(
@@ -2079,6 +2798,44 @@ class ResearchOrchestrator:
                             created_at=start_time, completed_at=datetime.now(),
                         )
                 logger.info(f"[{task_id}] Execution cancelled but has partial data, proceeding with aggregation")
+
+            # Composite workflow: run the canonical survey stage only after
+            # industry-research agents have completed.  The existing
+            # SurveyIntegrationAgent owns PersonaV2 + simulation and its
+            # output is added to the same report aggregation below.
+            if composition.requires_survey():
+                logger.info(f"[{task_id}] Starting survey stage after industry research")
+                try:
+                    survey_result = await self._execute_survey_integration(
+                        requirement, task_id
+                    )
+                except Exception as exc:
+                    logger.error(f"[{task_id}] Survey stage failed: {exc}")
+                    survey_result = {
+                        "success": False,
+                        "status": "failed",
+                        "error": str(exc),
+                    }
+                if not (
+                    survey_result
+                    and survey_result.get("success")
+                    and survey_result.get("status") == "completed"
+                ):
+                    error = (survey_result or {}).get("error", "Survey stage failed")
+                    self._task_persistence.update_task_state(
+                        task_id, TaskState.FAILED, progress=0.0,
+                        message=f"Survey stage failed: {error[:200]}"
+                    )
+                    return ResearchResult(
+                        task_id=task_id,
+                        status="failed",
+                        topic=requirement.topic,
+                        agents_used=[a.agent_id for a in agents] if agents else [],
+                        stages_completed=1,
+                        summary=f"Survey stage failed: {error}",
+                        created_at=start_time,
+                        completed_at=datetime.now(),
+                    )
 
             # Update task state
             self._task_persistence.update_task_state(
@@ -2157,14 +2914,19 @@ class ResearchOrchestrator:
                 logger.info(f"[{task_id}] Survey results added to aggregation data")
 
             # Aggregate results (synchronous, pass section_details)
+            aggregation_sections = self._aggregation_section_details(
+                getattr(requirement, 'section_details', []),
+                getattr(getattr(routing_result, "decomposition_plan", None), "section_manifest", []),
+            )
             aggregated = self._result_aggregator.aggregate(
                 results_for_aggregation,
-                section_details=getattr(requirement, 'section_details', []),
+                section_details=aggregation_sections,
             )
 
             # Fix: AggregationResult has no .sections property, must get via to_dict()
             aggregated_dict = aggregated.to_dict() if hasattr(
                 aggregated, 'to_dict') else {"sections": []}
+            aggregated_dict.setdefault("title", requirement.topic)
             section_count = len(aggregated_dict.get("sections", []))
             logger.info(f"[{task_id}] Result aggregation complete: {section_count} sections")
 
@@ -2234,6 +2996,7 @@ class ResearchOrchestrator:
                 try:
                     from src.core.progress_streamer import update_progress as _update_progress, start_phase as _start_phase
                     _start_phase(_sid, "report_generation", "Report Generation", description="Generating research report...")
+                    _publish_report_phase(_sid, "report_generating")
                     _update_progress(_sid, 0.8, phase_id="report_generation", message="Generating report...")
                 except Exception:
                     pass
@@ -2246,40 +3009,47 @@ class ResearchOrchestrator:
 
             # === Report Upgrade: framework-driven report generation ===
             # Replace mechanical assembly with Researcher→Senior Researcher→Director workflow
+            task_structure_dict = {}
+            report_orchestrator = None
             try:
                 from src.agents.fixed_agents.report_upgrade.orchestrator import ReportOrchestrator
                 from src.agents.fixed_agents.report_upgrade.chapter_writer import ChapterWriter
                 from src.agents.fixed_agents.report_upgrade.chapter_reviewer import ChapterReviewAgent
                 from src.agents.fixed_agents.report_upgrade.global_reviewer import GlobalReviewAgent
-                from src.agents.fixed_agents.report_upgrade.data_repair import DataRepairAgent, ConflictResolver
+                from src.agents.fixed_agents.report_upgrade.data_repair import ConflictResolver
                 from src.agents.fixed_agents.report_upgrade.prompt_manager import PromptManager
                 from src.core.research_framework_manager import get_framework_config
+                from src.services.chart_planner import ChartPlannerAgent
+                from src.services.chart_generator import ChartGenerator
 
                 search_skill = self._skill_registry.get("search_skill")
                 web_scraper_skill = self._skill_registry.get("web_scraper")
+                task_gateway = self._configure_task_search_gateway(task_id)
 
                 prompt_manager = PromptManager()
                 report_orchestrator = ReportOrchestrator(
                     chapter_writer=ChapterWriter(prompt_manager=prompt_manager),
                     chapter_reviewer=ChapterReviewAgent(prompt_manager=prompt_manager),
                     global_reviewer=GlobalReviewAgent(prompt_manager=prompt_manager),
-                    data_repair_agent=DataRepairAgent(
-                        search_skill=search_skill,
-                        web_scraper_skill=web_scraper_skill,
-                        prompt_manager=prompt_manager,
-                    ),
                     conflict_resolver=ConflictResolver(
                         search_skill=search_skill,
                         web_scraper_skill=web_scraper_skill,
                         prompt_manager=prompt_manager,
+                        search_gateway=task_gateway,
                     ),
                     prompt_manager=prompt_manager,
                     skill_registry=self._skill_registry,
+                    search_gateway=task_gateway,
+                    search_skill=search_skill,
+                    web_scraper_skill=web_scraper_skill,
+                    chart_planner=ChartPlannerAgent(search_gateway=task_gateway),
+                    chart_generator=ChartGenerator(),
                 )
 
-                task_structure_dict = {}
                 if hasattr(routing_result, 'task_structure') and routing_result.task_structure:
-                    task_structure_dict = routing_result.task_structure.to_dict()
+                    task_structure_dict = _normalize_task_structure_runtime_ids(
+                        routing_result.task_structure.to_dict()
+                    )
 
                 output_type_value = requirement.output_type.value if hasattr(
                     requirement.output_type, 'value') else str(requirement.output_type)
@@ -2307,13 +3077,16 @@ class ResearchOrchestrator:
                     "section_weights": framework_config_obj.section_weights,
                 }
 
-                research_result_data = await report_orchestrator.generate_report(
+                _report_call = report_orchestrator.generate_report(
                     task_structure=task_structure_dict,
                     framework_config=framework_config_dict,
                     aggregated_result=aggregated,
                     topic=requirement.topic,
                     task_id=task_id,
                 )
+                # No internal report-agent timeout.  Cancellation is owned by
+                # the task lifecycle controller, not this call site.
+                research_result_data = await _report_call
                 if "title" not in research_result_data:
                     research_result_data["title"] = requirement.topic
                 try:
@@ -2327,15 +3100,112 @@ class ResearchOrchestrator:
                     logger.warning(f"[{task_id}] Failed to save registry/config snapshot: {_snapshot_err}")
                 logger.info(f"[{task_id}] Report upgrade: framework-driven generation complete, {len(research_result_data.get('sections', []))} sections")
             except Exception as _report_upgrade_err:
-                logger.warning(f"[{task_id}] Report upgrade failed, falling back to mechanical assembly: {_report_upgrade_err}")
-                research_result_data = {
-                    "topic": requirement.topic,
-                    "title": requirement.topic,
-                    "aspects": requirement.aspects,
-                    "sections": aggregated_dict.get("sections", []),
-                    "sources": aggregated_dict.get("sources", []),
-                    "key_findings": aggregated_dict.get("key_findings", []),
-                }
+                logger.exception(
+                    f"[{task_id}] Report upgrade failed, falling back to mechanical assembly: "
+                    f"{_report_upgrade_err}"
+                )
+                # Do not discard chapters that were already written before a
+                # late review/repair call timed out. The old fallback used the
+                # collection aggregate, whose skeleton subsections contain
+                # placeholders and can overwrite valid chapter content (for
+                # example 1.1.1 核心结论).
+                partial_chapters = getattr(report_orchestrator, "_chapters", [])
+                if not partial_chapters:
+                    # A timeout can happen before the defense loop assigns
+                    # ``_chapters``. Checkpoints are the durable source of
+                    # truth in that case and must remain usable for delivery.
+                    try:
+                        from src.agents.fixed_agents.report_upgrade.models import ChapterWriteOutput
+                        checkpoint_dir = output_dir_path / "checkpoints"
+                        partial_chapters = []
+                        for checkpoint_path in sorted(checkpoint_dir.glob("chapter_*.json")):
+                            with open(checkpoint_path, "r", encoding="utf-8") as checkpoint_file:
+                                checkpoint = json.load(checkpoint_file)
+                            if isinstance(checkpoint, dict) and checkpoint.get("content"):
+                                partial_chapters.append(ChapterWriteOutput(
+                                    chapter_id=str(checkpoint.get("chapter_id") or ""),
+                                    title=str(checkpoint.get("title") or checkpoint.get("chapter_id") or ""),
+                                    content=str(checkpoint.get("content") or ""),
+                                    sub_section_id=str(checkpoint.get("sub_section_id") or ""),
+                                    key_conclusions=list(checkpoint.get("key_conclusions") or []),
+                                ))
+                    except Exception as checkpoint_error:
+                        logger.warning(f"[{task_id}] Failed to load chapter checkpoints for fallback: {checkpoint_error}")
+                if partial_chapters:
+                    from src.agents.fixed_agents.report_upgrade.models import ReviewOutput
+                    research_result_data = report_orchestrator._assemble_final_report(
+                        partial_chapters,
+                        "",
+                        ReviewOutput(overall_score=0.0),
+                        requirement.topic,
+                        aggregated_dict.get("sources", []),
+                        task_id=task_id,
+                    )
+                    # Preserve the requested hierarchy during fallback. A
+                    # parent chapter checkpoint may contain the complete
+                    # synthesis, while the old aggregator would create empty
+                    # child nodes. Put that verified parent content in the
+                    # first planned child (e.g. 1.1.1 核心结论) and make any
+                    # remaining child explicit rather than empty/placeholder.
+                    specs_by_id = {
+                        str(spec.get("section_id") or ""): spec
+                        for spec in task_structure_dict.get("sections", [])
+                        if isinstance(spec, dict)
+                    }
+                    for section in research_result_data.get("sections", []):
+                        spec = specs_by_id.get(str(section.get("section_id") or ""))
+                        sub_specs = (spec or {}).get("sub_section_requirements", (spec or {}).get("sub_sections", [])) or []
+                        if not sub_specs or section.get("subsections"):
+                            continue
+                        parent_content = str(section.get("content") or "").strip()
+                        section["subsections"] = [
+                            {
+                                "id": str(sub.get("sub_section_id") or sub.get("id") or ""),
+                                "title": str(sub.get("name") or ""),
+                                "content": (
+                                    parent_content
+                                    if index == 0 and parent_content
+                                    else "本小节内容已在本章正文中统一说明，未单独重复拆分。"
+                                ),
+                                "points": list(sub.get("required_metrics", sub.get("points", [])) or []),
+                            }
+                            for index, sub in enumerate(sub_specs)
+                            if isinstance(sub, dict)
+                        ]
+                    research_result_data["fallback_reason"] = "report_upgrade_failed_after_partial_chapters"
+                else:
+                    research_result_data = {
+                        "topic": requirement.topic,
+                        "title": requirement.topic,
+                        "aspects": requirement.aspects,
+                        "sections": aggregated_dict.get("sections", []),
+                        "sources": aggregated_dict.get("sources", []),
+                        "key_findings": aggregated_dict.get("key_findings", []),
+                        "fallback_reason": "report_upgrade_failed_before_chapter_write",
+                    }
+
+            research_result_data = _validate_report_generation_output(
+                _normalize_report_section_ids(research_result_data)
+            )
+            # Structural contract failures are hard failures.  They must not
+            # be downgraded to ordinary quality warnings or completed status.
+            research_result_data["manifest_contract"] = _audit_report_manifest_contract(
+                requirement,
+                task_structure_dict,
+                agents,
+                results_for_aggregation,
+                research_result_data,
+                research_result_data.get("artifact_manifest"),
+            )
+            # Audit both the LLM path and the mechanical fallback path. A
+            # report with unavailable data is still deliverable, but it must
+            # carry an explicit warning and cannot be marked fully complete.
+            coverage_warnings = _collect_report_coverage_warnings(
+                research_result_data, task_structure_dict
+            )
+            if coverage_warnings:
+                research_result_data["coverage_warnings"] = coverage_warnings
+                research_result_data.setdefault("quality_issues", []).extend(coverage_warnings)
 
             # Cache aggregated result for resume/crash recovery
             # Save BEFORE preview generation, so even if preview fails,
@@ -2343,7 +3213,6 @@ class ResearchOrchestrator:
             try:
                 cache_path = output_dir_path / "research_result_cache.json"
                 with open(cache_path, "w", encoding="utf-8") as f:
-                    import json
                     json.dump(research_result_data, f, ensure_ascii=False, indent=2)
                 logger.info(f"[{task_id}] Research result cached at {cache_path}")
             except Exception as cache_err:
@@ -2354,6 +3223,7 @@ class ResearchOrchestrator:
                     from src.core.progress_streamer import complete_phase as _complete_phase, start_phase as _start_phase, update_progress as _update_progress
                     _complete_phase(_sid, "report_generation")
                     _start_phase(_sid, "quality_check", "Quality Check", description="Checking report quality...")
+                    _publish_report_phase(_sid, "quality_checking")
                     _update_progress(_sid, 0.9, phase_id="quality_check", message="Running quality checks...")
                 except Exception:
                     pass
@@ -2388,6 +3258,15 @@ class ResearchOrchestrator:
             if isinstance(preview_result, dict):
                 preview_path = preview_result.get(
                     "document_path") or preview_result.get("output_path", "")
+
+            # Initialize quality state before the preview branch.  If preview
+            # generation fails, the fallback document path must still produce
+            # a well-defined warning status instead of raising
+            # ``UnboundLocalError`` during final result assembly.
+            quality_result = None
+            quality_passed = False
+            issues = []
+            quality_score = 0.0
             
             # Copy preview to serving directory so frontend can load it
             if preview_path and os.path.exists(preview_path):
@@ -2415,14 +3294,9 @@ class ResearchOrchestrator:
                 output_path = preview_path or ""
 
                 # Step 1.5: Quality check with optional auto-repair (max 1 retry)
-                quality_result = None
-                quality_passed = False
-                issues = []
-                quality_score = 0.0
-                
                 for _retry in range(2):
                     try:
-                        check_input = {"report": aggregated_dict, "standards": None}
+                        check_input = {"report": research_result_data, "standards": None}
                         if output_path and Path(output_path).exists():
                             try:
                                 with open(output_path, "r", encoding="utf-8") as _f:
@@ -2435,28 +3309,29 @@ class ResearchOrchestrator:
                             quality_score = quality_result.get("quality_score", 0)
                             quality_passed = quality_result.get("passed", False)
                             issues = quality_result.get("issues", [])
+                            if coverage_warnings:
+                                issues.extend(coverage_warnings)
+                                quality_passed = False
                             suggestions = quality_result.get("suggestions", [])
+                            defense = check_input["report"].get("defense_audit", {})
+                            if defense and not defense.get("passed", False):
+                                quality_passed = False
+                                quality_score = min(quality_score, float(defense.get("score", 0)))
+                                issues.extend({
+                                    "type": "defense_audit",
+                                    "message": item.get("message", "L1-L5 evidence defense failed"),
+                                    "severity": "high",
+                                    "layer": item.get("layer", "L1-L5"),
+                                } for item in defense.get("issues", [])[:20])
                             logger.info(
                                 f"[{task_id}] Quality check: score={quality_score:.1f}, passed={quality_passed}")
                             if quality_passed:
                                 break
 
                             if _retry == 0 and issues:
-                                adjustments = []
-                                for issue in issues[:3]:
-                                    if issue.get("auto_fixable") is False:
-                                        continue
-                                    if issue.get("type") == "format":
-                                        continue
-                                    section = issue.get("section")
-                                    if section:
-                                        adjustments.append({
-                                            "section": section,
-                                            "section_id": issue.get("section_id"),
-                                            "adjustment": suggestions[0] if suggestions else issue.get("message", ""),
-                                            "document_path": output_path,
-                                            "revision_type": "minor",
-                                        })
+                                adjustments = self._build_quality_adjustments(
+                                    issues, suggestions, output_path
+                                )
                                 if not adjustments:
                                     logger.warning(f"[{task_id}] No auto-fixable issues, stopping")
                                     break
@@ -2465,7 +3340,9 @@ class ResearchOrchestrator:
                                     if sec_name:
                                         for s in aggregated_dict.get("sections", []):
                                             if s.get("title") == sec_name or s.get("id") == sec_name:
-                                                s["content"] = f"{s.get('content', '')}\n\n[修复] {adj.get('adjustment', '')}"
+                                                self._apply_quality_adjustment(
+                                                    s, adj.get("adjustment")
+                                                )
                                 preview_input = {
                                     "action": "produce_document",
                                     "research_result": aggregated_dict,
@@ -2509,7 +3386,7 @@ class ResearchOrchestrator:
                     logger.warning(f"  - {issue.get('type', 'unknown')}: {issue.get('message', '')[:100]}")
 
             if exec_result.status == "cancelled":
-                result_status = "completed_with_warnings"
+                result_status = "cancelled"
             elif quality_passed:
                 result_status = "completed"
             else:
@@ -2519,6 +3396,8 @@ class ResearchOrchestrator:
             if quality_result and isinstance(quality_result, dict):
                 quality_score_val = quality_result.get("quality_score", 0)
                 quality_issues_list = quality_result.get("issues", [])[:10]
+            if coverage_warnings:
+                quality_issues_list = (quality_issues_list + coverage_warnings)[:20]
 
             # C3: Save quality metadata (same as research() path)
             if quality_result:
@@ -2528,7 +3407,6 @@ class ResearchOrchestrator:
                     )
                     quality_metadata_path = self._storage_path / "reports" / task_id / "quality_metadata.json"
                     quality_metadata_path.parent.mkdir(parents=True, exist_ok=True)
-                    import json
                     with open(quality_metadata_path, 'w', encoding='utf-8') as f:
                         json.dump(quality_metadata, f, ensure_ascii=False, indent=2)
                     logger.info(f"[{task_id}] Quality metadata saved: {quality_metadata_path}")
@@ -2647,7 +3525,24 @@ class ResearchOrchestrator:
 
             # Update task state
             self._task_persistence.update_task_state(
-                task_id, TaskState.COMPLETED, progress=1.0, message="Research complete"
+                task_id,
+                TaskState.COMPLETED if result_status == "completed" else TaskState.COMPLETED_WITH_WARNINGS,
+                progress=1.0,
+                message=(
+                    "Research complete"
+                    if result_status == "completed"
+                    else "Research complete with quality warnings"
+                ),
+            )
+            _update_research_result_terminal_state(
+                task_id,
+                self._storage_path,
+                ResearchStatus.COMPLETED_WITH_WARNINGS
+                if result_status == "completed_with_warnings"
+                else ResearchStatus.COMPLETED,
+                output_format=str(output_format or ""),
+                document_path=str(output_path or ""),
+                final_result=research_result_data,
             )
             if _sid:
                 try:
@@ -2668,20 +3563,39 @@ class ResearchOrchestrator:
                 topic=requirement.topic,
                 agents_used=[a.agent_id for a in agents],
                 stages_completed=len(routing_result.execution_plan.phases),
-                output_path=preview_path or output_path,
+                # Return the latest artifact, not the stale initial preview.
+                output_path=output_path or preview_path,
                 document_path=output_path,
                 summary=aggregated_dict.get("executive_summary", "Research complete"),
                 created_at=start_time,
                 completed_at=end_time,
                 intent_analysis=routing_result.to_dict(),
                 interaction_enabled=interaction_mode,
-                report=aggregated_dict,
+                # Keep the in-memory result aligned with the document and the
+                # persisted result.  aggregated_dict is collection-only data;
+                # research_result_data is the report-stage canonical payload.
+                report=research_result_data,
                 quality_score=quality_score_val,
                 quality_issues=quality_issues_list,
             )
 
         except Exception as e:
             logger.error(f"[{task_id}] Intelligent routing execution failed: {e}", exc_info=True)
+            routing_diagnostics = (
+                routing_result.to_dict()
+                if routing_result is not None and hasattr(routing_result, "to_dict")
+                else {}
+            )
+            _update_research_result_terminal_state(
+                task_id,
+                self._storage_path,
+                ResearchStatus.FAILED,
+                final_result={
+                    "status": "failed",
+                    "error": str(e),
+                    "intent_analysis": routing_diagnostics,
+                },
+            )
 
             # Clean up Agent resources
             self._cleanup_agents(task_id)
@@ -2707,7 +3621,8 @@ class ResearchOrchestrator:
                 topic=str(user_input)[:50],
                 agents_used=[],
                 stages_completed=0,
-                summary=f"Error: {str(e)}"
+                summary=f"Error: {str(e)}",
+                intent_analysis=routing_diagnostics,
             )
 
     # === Dynamic replanning method ===
@@ -3026,6 +3941,16 @@ class ResearchOrchestrator:
                     user_request=user_request,
                     requirement=updated_requirement,
                 )
+
+            dag_audit = getattr(routing_result, "dag_audit", None)
+            if dag_audit is not None and not dag_audit.passed:
+                feedback = "; ".join(dag_audit.revision_feedback) or "请修订任务依赖和执行顺序"
+                return {
+                    "error": f"DAG计划审查未通过: {feedback}",
+                    "status": "failed",
+                    "preserved": list(completed_sections),
+                    "dag_document": getattr(routing_result, "dag_document", None),
+                }
 
             self._cache_intent_for_task(task_id, routing_result.intent_result)
 
@@ -3801,11 +4726,17 @@ class ResearchOrchestrator:
             name = st.get("name", "")
             sub_sections = st.get("sub_sections", [])
             detail = {
-                "id": name.lower().replace(" ", "_"),
+                # Preserve the framework IDs.  Re-deriving an ID from a
+                # localized display name breaks later ID-only rematching.
+                "id": st.get("id") or st.get("section_id") or name.lower().replace(" ", "_"),
                 "name": name,
                 "content": name,
                 "sub_sections": [
-                    {"name": sub.get("name", ""), "points": sub.get("points", [])}
+                    {
+                        "id": sub.get("id") or sub.get("sub_section_id") or sub.get("subsection_id"),
+                        "name": sub.get("name", ""),
+                        "points": sub.get("points", []),
+                    }
                     for sub in sub_sections if sub.get("name")
                 ]
             }
@@ -3840,7 +4771,12 @@ class ResearchOrchestrator:
                         points.append(pt.text)
                     else:
                         points.append(str(pt))
-                detail["sub_sections"].append({"name": sub_name, "points": points})
+                sub_id = sub.get("id", "") if hasattr(sub, 'get') else getattr(sub, 'id', "")
+                if not sub_id:
+                    sub_id = sub.get("sub_section_id", "") if hasattr(sub, 'get') else getattr(sub, 'sub_section_id', "")
+                if not sub_id:
+                    sub_id = sub.get("subsection_id", "") if hasattr(sub, 'get') else getattr(sub, 'subsection_id', "")
+                detail["sub_sections"].append({"id": sub_id, "name": sub_name, "points": points})
             details.append(detail)
         return details
 
@@ -3874,6 +4810,11 @@ class ResearchOrchestrator:
         "investment_summary", "executive_summary", "summary",
         "rating_target", "strategic_intent",
     }
+    _SYNTHESIS_NAME_KEYWORDS = (
+        "摘要", "核心结论", "执行摘要", "综合结论", "研究结论",
+        "总结", "总结与展望", "结论", "展望", "executive summary",
+        "key findings", "key insights", "outlook", "conclusion",
+    )
 
     _DATA_COLLECTION_IDS = {"appendix", "references"}
 
@@ -3897,20 +4838,61 @@ class ResearchOrchestrator:
             return val
 
         sections = []
+        data_section_index = 0
+        synthesis_section_index = 0
         for sd in section_details:
-            section_id = sd.get("id", "")
-            section_name = _resolve_name(sd.get("name", section_id), section_id)
+            raw_section_id = str(
+                sd.get("id") or sd.get("section_id") or ""
+            ).strip()
+            raw_name = sd.get("name") or raw_section_id
+            raw_name_text = (
+                raw_name.get("zh") or raw_name.get("en") or ""
+                if isinstance(raw_name, dict) else str(raw_name)
+            ).strip()
+            is_synthesis = (
+                raw_section_id.lower() in self._SYNTHESIS_IDS
+                or raw_name_text.lower() in self._SYNTHESIS_IDS
+                or any(keyword in raw_name_text.lower() for keyword in self._SYNTHESIS_NAME_KEYWORDS)
+            )
+            # Runtime/report identity is canonical and positional.  Keep the
+            # template identity separately so old checkpoints and template
+            # lookups remain readable without becoming join keys.
+            if is_synthesis:
+                section_id = f"synthesis_{synthesis_section_index}"
+                synthesis_section_index += 1
+            else:
+                section_id = f"section_{data_section_index}"
+                data_section_index += 1
+            section_name = _resolve_name(sd.get("name") or raw_section_id, raw_section_id)
             section_desc = sd.get("description", sd.get("content", ""))
+            normalized_subsections = []
+            for sub in sd.get("sub_sections", []) or []:
+                if not isinstance(sub, dict):
+                    continue
+                sub_id = str(
+                    sub.get("sub_section_id") or sub.get("id")
+                    or f"sub_{section_id}_{len(normalized_subsections)}"
+                ).strip()
+                sub_name = str(sub.get("name") or "").strip()
+                points = [str(point).strip() for point in (sub.get("points", []) or []) if str(point).strip()]
+                if sub_id or sub_name:
+                    normalized_subsections.append({
+                        "sub_section_id": sub_id,
+                        "name": sub_name,
+                        "required_topics": [sub_name] if sub_name else [],
+                        "required_metrics": points,
+                    })
 
-            if section_id in self._SYNTHESIS_IDS:
+            if is_synthesis:
                 role = "synthesis"
-            elif section_id in self._DATA_COLLECTION_IDS:
+            elif raw_section_id.lower() in self._DATA_COLLECTION_IDS:
                 role = "data_collection"
             else:
                 role = "analysis"
 
             sections.append({
                 "section_id": section_id,
+                "template_id": raw_section_id,
                 "section_name": section_name,
                 "section_role": role,
                 "role_reasoning": f"Auto-assigned from template section: {section_name}",
@@ -3923,7 +4905,53 @@ class ResearchOrchestrator:
                 "config": {
                     "description": section_desc if isinstance(section_desc, str) else str(section_desc),
                 },
+                "sub_sections": normalized_subsections,
+                "sub_section_requirements": normalized_subsections,
             })
+
+        # Freeze a flat report manifest even for the legacy/non-routing path.
+        # Report assembly and coverage checks must see every executable
+        # subsection, not infer children from the parent tree.
+        section_manifest = []
+        for section in sections:
+            parent_id = section["section_id"]
+            children = section.get("sub_sections") or []
+            if section["section_role"] == "analysis" and children:
+                for child in children:
+                    child_id = str(child.get("sub_section_id") or "").strip()
+                    if not child_id:
+                        continue
+                    section_manifest.append({
+                        "section_id": f"{parent_id}::{child_id}",
+                        "parent_section_id": parent_id,
+                        "sub_section_id": child_id,
+                        "title": child.get("name") or child_id,
+                        "role": "analysis",
+                        "output_slot": "body",
+                        "required_topics": child.get("required_topics", []),
+                        "required_metrics": child.get("required_metrics", []),
+                        "status": "pending",
+                        "evidence_ids": [],
+                    })
+            else:
+                slot = "body"
+                if section["section_role"] == "synthesis":
+                    title_lower = str(section.get("section_name") or "").lower()
+                    slot = "exec_summary" if ("摘要" in title_lower or "summary" in title_lower) else (
+                        "conclusion" if ("结论" in title_lower or "总结" in title_lower or "conclusion" in title_lower) else "body"
+                    )
+                section_manifest.append({
+                    "section_id": parent_id,
+                    "parent_section_id": parent_id,
+                    "sub_section_id": "",
+                    "title": section.get("section_name") or parent_id,
+                    "role": section.get("section_role", "analysis"),
+                    "output_slot": slot,
+                    "required_topics": [],
+                    "required_metrics": [],
+                    "status": "pending",
+                    "evidence_ids": [],
+                })
 
         analysis_ids = [s["section_id"] for s in sections if s["section_role"] == "analysis"]
         synthesis_ids = [s["section_id"] for s in sections if s["section_role"] == "synthesis"]
@@ -3960,11 +4988,57 @@ class ResearchOrchestrator:
             "critical_path": critical_path,
             "total_estimated_agents": len(sections),
             "analysis_method": "rule_based",
+            "section_manifest": section_manifest,
         }
 
         logger.info(f"[{task_id}] Built task_structure from section_details: "
                      f"{len(sections)} sections, {len(dependencies)} dependencies")
         return task_structure_dict
+
+    @staticmethod
+    def _aggregation_section_details(
+        fallback_section_details: Optional[List[Dict[str, Any]]],
+        section_manifest: Optional[List[Dict[str, Any]]],
+    ) -> List[Dict[str, Any]]:
+        """Build the exact aggregation join view from the frozen routing manifest.
+
+        ``requirement.section_details`` is the user-facing framework tree.  It
+        intentionally contains parent chapters and nested children, while the
+        execution engine emits leaf identities such as
+        ``section_0::sub_0_1``.  Passing the former to the aggregator makes a
+        successful child result look missing.  The manifest is the only
+        authoritative cross-stage join contract, so expose one flat
+        ``section_details`` entry per manifest item while retaining the legacy
+        tree as a fallback for old checkpoints/plans.
+        """
+        manifest = [item for item in (section_manifest or []) if isinstance(item, dict)]
+        if not manifest:
+            return list(fallback_section_details or [])
+
+        details: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in manifest:
+            section_id = str(item.get("section_id") or "").strip()
+            if not section_id or section_id in seen:
+                continue
+            seen.add(section_id)
+            title = item.get("title") or item.get("name") or section_id
+            if isinstance(title, dict):
+                title = title.get("zh") or title.get("en") or section_id
+            details.append({
+                "id": section_id,
+                "section_id": section_id,
+                "name": str(title),
+                "title": str(title),
+                "content": str(item.get("description") or ""),
+                "description": str(item.get("description") or ""),
+                "sub_sections": [],
+                "parent_section_id": item.get("parent_section_id") or section_id,
+                "sub_section_id": item.get("sub_section_id") or "",
+                "role": item.get("role") or "analysis",
+                "output_slot": item.get("output_slot") or "body",
+            })
+        return details or list(fallback_section_details or [])
 
     def _load_template_sections(
             self, template_id: str) -> List:
@@ -4121,10 +5195,17 @@ class ResearchOrchestrator:
 
                     # Create agent, context includes dependency info for scheduler
                     context = dict(spec.context) if spec.context else {}
-                    if getattr(spec, 'output_keys', None) and spec.output_keys:
-                        context["section_id"] = spec.output_keys[0]
-                    elif getattr(spec, 'section_ids', None) and spec.section_ids:
-                        context["section_id"] = spec.section_ids[0]
+                    # An explicit section_id in the decomposition context is
+                    # the canonical runtime identity. output_keys such as
+                    # data_<aspect> are storage keys, not report section IDs.
+                    if "section_id" not in context:
+                        if getattr(spec, 'section_ids', None) and spec.section_ids:
+                            context["section_id"] = spec.section_ids[0]
+                        elif getattr(spec, 'output_keys', None) and spec.output_keys:
+                            context["section_id"] = spec.output_keys[0]
+                    context["section_id"] = _canonical_runtime_section_id(
+                        context.get("section_id", "")
+                    )
                     context["depends_on"] = spec.dependencies
                     context["task_id"] = task_id
                     context["research_type"] = research_type or "market_research"
@@ -5726,11 +6807,14 @@ class ResearchOrchestrator:
             stages_completed=len(results_for_aggregation),
             output_path=output_path,
             document_path=output_path,
-            summary=f"从断点恢复: 跳过{
-                len(completed_phases)}个已完成阶段，重新生成{
-                len(
-                    remaining_plan.execution_order)}个阶段",
-            report=aggregated.to_dict() if hasattr(aggregated, 'to_dict') else {},
+            summary=(
+                f"从断点恢复: 跳过{len(completed_phases)}个已完成阶段，"
+                f"重新生成{len(remaining_plan.execution_order)}个阶段"
+            ),
+            report={
+                **(aggregated.to_dict() if hasattr(aggregated, 'to_dict') else {}),
+                "title": req.topic,
+            },
         )
 
     async def revise(self, task_id: str,

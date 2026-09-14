@@ -18,7 +18,13 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from .semantic_intent import SemanticIntentAnalyzer, DeepIntentResult
-from .task_structure import TaskStructureAnalyzer, TaskStructure, SectionSpec, SectionRole
+from .task_structure import (
+    TaskStructureAnalyzer,
+    TaskStructure,
+    SectionSpec,
+    SectionRole,
+    normalize_task_structure_runtime_ids,
+)
 from .dynamic_orchestrator import (
     DynamicPhaseOrchestrator,
     ExecutionPlan,
@@ -28,6 +34,7 @@ from .dynamic_orchestrator import (
     PhaseType,
 )
 from .content_lock import ContentLockManager, SectionState
+from .dag_plan_audit import DAGAuditResult, DAGPlanAuditor
 # Type definitions imported from intent_types.py (Phase 1 type separation)
 from .intent_types import IntentType, TaskComplexity, IntentAnalysisResult
 
@@ -56,6 +63,12 @@ class IntelligentRoutingResult:
     # Compatibility output
     decomposition_plan: Optional["DecompositionPlan"] = None
 
+    # Pre-execution DAG contract.  The caller must not dispatch Agents when
+    # this result is not passed.
+    dag_audit: Optional[DAGAuditResult] = None
+    dag_review_history: List[Dict[str, Any]] = field(default_factory=list)
+    dag_document: Optional[Dict[str, Any]] = None
+
     # Incremental analysis
     skip_phases: List[str] = field(default_factory=list)  # Phase IDs that can be skipped
 
@@ -83,6 +96,9 @@ class IntelligentRoutingResult:
             ),
             "used_intelligent_routing": self.used_intelligent_routing,
             "fallback_used": self.fallback_used,
+            "dag_audit": self.dag_audit.to_dict() if self.dag_audit is not None else None,
+            "dag_review_history": list(self.dag_review_history),
+            "dag_document": self.dag_document,
         }
 
 
@@ -334,11 +350,37 @@ class IntelligentRoutingAdapter:
         else:
             task_structure = self._analyze_structure(requirement, intent_result, topic)
 
-        # Step 3: Dynamic phase orchestration (branch based on forensic mode)
-        if intent_result.forensic_mode:
-            execution_plan = self._orchestrate_forensic_phases(task_structure, intent_result, topic)
-        else:
-            execution_plan = self._orchestrate_phases(task_structure, intent_result, topic)
+        # Normalize before phase orchestration and lock-manager creation.  If
+        # this is delayed until result aggregation, the scheduler/lock graph
+        # still contains legacy IDs such as section_0_市场规模.
+        normalize_task_structure_runtime_ids(task_structure)
+
+        # Step 3: Dynamic phase orchestration with a bounded local DAG review
+        # loop.  Only safe acyclic ordering defects are repaired locally;
+        # semantic defects remain rejected with feedback for routing revision.
+        dag_auditor = DAGPlanAuditor()
+        dag_review_history: List[DAGAuditResult] = []
+        execution_plan = None
+        dag_audit = None
+        for _attempt in range(2):
+            if intent_result.forensic_mode:
+                execution_plan = self._orchestrate_forensic_phases(task_structure, intent_result, topic)
+            else:
+                execution_plan = self._orchestrate_phases(task_structure, intent_result, topic)
+            dag_audit = dag_auditor.audit(execution_plan)
+            dag_review_history.append(dag_audit)
+            if dag_audit.passed or not dag_auditor.revise_order(execution_plan, dag_audit):
+                break
+            logger.warning(
+                "[IntelligentRouting] DAG plan rejected; applying local order revision: %s",
+                [issue.code for issue in dag_audit.issues],
+            )
+        if dag_audit is not None and not dag_audit.passed:
+            logger.warning(
+                "[IntelligentRouting] DAG plan rejected before execution: %s",
+                [issue.code for issue in dag_audit.issues],
+            )
+        dag_document = dag_auditor.document(execution_plan, dag_audit, dag_review_history)
 
         # Step 4: Convert to compatible format
         decomposition_plan = self._to_decomposition_plan(execution_plan)
@@ -357,6 +399,9 @@ class IntelligentRoutingAdapter:
             task_structure=task_structure,
             execution_plan=execution_plan,
             decomposition_plan=decomposition_plan,
+            dag_audit=dag_audit,
+            dag_review_history=[item.to_dict() for item in dag_review_history],
+            dag_document=dag_document,
         )
         
         logger.info(
@@ -424,6 +469,20 @@ class IntelligentRoutingAdapter:
             aspects=aspect_names,
             topic=topic,
         )
+        # Carry the confirmed data/subsection contract into the phase planner.
+        # TaskStructureAnalyzer historically only received display aspects,
+        # which caused dynamic routing to lose the subsection tree before
+        # agents were created.
+        confirmed_specs = list(getattr(intent_result, "section_data_specs", []) or [])
+        if not confirmed_specs:
+            dynamic_fields = requirement.get("dynamic_fields", {}) or {}
+            confirmed_specs = list(dynamic_fields.get("sections_tree", []) or [])
+        if not confirmed_specs:
+            # section_details is the user-confirmed framework in the legacy
+            # request shape.  It must not be discarded merely because the LLM
+            # omitted section_data_specs.
+            confirmed_specs = list(requirement.get("section_details", []) or [])
+        task_structure.section_data_specs = confirmed_specs
 
         logger.info(
             f"[Structure] {len(task_structure.sections)} sections, "
@@ -533,7 +592,9 @@ class IntelligentRoutingAdapter:
                         asyncio.run,
                         call_llm(prompt=prompt, system_prompt="你是一位因果推断专家。只输出假设，不要分析。")
                     )
-                    result = future.result(timeout=30)
+                    # No hidden Agent deadline; task cancellation owns the
+                    # lifecycle of this compatibility bridge.
+                    result = future.result()
             else:
                 result = asyncio.run(call_llm(
                     prompt=prompt,

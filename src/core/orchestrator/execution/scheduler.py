@@ -62,7 +62,7 @@ class ExecutionScheduler:
     
     def __init__(
         self,
-        max_parallel: int = 5,
+        max_parallel: int = 10,
         enable_dynamic_scheduling: bool = True,
     ):
         """
@@ -158,12 +158,15 @@ class ExecutionScheduler:
             # 从AgentSpec获取依赖，如果没有则从context获取
             spec = agent_specs.get(agent_id)
             
-            # **关键修复**：如果精确匹配失败，尝试模糊匹配
+            # Compatibility lookup is allowed only when it yields exactly
+            # one candidate.  Multiple matches are unsafe because they can
+            # bind a chapter to the wrong Agent.
             # AgentSpec ID格式: synthesis_0_执行摘要, deep_analysis_1_市场规模
             # 实际Agent ID格式: synthesis_执行摘要_1, research_市场规模_2
             if not spec:
                 # 提取关键部分进行匹配
                 agent_id_lower = agent_id.lower()
+                candidates = []
                 for spec_id, spec_obj in agent_specs.items():
                     spec_id_lower = spec_id.lower()
                     agent_parts = agent_id_lower.split('_')
@@ -196,9 +199,15 @@ class ExecutionScheduler:
                             )
                             
                             if type_match:
-                                spec = spec_obj
-                                logger.info(f"[Scheduler] 模糊匹配: Agent {agent_id} -> AgentSpec {spec_id}")
-                                break
+                                candidates.append((spec_id, spec_obj))
+                if len(candidates) == 1:
+                    spec_id, spec = candidates[0]
+                    logger.warning(f"[Scheduler] 使用唯一兼容匹配: Agent {agent_id} -> AgentSpec {spec_id}")
+                elif len(candidates) > 1:
+                    raise ValueError(
+                        f"Agent {agent_id} 匹配到多个 AgentSpec，拒绝猜测绑定: "
+                        f"{[item[0] for item in candidates]}"
+                    )
             
             if spec:
                 dependencies = spec.dependencies
@@ -439,11 +448,17 @@ class ExecutionScheduler:
                 resolved.append(dep)
                 continue
             
-            # 尝试匹配章节名
-            for agent_id in agent_map:
-                if dep.lower() in agent_id.lower():
-                    resolved.append(agent_id)
-                    break
+            # Legacy chapter-name lookup is accepted only when unambiguous.
+            candidates = [
+                agent_id for agent_id in agent_map
+                if str(dep).lower() in agent_id.lower()
+            ]
+            if len(candidates) == 1:
+                resolved.append(candidates[0])
+                continue
+            if not candidates:
+                raise ValueError(f"依赖 Agent 不存在，拒绝静默忽略: {dep}")
+            raise ValueError(f"依赖 {dep} 匹配到多个 Agent，拒绝猜测: {candidates}")
         
         return list(set(resolved))  # 去重
     
@@ -488,6 +503,7 @@ class ExecutionScheduler:
             else:
                 spec_type = spec_parts[0]  # synthesis, report
             
+            candidates = []
             for actual_agent_id in agent_map:
                 actual_parts = actual_agent_id.lower().split('_')
                 if len(actual_parts) < 2:
@@ -517,9 +533,14 @@ class ExecutionScheduler:
                 )
                 
                 if type_match and section_match:
-                    converted.append(actual_agent_id)
-                    logger.info(f"[Scheduler] 依赖ID转换: {spec_dep_id} -> {actual_agent_id}")
-                    break
+                    candidates.append(actual_agent_id)
+            if len(candidates) == 1:
+                converted.append(candidates[0])
+                logger.warning(f"[Scheduler] 使用唯一兼容依赖转换: {spec_dep_id} -> {candidates[0]}")
+            elif not candidates:
+                raise ValueError(f"依赖 AgentSpec 不存在对应实际 Agent: {spec_dep_id}")
+            else:
+                raise ValueError(f"依赖 AgentSpec 匹配多个实际 Agent，拒绝猜测: {spec_dep_id} -> {candidates}")
         
         return list(set(converted))  # 去重
     
@@ -535,10 +556,17 @@ class ExecutionScheduler:
         graph = defaultdict(list)
         
         for agent_id, scheduled in self._scheduled_agents.items():
+            missing = [
+                dep for dep in scheduled.dependencies
+                if dep not in self._scheduled_agents
+            ]
+            if missing:
+                raise ValueError(
+                    f"Agent {agent_id} 存在未注册依赖，拒绝执行: {missing}"
+                )
             in_degree[agent_id] = len(scheduled.dependencies)
             for dep in scheduled.dependencies:
-                if dep in self._scheduled_agents:
-                    graph[dep].append(agent_id)
+                graph[dep].append(agent_id)
         
         # 批次处理
         batches = []
@@ -554,8 +582,7 @@ class ExecutionScheduler:
             if not batch:
                 # 存在循环依赖
                 logger.error(f"检测到循环依赖，剩余Agent: {remaining}")
-                # 强制将剩余Agent作为最后批次
-                batch = list(remaining)
+                raise ValueError(f"检测到循环依赖，拒绝强制执行: {sorted(remaining)}")
             
             # 按优先级排序
             batch.sort(

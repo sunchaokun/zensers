@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 from enum import Enum
 import logging
+import re
 
 # Import PromptManager for external prompt loading
 from ..prompt_manager import PromptManager
@@ -152,6 +153,13 @@ DATA_SOURCE_SKILL_MAP = {
 }
 
 
+def _aspect_keyword_matches(keyword: str, aspect_lower: str) -> bool:
+    """Match English metric tokens without substring false positives."""
+    if keyword.isascii() and any(char.isalpha() for char in keyword):
+        return re.search(rf"(?<![a-z0-9]){re.escape(keyword)}(?![a-z0-9])", aspect_lower) is not None
+    return keyword in aspect_lower
+
+
 def _get_data_collection_skills(aspect: str, topic: str = "", intent_result: Any = None) -> List[str]:
     if _manifest_strategy:
         return _manifest_strategy.get_data_collection_skills(aspect, topic, intent_result)
@@ -162,7 +170,7 @@ def _get_data_collection_skills(aspect: str, topic: str = "", intent_result: Any
     aspect_skills: List[str] = []
     aspect_lower = aspect.lower()
     for keyword, extra_skills in DATA_SOURCE_SKILL_MAP.items():
-        if keyword in aspect_lower:
+        if _aspect_keyword_matches(keyword, aspect_lower):
             aspect_skills.extend(extra_skills)
     if intent_result:
         primary_type = getattr(intent_result, 'primary_research_type', None)
@@ -170,7 +178,7 @@ def _get_data_collection_skills(aspect: str, topic: str = "", intent_result: Any
             "company_research", "investment", "competitive_analysis",
             "industry_research", "brand_research",
         ):
-            if "stock_data" not in aspect_skills:
+            if primary_type.value != "competitive_analysis" and "stock_data" not in aspect_skills:
                 aspect_skills.append("stock_data")
             if "xueqiu" not in aspect_skills:
                 aspect_skills.append("xueqiu")
@@ -320,6 +328,68 @@ def _convert_specs_from_dicts(spec_dicts: List[Dict]) -> List[SectionDataSpec]:
     return specs
 
 
+def _specs_from_framework_tree(
+    section_tree: List[Dict],
+    aspect_names: List[str],
+) -> List[SectionDataSpec]:
+    """Rebuild data specs from the confirmed framework when LLM specs are absent."""
+    tree = [item for item in (section_tree or []) if isinstance(item, dict)]
+    unused = list(tree)
+    specs: List[SectionDataSpec] = []
+
+    def _name(value: Any) -> str:
+        if isinstance(value, dict):
+            return str(value.get("zh") or value.get("en") or next(iter(value.values()), ""))
+        return str(value or "")
+
+    for index, aspect in enumerate(aspect_names or []):
+        requested = _name(aspect).strip()
+        match_index = -1
+        for candidate_index, candidate in enumerate(unused):
+            candidate_name = _name(candidate.get("name") or candidate.get("title") or candidate.get("id"))
+            candidate_id = str(candidate.get("section_id") or candidate.get("id") or "")
+            if requested == candidate_name or requested == candidate_id:
+                match_index = candidate_index
+                break
+        raw = unused.pop(match_index) if match_index >= 0 else {}
+        sub_specs: List[SubSectionSpec] = []
+        for sub_index, sub in enumerate(raw.get("sub_sections", []) or []):
+            if not isinstance(sub, dict):
+                continue
+            sub_name = _name(sub.get("name") or sub.get("title") or sub.get("id")).strip()
+            if not sub_name:
+                continue
+            raw_needs = sub.get("data_needs") or sub.get("required_metrics") or sub.get("points") or []
+            if isinstance(raw_needs, str):
+                raw_needs = [raw_needs]
+            needs = [str(item).strip() for item in raw_needs if str(item).strip()]
+            if not needs:
+                needs = [sub_name]
+            sub_specs.append(SubSectionSpec(
+                sub_section_id=str(sub.get("sub_section_id") or sub.get("id") or f"sub_{index}_{sub_index}"),
+                name=sub_name,
+                data_needs=list(dict.fromkeys(needs)),
+                data_source_type=str(sub.get("data_source_type") or "search"),
+            ))
+
+        if not sub_specs:
+            sub_specs = [SubSectionSpec(
+                sub_section_id=f"sub_{index}_0",
+                name=requested,
+                data_needs=[requested],
+                data_source_type="search",
+            )]
+        specs.append(SectionDataSpec(
+            # The caller passes only data-bearing aspects, so this positional
+            # ID is the canonical identity used by IndustryResearchStrategy.
+            # Template IDs are metadata and must not leak into execution IDs.
+            section_id=f"section_{index}",
+            name=requested,
+            sub_sections=sub_specs,
+        ))
+    return specs
+
+
 @dataclass
 class AgentSpec:
     """Agent specification definition"""
@@ -350,6 +420,10 @@ class DecompositionPlan:
     estimated_agents: int
     estimated_duration: str
     section_data_specs: List[SectionDataSpec] = field(default_factory=list)
+    # Immutable-at-execution-boundary list of every reportable leaf section.
+    # Agent results must join this list by section_id; display names are not
+    # identities.
+    section_manifest: List[Dict[str, Any]] = field(default_factory=list)
     
     def get_agents_for_phase(self, phase: ResearchPhase) -> List[AgentSpec]:
         """Get Agent list for specified phase"""
@@ -358,6 +432,9 @@ class DecompositionPlan:
     def get_total_agents(self) -> int:
         """Get total Agent count"""
         return sum(len(agents) for agents in self.phases.values())
+
+    def get_manifest_ids(self) -> List[str]:
+        return [str(item.get("section_id", "")) for item in self.section_manifest if item.get("section_id")]
 
 
 class TaskDecompositionStrategy(ABC):
@@ -465,10 +542,95 @@ class IndustryResearchStrategy(TaskDecompositionStrategy):
         "key_findings", "insights",
         # Chinese
         "synthesis_analysis", "core_findings", "key_discoveries",
+        "执行摘要", "摘要", "结论",
         # Strategic Intent (dependent on all analysis)
         "strategic_intent", "strategic intent",
         "战略意图", "战略意图推断",
     }
+
+    @staticmethod
+    def _build_execution_units(
+        normal_aspects: List[Tuple[int, str]],
+        section_spec_by_name: Dict[str, SectionDataSpec],
+        template_sub_sections_by_aspect: Dict[str, List[Any]],
+    ) -> List[Dict[str, Any]]:
+        """Expand data-bearing aspects into stable leaf execution units.
+
+        A parent section is a presentation concept; collection/validation/
+        analysis need a concrete unit for every required subsection.  Keeping
+        the parent when no subsection exists preserves compatibility with old
+        plans, while a real subsection gets the canonical ``parent::sub`` ID
+        used by report-upgrade and coverage checks.
+        """
+        units: List[Dict[str, Any]] = []
+        parent_position = 0
+        for parent_index, parent_name in normal_aspects:
+            parent_spec = section_spec_by_name.get(parent_name)
+            raw_subs = list(parent_spec.sub_sections) if parent_spec else []
+            if not raw_subs:
+                raw_subs = template_sub_sections_by_aspect.get(parent_name, []) or []
+
+            normalized_subs: List[Dict[str, Any]] = []
+            for sub_index, raw_sub in enumerate(raw_subs):
+                if isinstance(raw_sub, SubSectionSpec):
+                    sub_id = str(raw_sub.sub_section_id or f"sub_{parent_index}_{sub_index}")
+                    sub_name = str(raw_sub.name or "").strip()
+                    data_needs = list(raw_sub.data_needs or [])
+                    source_type = raw_sub.data_source_type
+                elif isinstance(raw_sub, dict):
+                    sub_id = str(raw_sub.get("sub_section_id") or raw_sub.get("id") or f"sub_{parent_index}_{sub_index}")
+                    sub_name = str(raw_sub.get("name") or raw_sub.get("title") or "").strip()
+                    data_needs = raw_sub.get("data_needs") or raw_sub.get("required_metrics") or raw_sub.get("points") or []
+                    source_type = str(raw_sub.get("data_source_type") or "search")
+                    if isinstance(data_needs, str):
+                        data_needs = [data_needs]
+                else:
+                    continue
+                if not sub_name:
+                    continue
+                needs = [str(item).strip() for item in data_needs if str(item).strip()]
+                normalized_subs.append({
+                    "sub_section_id": sub_id,
+                    "name": sub_name,
+                    "data_needs": list(dict.fromkeys(needs or [sub_name])),
+                    "data_source_type": source_type,
+                })
+
+            if not normalized_subs:
+                units.append({
+                    "unit_index": len(units),
+                    "parent_index": parent_index,
+                    "parent_name": parent_name,
+                    "name": parent_name,
+                    "section_id": f"section_{parent_position}",
+                    "parent_section_id": f"section_{parent_position}",
+                    "sub_section_id": "",
+                    "data_needs": [parent_name],
+                    "data_source_type": "search",
+                    "template_sub_sections": [],
+                })
+                parent_position += 1
+                continue
+
+            # Parent section IDs are assigned in data-bearing order, not the
+            # original list index, because synthesis sections are excluded.
+            parent_runtime_id = f"section_{parent_position}"
+            for sub in normalized_subs:
+                sub_id = sub["sub_section_id"]
+                units.append({
+                    "unit_index": len(units),
+                    "parent_index": parent_index,
+                    "parent_name": parent_name,
+                    "name": sub["name"],
+                    "section_id": f"{parent_runtime_id}::{sub_id}",
+                    "parent_section_id": parent_runtime_id,
+                    "sub_section_id": sub_id,
+                    "data_needs": sub["data_needs"],
+                    "data_source_type": sub["data_source_type"],
+                    "template_sub_sections": [sub],
+                })
+            parent_position += 1
+        return units
     
     def decompose(
         self, 
@@ -550,14 +712,44 @@ class IndustryResearchStrategy(TaskDecompositionStrategy):
                 dependent_aspects.append((i, aspect))
             else:
                 normal_aspects.append((i, aspect))
+
+        # This is the canonical identity map for every data-bearing aspect.
+        # Do not derive it later with list.index(): duplicate display names
+        # are legal and must still receive deterministic, distinct IDs.
+        normal_section_ids = {
+            key: f"section_{seq_idx}"
+            for seq_idx, key in enumerate(normal_aspects)
+        }
+        execution_units = self._build_execution_units(
+            normal_aspects,
+            section_spec_by_name,
+            template_sub_sections_by_aspect,
+        )
+
+        if sections_tree and not section_data_specs:
+            # Preserve framework-confirmed subsection metrics when the LLM
+            # intentionally returned a compact response for a large task.
+            # Only data-bearing aspects participate: synthesis sections have
+            # no collection spec and must not shift section_N identities.
+            section_data_specs = _specs_from_framework_tree(
+                sections_tree,
+                [aspect for _, aspect in normal_aspects],
+            )
+            # Rebuild lookup maps after reconstruction; the maps are consumed
+            # by every collection and analysis AgentSpec below.
+            section_spec_by_id = {spec.section_id: spec for spec in section_data_specs}
+            section_spec_by_name = {spec.name: spec for spec in section_data_specs}
         
         # === Phase 1: Data Collection ===
-        for seq_idx, (i, aspect) in enumerate(normal_aspects):
-            agent_id = self._create_agent_id(ResearchPhase.DATA_COLLECTION, i, aspect.lower().replace(" ", "_"))
-            section_id = f"section_{seq_idx}"
+        for unit in execution_units:
+            i = unit["parent_index"]
+            aspect = unit["name"]
+            agent_index = unit["unit_index"]
+            agent_suffix = aspect.lower().replace(" ", "_")
+            agent_id = self._create_agent_id(ResearchPhase.DATA_COLLECTION, agent_index, agent_suffix)
+            section_id = unit["section_id"]
             matched_spec = section_spec_by_id.get(section_id) or section_spec_by_name.get(aspect)
-            
-            template_subs = template_sub_sections_by_aspect.get(aspect, [])
+            template_subs = unit["template_sub_sections"]
             
             # [P0-4] Annual report mode: lightweight preloaded data delivery
             if preloaded_data:
@@ -596,18 +788,22 @@ class IndustryResearchStrategy(TaskDecompositionStrategy):
                     system_prompt=self._build_data_collection_prompt(topic, aspect, framework_config, sub_aspects=self._resolve_sub_aspect_names(template_subs) or ([sub.name for sub in matched_spec.sub_sections] if matched_spec and matched_spec.sub_sections else None)),
                     context={"aspect": aspect, "topic": topic,
                              "section_id": section_id,
-                             "data_needs": matched_spec.all_data_needs if matched_spec else [aspect],
-                             "search_data_needs": matched_spec.search_data_needs if matched_spec else [aspect],
-                             "sub_aspects": self._resolve_sub_aspect_names(template_subs) or ([sub.name for sub in matched_spec.sub_sections] if matched_spec and matched_spec.sub_sections else []),
+                             "data_needs": unit["data_needs"],
+                             "search_data_needs": unit["data_needs"] if unit["data_source_type"] in ("search", "both") else [],
+                             "sub_aspects": self._resolve_sub_aspect_names(template_subs),
                              "template_sub_sections": template_subs},
                 )
             phases[ResearchPhase.DATA_COLLECTION].append(spec)
         
         # === Phase 2: Data Validation ===
-        for i, aspect in normal_aspects:
+        for unit in execution_units:
+            i = unit["parent_index"]
+            aspect = unit["name"]
+            agent_index = unit["unit_index"]
             # Data validation agent depends on corresponding data collection agent
-            data_agent_id = self._create_agent_id(ResearchPhase.DATA_COLLECTION, i, aspect.lower().replace(" ", "_"))
-            agent_id = self._create_agent_id(ResearchPhase.DATA_VALIDATION, i, aspect.lower().replace(" ", "_"))
+            agent_suffix = aspect.lower().replace(" ", "_")
+            data_agent_id = self._create_agent_id(ResearchPhase.DATA_COLLECTION, agent_index, agent_suffix)
+            agent_id = self._create_agent_id(ResearchPhase.DATA_VALIDATION, agent_index, agent_suffix)
             
             spec = AgentSpec(
                 agent_id=agent_id,
@@ -623,22 +819,30 @@ class IndustryResearchStrategy(TaskDecompositionStrategy):
                 max_retries=2,
                 skills=[],
                 system_prompt=self._build_validation_prompt(topic, aspect),
-                context={"aspect": aspect, "topic": topic},
+                # Preserve the same section identity across collection,
+                # validation and analysis.  output_keys are storage keys and
+                # must not be used as a substitute for this identity.
+                context={"aspect": aspect, "topic": topic,
+                         "section_id": unit["section_id"]},
             )
             phases[ResearchPhase.DATA_VALIDATION].append(spec)
         
         # === Phase 3: Deep Analysis ===
-        for i, aspect in normal_aspects:
-            validation_agent_id = self._create_agent_id(ResearchPhase.DATA_VALIDATION, i, aspect.lower().replace(" ", "_"))
-            agent_id = self._create_agent_id(ResearchPhase.DEEP_ANALYSIS, i, aspect.lower().replace(" ", "_"))
-            da_matched_spec = section_spec_by_name.get(aspect)
-            da_template_subs = template_sub_sections_by_aspect.get(aspect, [])
+        for unit in execution_units:
+            i = unit["parent_index"]
+            aspect = unit["name"]
+            agent_index = unit["unit_index"]
+            agent_suffix = aspect.lower().replace(" ", "_")
+            validation_agent_id = self._create_agent_id(ResearchPhase.DATA_VALIDATION, agent_index, agent_suffix)
+            agent_id = self._create_agent_id(ResearchPhase.DEEP_ANALYSIS, agent_index, agent_suffix)
+            da_matched_spec = section_spec_by_name.get(unit["parent_name"])
+            da_template_subs = unit["template_sub_sections"]
             
             # [P0-4] Annual report mode: inject document_context from analysis_framework
             document_context = ""
             document_tables = []
             if annual_report_data:
-                section_ids = analysis_framework.get("aspect_to_section_ids", {}).get(aspect, [])
+                section_ids = analysis_framework.get("aspect_to_section_ids", {}).get(unit["parent_name"], [])
                 aspect_to_profile = analysis_framework.get("aspect_to_profile", {})
                 
                 sections = annual_report_data.get("sections", [])
@@ -660,7 +864,8 @@ class IndustryResearchStrategy(TaskDecompositionStrategy):
                         document_tables = financial_tables
             
             agent_context = {"aspect": aspect, "topic": topic,
-                     "sub_aspects": self._resolve_sub_aspect_names(da_template_subs) or ([sub.name for sub in da_matched_spec.sub_sections] if da_matched_spec and da_matched_spec.sub_sections else []),
+                     "section_id": unit["section_id"],
+                     "sub_aspects": self._resolve_sub_aspect_names(da_template_subs),
                      "template_sub_sections": da_template_subs}
             if document_context:
                 agent_context["document_context"] = document_context
@@ -690,11 +895,15 @@ class IndustryResearchStrategy(TaskDecompositionStrategy):
         # === Phase 4: Synthesis ===
         # Synthesis of dependent sections
         all_analysis_agents = [
-            self._create_agent_id(ResearchPhase.DEEP_ANALYSIS, i, a.lower().replace(" ", "_"))
-            for i, a in normal_aspects
+            self._create_agent_id(
+                ResearchPhase.DEEP_ANALYSIS,
+                unit["unit_index"],
+                unit["name"].lower().replace(" ", "_"),
+            )
+            for unit in execution_units
         ]
         
-        for i, aspect in dependent_aspects:
+        for synthesis_index, (i, aspect) in enumerate(dependent_aspects):
             agent_id = self._create_agent_id(ResearchPhase.SYNTHESIS, i, aspect.lower().replace(" ", "_"))
             
             spec = AgentSpec(
@@ -711,9 +920,67 @@ class IndustryResearchStrategy(TaskDecompositionStrategy):
                 max_retries=2,
                 skills=[],
                 system_prompt=self._build_synthesis_prompt(topic, aspect),
-                context={"aspect": aspect, "topic": topic, "is_dependent": True},
+                context={"aspect": aspect, "topic": topic, "is_dependent": True,
+                         "section_id": f"synthesis_{synthesis_index}"},
             )
             phases[ResearchPhase.SYNTHESIS].append(spec)
+
+        # Freeze the reportable chapter set before execution.  This is the
+        # contract consumed by collection, analysis, report assembly and L0;
+        # failed results remain visible against this list instead of making a
+        # chapter disappear from the actual result set.
+        section_manifest: List[Dict[str, Any]] = []
+        for unit in execution_units:
+            section_manifest.append({
+                "section_id": unit["section_id"],
+                "parent_section_id": unit["parent_section_id"],
+                "sub_section_id": unit["sub_section_id"],
+                "title": unit["name"],
+                "role": "analysis",
+                "required_topics": [unit["name"]],
+                "required_metrics": list(unit["data_needs"]),
+                "status": "pending",
+                "producer_agent_ids": {
+                    "data_collection": self._create_agent_id(
+                        ResearchPhase.DATA_COLLECTION, unit["unit_index"],
+                        unit["name"].lower().replace(" ", "_"),
+                    ),
+                    "validation": self._create_agent_id(
+                        ResearchPhase.DATA_VALIDATION, unit["unit_index"],
+                        unit["name"].lower().replace(" ", "_"),
+                    ),
+                    "analysis": self._create_agent_id(
+                        ResearchPhase.DEEP_ANALYSIS, unit["unit_index"],
+                        unit["name"].lower().replace(" ", "_"),
+                    ),
+                },
+                "evidence_ids": [],
+            })
+        for synthesis_index, (i, aspect) in enumerate(dependent_aspects):
+            aspect_lower = str(aspect or "").lower()
+            if "摘要" in str(aspect) or "summary" in aspect_lower:
+                output_slot = "exec_summary"
+            elif "结论" in str(aspect) or "conclusion" in aspect_lower or "总结" in str(aspect):
+                output_slot = "conclusion"
+            else:
+                output_slot = "body"
+            section_manifest.append({
+                "section_id": f"synthesis_{synthesis_index}",
+                "parent_section_id": f"synthesis_{synthesis_index}",
+                "sub_section_id": "",
+                "title": aspect,
+                "role": "synthesis",
+                "output_slot": output_slot,
+                "required_topics": [aspect],
+                "required_metrics": [],
+                "status": "pending",
+                "producer_agent_ids": {
+                    "synthesis": self._create_agent_id(
+                        ResearchPhase.SYNTHESIS, i, aspect.lower().replace(" ", "_")
+                    ),
+                },
+                "evidence_ids": [],
+            })
         
         # === Phase 5: Report Generation ===
         all_agents = [
@@ -738,7 +1005,8 @@ class IndustryResearchStrategy(TaskDecompositionStrategy):
             max_retries=2,
             skills=["docx_skill"],
             system_prompt=self._build_report_prompt(topic, requirement),
-            context={"topic": topic, "aspects": aspects},
+            context={"topic": topic, "aspects": aspects,
+                     "section_manifest": section_manifest},
         )
         phases[ResearchPhase.REPORT_GENERATION].append(report_agent)
         
@@ -759,6 +1027,7 @@ class IndustryResearchStrategy(TaskDecompositionStrategy):
             estimated_agents=sum(len(agents) for agents in phases.values()),
             estimated_duration=self._estimate_duration(len(aspects), complexity_value),
             section_data_specs=section_data_specs,
+            section_manifest=section_manifest,
         )
     
     def _build_data_collection_prompt(self, topic: str, aspect: str, framework_config: Any, sub_aspects: Optional[List[str]] = None) -> str:

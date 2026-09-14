@@ -255,20 +255,28 @@ class TestResearchWithRouting:
         
         orchestrator._execution_scheduler = MagicMock()
         
-        # 执行
-        result = await orchestrator._research_with_routing(
-            user_input="测试研究请求",
-            output_dir=None,
-            user_id=None,
-            interaction_mode=False,
-            interaction_callback=None,
-            task_id="test_task_001",
-        )
+        # Keep this test focused on routing/execution orchestration.  The
+        # production method also enters the report-upgrade workflow, whose
+        # real chapter agents are intentionally outside this unit test and
+        # can invoke configured LLM providers.
+        with patch(
+            "src.agents.fixed_agents.report_upgrade.orchestrator.ReportOrchestrator.generate_report",
+            new=AsyncMock(return_value={"title": "测试研究主题", "sections": []}),
+        ):
+            result = await orchestrator._research_with_routing(
+                user_input="测试研究请求",
+                output_dir=None,
+                user_id=None,
+                interaction_mode=False,
+                interaction_callback=None,
+                task_id="test_task_001",
+            )
         
         # 验证
-        assert result.status in ("completed", "completed_with_warnings"), \
-            f"Expected completed or completed_with_warnings, got {result.status}"
-        assert result.topic == "测试研究主题"
+        # An empty report is a hard report-generation failure.  The routing
+        # path must not label it completed merely because orchestration ran.
+        assert result.status == "failed", \
+            f"Expected invalid empty report to fail, got {result.status}"
         orchestrator._routing_adapter.analyze.assert_called_once()
 
 

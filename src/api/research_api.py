@@ -52,12 +52,38 @@ from src.core.preview_storage import PreviewStorage
 from src.core.prompt_manager import PromptManager
 from src.core.research_framework_manager import get_framework_config
 from src.core.session_manager import SessionManager
+from src.core.search import AnySearchProvider, LocalSkillProvider, SearchGateway, SearchRequest
 
 
 logger = logging.getLogger(__name__)
-session_manager = SessionManager()
+# Use the process-wide manager shared by SessionStreamer/ProgressStreamer.
+# A separate manager here makes background chat responses impossible to
+# persist/replay because the streamers cannot see sessions created by it.
+session_manager = SessionManager.get_instance()
 
 STREAM_TIMEOUT = 120
+
+
+def _routing_dag_error(routing_result) -> str:
+    """Return structured DAG feedback when a routing plan is not executable."""
+    audit = getattr(routing_result, "dag_audit", None)
+    if audit is None or audit.passed:
+        return ""
+    feedback = "; ".join(audit.revision_feedback) or "请修订任务依赖和执行顺序"
+    return f"DAG计划审查未通过: {feedback}"
+
+
+def _detect_session_language(text: str, fallback: str = "zh") -> str:
+    """Detect language without letting punctuation-only messages flip a session.
+
+    ``detect_language`` intentionally defaults ordinary Latin text to English,
+    but a message such as ``？`` contains no language signal.  In an existing
+    conversation that message must retain the session language; for a new
+    session the product default is Chinese.
+    """
+    if not re.search(r"[A-Za-z\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]", text or ""):
+        return fallback
+    return detect_language(text).value
 
 class ConversationToolSet:
     """ConversationToolSet - auto-registers tools from SkillRegistry manifests"""
@@ -73,6 +99,8 @@ class ConversationToolSet:
 
     def __init__(self, skill_registry=None):
         self._search_skill = None
+        self._search_gateway = None
+        self._search_gateways = {}
         self._news_skill = None
         self._scraper_skill = None
         self._skill_registry = skill_registry
@@ -152,55 +180,118 @@ class ConversationToolSet:
         weekdays = ('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday')
         return {'success': True, 'data': {'iso_format': now.isoformat(), 'date': now.strftime('%Y-%m-%d'), 'weekday': weekdays[now.weekday()], 'time': now.strftime('%H:%M'), 'year': now.year, 'month': now.month, 'day': now.day, 'hour': now.hour, 'minute': now.minute}}
 
-    async def web_search(self, query, max_results=5, recency_days=30):
-        try:
-            if not self._search_skill:
-                from src.skills.search_skill import MultiSearchSkill
-                self._search_skill = MultiSearchSkill()
-            kwargs = {'query': query, 'max_results': max_results}
-            if recency_days:
-                if recency_days > 0:
-                    if recency_days <= 7:
-                        kwargs['time_range'] = 'd'
-                    elif recency_days <= 30:
-                        kwargs['time_range'] = 'w'
-                    elif recency_days <= 90:
-                        kwargs['time_range'] = 'm'
-                    else:
-                        kwargs['time_range'] = 'y'
-            result = await self._search_skill.execute(**kwargs)
-            if result.get('success'):
-                return {'success': True, 'data': result.get('results', [])}
-            return {'success': False, 'error': result.get('error', 'Search failed')}
-        except Exception as e:
-            logger.warning(f"web_search failed: {e}")
-            return {'success': False, 'error': str(e)}
+    def _ensure_search_gateway(self, task_id="conversation"):
+        if task_id in self._search_gateways:
+            return self._search_gateways[task_id]
+        # Backward-compatible injection point used by callers/tests. A
+        # session-specific gateway still takes precedence once registered.
+        if task_id == "conversation" and self._search_gateway is not None:
+            self._search_gateways[task_id] = self._search_gateway
+            return self._search_gateway
+        from src.skills.search_skill import MultiSearchSkill
+        search_skill = MultiSearchSkill()
+        gateway = SearchGateway(
+            task_id=task_id,
+            providers={
+                "anysearch": AnySearchProvider(),
+                "local_skill": LocalSkillProvider(search_skill, name="local_skill"),
+            },
+            primary_provider="anysearch",
+            fallback_providers=["local_skill"],
+            cache_ttl_seconds=900,
+            min_quality_score=40,
+            max_provider_retries=1,
+            max_provider_switches=1,
+        )
+        self._search_gateways[task_id] = gateway
+        self._search_skill = search_skill
+        self._search_gateway = gateway
+        return gateway
 
-    async def news_search(self, query, max_results=5, recency_days=30):
-        try:
-            if not self._news_skill:
-                from src.skills.search_skill import NewsSearchSkill
-                self._news_skill = NewsSearchSkill()
-            kwargs = {'query': query, 'max_results': max_results}
-            if recency_days:
-                if recency_days > 0:
-                    if recency_days <= 7:
-                        kwargs['time_range'] = 'd'
-                    elif recency_days <= 30:
-                        kwargs['time_range'] = 'w'
-                    elif recency_days <= 90:
-                        kwargs['time_range'] = 'm'
-                    else:
-                        kwargs['time_range'] = 'y'
-            result = await self._news_skill.execute(**kwargs)
-            if result.get('success'):
-                return {'success': True, 'data': result.get('results', [])}
-            return {'success': False, 'error': result.get('error', 'News search failed')}
-        except Exception as e:
-            logger.warning(f"news_search failed: {e}")
-            return {'success': False, 'error': str(e)}
+    @staticmethod
+    def _recency_to_time_range(recency_days):
+        if not recency_days or recency_days <= 0:
+            return None
+        if recency_days <= 7:
+            return "d"
+        if recency_days <= 30:
+            return "w"
+        if recency_days <= 90:
+            return "m"
+        return "y"
 
-    def scrape_url(self, url, max_chars):
+    async def web_search(self, query, max_results=5, recency_days=30, task_id="conversation"):
+        try:
+            gateway = self._ensure_search_gateway(task_id)
+            response = await gateway.search(SearchRequest(
+                query=query,
+                max_results=max_results,
+                time_range=self._recency_to_time_range(recency_days),
+                objective="web",
+                source_mode="provider_pool",
+            ), scope="conversation.web_search")
+            if response.success:
+                results = [result.__dict__ for result in response.results]
+                return {
+                    'success': True,
+                    'results': results,
+                    'data': results,  # legacy response compatibility
+                    'provider': response.provider,
+                    'quality_score': response.quality_score,
+                    'cache_hit': response.cache_hit,
+                    'stop_reason': response.stop_reason,
+                }
+            return {'success': False, 'results': [], 'data': [], 'provider': response.provider,
+                    'error_class': response.error_class or 'provider_error',
+                    'message': response.message or response.warning or 'Search failed',
+                    'quality_score': response.quality_score,
+                    'cache_hit': response.cache_hit,
+                    'stop_reason': response.stop_reason}
+        except Exception as e:
+            logger.warning("web_search failed: %s", type(e).__name__)
+            return {'success': False, 'results': [], 'data': [], 'provider': 'anysearch',
+                    'error_class': 'provider_error', 'message': 'Search provider failed',
+                    'quality_score': 0.0, 'cache_hit': False, 'stop_reason': 'provider_error'}
+
+    async def news_search(self, query, max_results=5, recency_days=30, task_id="conversation"):
+        try:
+            gateway = self._ensure_search_gateway(task_id)
+            response = await gateway.search(SearchRequest(
+                query=query,
+                max_results=max_results,
+                time_range=self._recency_to_time_range(recency_days),
+                objective="news",
+                source_mode="provider_pool",
+            ), scope="conversation.news_search")
+            if response.success:
+                results = [result.__dict__ for result in response.results]
+                return {
+                    'success': True,
+                    'results': results,
+                    'data': results,  # legacy response compatibility
+                    'provider': response.provider,
+                    'quality_score': response.quality_score,
+                    'cache_hit': response.cache_hit,
+                    'stop_reason': response.stop_reason,
+                }
+            return {
+                'success': False,
+                'results': [],
+                'data': [],
+                'provider': response.provider,
+                'error_class': response.error_class or 'provider_error',
+                'error': response.message or response.warning or 'News search failed',
+                'quality_score': response.quality_score,
+                'cache_hit': response.cache_hit,
+                'stop_reason': response.stop_reason,
+            }
+        except Exception as e:
+            logger.warning("news_search failed: %s", type(e).__name__)
+            return {'success': False, 'results': [], 'data': [], 'provider': 'anysearch',
+                    'error_class': 'provider_error', 'message': 'News search failed',
+                    'quality_score': 0.0, 'cache_hit': False, 'stop_reason': 'provider_error'}
+
+    def scrape_url(self, url, max_chars=5000):
         try:
             if not self._scraper_skill:
                 from src.skills.web_scraper_skill import WebScraperSkill
@@ -213,14 +304,17 @@ class ConversationToolSet:
             logger.warning(f"scrape_url failed: {e}")
             return {'success': False, 'error': str(e)}
 
-    async def execute_tool(self, tool_name, arguments):
+    async def execute_tool(self, tool_name, arguments, task_id=None):
         """Execute the specified tool and return result (with single timeout protection)"""
         handler = self._get_handler(tool_name)
         if not handler:
             return {'success': False, 'error': f"Unknown tool: {tool_name}"}
         try:
             timeout = self.TOOL_TIMEOUTS.get(tool_name, 30)
-            result = handler(**arguments)
+            call_arguments = dict(arguments or {})
+            if task_id and tool_name in {"web_search", "news_search"}:
+                call_arguments["task_id"] = task_id
+            result = handler(**call_arguments)
             if hasattr(result, '__await__'):
                 result = await asyncio.wait_for(result, timeout=timeout)
             return result
@@ -319,6 +413,7 @@ class ResearchAPI:
   "adjustment": "user's original request text",
   "aspects": ["section names for revision"],
   "revision_type": "section" | "full",
+  "base_report_version": 3,
   "tool_call": {"name": "tool_name", "arguments": {}} or null
 }
 RULE: When action="enter_framework", if the topic has natural multi-level structure (e.g., industry segments, regional breakdowns, product categories), prefer using "framework_tree" instead of only "framework_sections". Simple topics can use "framework_sections" alone."""
@@ -340,6 +435,9 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
         skill_registry = getattr(self._orchestrator, '_skill_registry', None)
         self._tool_set = ConversationToolSet(skill_registry=skill_registry)
         self._revision_locks = {}
+        # Revision execution is scoped per session.  A single global task
+        # allowed one user's revision to cancel another user's revision.
+        self._revision_tasks = {}
         self._revision_task = None
         self._executor_tasks = {}
         self._session_locks = {}
@@ -392,7 +490,7 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
         """
         session_id = f"""ses_{uuid.uuid4().hex[:8]}"""
         state_machine = ConversationStateMachine(research_id=session_id)
-        detected_lang = detect_language(user_input).value
+        detected_lang = _detect_session_language(user_input)
         session_manager.create(session_id, {'user_input': user_input, 'user_id': user_id, 'state_machine': state_machine, 'clarifier': SmartClarifier(), 'created_at': datetime.now(), 'current_step': 0, 'mode': 'chat', 'llm_config': llm_config, 'language': detected_lang, '_session_id': session_id, 'conversation_history': [], 'research_context': {'topic': None, 'directions': [], 'framework': None, 'details': {}}})
         set_global_language(Language(detected_lang))
 
@@ -462,6 +560,25 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
         latest_context = session.get('research_context', {})
         if self._should_start_execution(user_input, mode, latest_context, session_id):
             return await self._start_execution(session_id)
+
+        # Paused and resumably stopped research must keep using the dialogue
+        # router even when the session mode was switched back to ``chat``.
+        # The frontend deliberately does not auto-resume: the LLM decides
+        # whether this message means resume, modify, re-plan, or chat.
+        state_machine = session.get('state_machine')
+        recoverable_stop = (
+            cm.is_paused(session_id)
+            or session.get('status') in ('paused', 'cancelled')
+            or (
+                state_machine
+                and state_machine.current_state in (
+                    ConversationState.PAUSED,
+                    ConversationState.CANCELLED,
+                )
+            )
+        )
+        if recoverable_stop:
+            return await self._handle_research_msg(session_id, user_input, session)
 
         depth_keywords = ('深度研究', 'deep research', '按框架研究', '根据框架', '开始研究', 'start research', '详细分析', 'detailed analysis')
         question_suffixes = ('？', '?', '吗', '呢', '是什么', '是什么意思', '怎么', '如何')
@@ -553,11 +670,11 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
             session['current_step'] = 0
             return await self._handle_chat_mode(session_id, user_input)
 
-        if cm.is_paused(session_id):
+        if cm.is_paused(session_id) or session.get('status') in ('paused', 'cancelled'):
             try:
-                conv_result = await asyncio.wait_for(self._llm_converse(session_id, user_input), timeout=60)
-            except asyncio.TimeoutError:
-                logger.warning(f"LLM converse timed out for paused {session_id}, falling back to chat")
+                conv_result = await self._llm_converse(session_id, user_input)
+            except Exception as e:
+                logger.error(f"LLM converse failed for paused session {session_id}: {e}", exc_info=True)
                 return await self._handle_chat_mode(session_id, user_input)
             action = conv_result.get('action', 'continue_chat')
             if action == 'resume_research':
@@ -590,10 +707,7 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
         self._cancel_existing_task(session_id)
         self._background_task_gen[session_id] = self._background_task_gen.get(session_id, 0) + 1
         try:
-            conv_result = await asyncio.wait_for(self._llm_converse(session_id, user_input), timeout=60)
-        except asyncio.TimeoutError:
-            logger.warning(f"LLM converse timed out during research for {session_id}, queuing message")
-            return {'session_id': session_id, 'step': session.get('current_step', 6), 'mode': 'research', 'status': 'running', 'message': '消息分析超时，您的消息已记录。您可以说"暂停"后重新发送，或等待研究完成后回复。', 'suggestions': ['暂停研究', '继续等待'], 'next_step': 'continue_research'}
+            conv_result = await self._llm_converse(session_id, user_input)
         except Exception as e:
             logger.error(f"LLM converse failed: {e}", exc_info=True)
             return {'session_id': session_id, 'step': session.get('current_step', 6), 'mode': 'research', 'status': 'running', 'message': '消息处理临时异常，您可以尝试"暂停"后重新发送。', 'suggestions': ['暂停研究'], 'next_step': 'continue_research'}
@@ -741,7 +855,7 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
                     'suggestions': [], 'next_step': 'tool_executing'}
 
         if not skip_lang_detect:
-            current_lang = detect_language(user_input).value
+            current_lang = _detect_session_language(user_input, session.get('language', 'zh'))
             session['language'] = current_lang
             set_global_language(Language(current_lang))
 
@@ -980,6 +1094,12 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
     def _build_dialogue_context(self, conversation_state):
         """Build dialogue phase guidance (without intent state injection)"""
         state_guidance = {ConversationState.UNDERSTANDING: '## Current Dialogue Phase: Understanding\nFocus on understanding the user\'s research need.\n- If the request is vague, ask 1-2 targeted questions.\n- Do NOT propose a research framework yet.\n- NEVER use "revise_report" — research has not started yet.\n', ConversationState.CLARIFYING: '## Current Dialogue Phase: Clarifying\nThe topic is identified but details may be missing.\n- Ask focused questions about specific gaps. Max 2 per turn.\n- If enough information, you may propose a framework.\n- NEVER use "revise_report" — research has not started yet.\n', ConversationState.FRAMEWORK_CONFIRM: '## Current Dialogue Phase: Framework Confirmation\nRequirements are clear. Propose a research framework.\n- Use action="enter_framework" with framework_sections.\n- If the topic has natural sub-structure (e.g., industry segments, regional breakdowns), also output "framework_tree" with hierarchical section→sub_section→points structure.\n', ConversationState.EXECUTING: '## Current Dialogue Phase: Research Executing\nResearch is actively running with professional agents working.\nCRITICAL RULES for action selection:\n- Default action: "continue_chat" — for confirmations, greetings, simple questions, status queries.\n- "inject_requirement" — ONLY when user clearly asks to add/remove/supplement sections.\n- "modify_research" — ONLY when user EXPLICITLY uses words like 修改/调整/修订/adjust/modify. Do NOT use this for vague suggestions.\n- "enter_framework" — ONLY when user EXPLICITLY uses words like 重新规划/重新开始/换个方向/restart/redesign. NEVER use this for simple messages like "继续" or "好的".\n- NEVER use "revise_report" — use "inject_requirement" instead for mid-research modifications.\n- When in doubt, use "continue_chat" with a brief reassuring message.\n', ConversationState.PAUSED: '## Current Dialogue Phase: Research Paused\nResearch was interrupted. Cached data available.\n- Resume → resume_research; Modify → modify_research; Chat → continue_chat.\n- NEVER use "revise_report" — research is not complete yet.\n', ConversationState.PREVIEWING: '## Current Dialogue Phase: Report Preview\nReport is being previewed.\n- Handle user feedback on the report.\n- Use "revise_report" when user asks to modify specific content in the report (e.g., 修改某节, 更新数据, 调整结论).\n', ConversationState.CANCELLED: '## Current Dialogue Phase: Research Cancelled\nResearch was cancelled and cannot be resumed.\n- NEVER use "revise_report" — there is no report to revise.\n- If user wants to start over, use "enter_framework".\n', ConversationState.COMPLETED: '## Current Dialogue Phase: Research Completed\nResearch and report generation are complete.\n- Use "revise_report" when user asks to modify specific content in the report.\n- Use "regenerate_report" when user asks to regenerate the entire report.\n- Use "enter_framework" when user asks to start a completely new research.\n', ConversationState.DATA_EXTRACTED: '## Current Dialogue Phase: Data Extracted\nUser files have been parsed and a summary was provided.\n- The user has been asked what they want to do with the data.\n- If the user wants a PPT, use action="enter_ppt_generation".\n- If the user wants research/analysis, use action="continue_chat" to proceed with normal research flow.\n- Do NOT propose a framework yet — first determine the user\'s intent.\n', ConversationState.REQUIREMENT_CONFIRM: '## Current Dialogue Phase: Requirement Confirmation\nUser wants to generate a PPT from their data. Clarify PPT requirements.\n- Ask about: audience, focus areas, page count, style preferences.\n- Max 2 questions per turn. Keep it concise.\n- When requirements are clear, use action="confirm_requirements" to proceed to data supplementation.\n- NEVER use "revise_report" — PPT has not been generated yet.\n', ConversationState.DATA_SUPPLEMENT: '## Current Dialogue Phase: Data Supplementation\nChecking for data gaps and supplementing if needed.\n- If the user provides additional data or context, incorporate it.\n- If all gaps are filled, use action="enter_framework" to propose a PPT framework.\n- If the user wants to skip supplementation, use action="enter_framework" directly.\n- NEVER use "revise_report" — PPT has not been generated yet.\n'}
+        state_guidance[ConversationState.CANCELLED] = (
+            '## Current Dialogue Phase: Research Stopped\n'
+            'Research was stopped with checkpoints retained and can be resumed.\n'
+            '- Use resume_research to continue from the checkpoint.\n'
+            '- Do not use revise_report until a report exists.\n'
+        )
         guidance = state_guidance.get(conversation_state, '')
         return f"""\n{guidance}\n"""
 
@@ -1162,7 +1282,10 @@ RULE: When action="enter_framework", if the topic has natural multi-level struct
             return self._build_response({'message': 'Session not found.', 'action': 'continue_chat', 'topic': None, 'directions': [], 'suggestions': []}, None)
         context = session.get('research_context', {})
         history = session.get('conversation_history', [])
-        llm_config = session.get('llm_config', {})
+        # ``start_research(..., llm_config=None)`` is a valid call and means
+        # use the configured profile chain.  Normalize it before any access;
+        # otherwise the very first intent call fails with ``NoneType.get``.
+        llm_config = session.get('llm_config') or {}
         chat_history = [m for m in history if m.get('type') != 'context_summary']
         recent_history = chat_history[-10:] if chat_history else []
         try:
@@ -1220,12 +1343,40 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
 """
         sections_context = ''
         post_research_hint = ''
+        report_context_summary = ''
+        try:
+            from src.core.report_context import build_report_context
+            report_context = session.get('report_context')
+            if not isinstance(report_context, dict):
+                report_context = self._refresh_report_context(
+                    session_id, session, publish=False
+                ) or build_report_context(session_id, session)
+            report_context_summary = (
+                "\n## Current Report Context (authoritative for routing)\n"
+                f"phase={report_context.get('report_phase')} "
+                f"report_version={report_context.get('report_version')} "
+                f"context_revision={report_context.get('context_revision')}\n"
+                f"document_type={report_context.get('document_type')} "
+                f"document_version={report_context.get('document_version')}\n"
+                "Sections:\n" + "\n".join(
+                    f"- {s.get('id')}: {s.get('title')} | status={s.get('status')} | quality={s.get('quality_status')}"
+                    for s in report_context.get('sections', []) if isinstance(s, dict)
+                ) + "\n"
+                f"Quality: {report_context.get('quality', {})}\n"
+                f"Last revision: {report_context.get('last_revision', {})}\n"
+                f"Pending decision: {report_context.get('pending_decision')}\n"
+                "Use this context to distinguish revision of the existing report from new research. "
+                "Do not invent section names or report versions. If action=revise_report, copy the current report_version into base_report_version.\n"
+            )
+        except Exception as exc:
+            logger.warning("Failed to build report context for dialogue: %s", exc)
         if session.get('research_result'):
             report = session['research_result'].get('report', {})
             sections = report.get('sections', [])
             if sections:
                 sl = '\n'.join(f"- {s.get('title', s.get('id', str(s)))}" if isinstance(s, dict) else f"- {s}" for s in sections)
                 sections_context = f"\n## Existing Report Sections\n{sl}\nUse these exact section names in aspects when the user requests revision.\n"
+            sections_context += report_context_summary
             rs = session['research_result'].get('status', 'unknown')
             rst = session['research_result'].get('stages_completed', 0)
             post_research_hint = f"\n## Previous Research Context\nStatus: {rs} | Stages: {rst}\nThe research has completed and a session record exists.\nIf the user asks to retry or start a NEW research, use `enter_framework`.\nIf the user asks to regenerate or refresh the REPORT/DOCUMENT (e.g. 重新生成HTML, 重新生成报告, regenerate report), use `regenerate_report`.\nIf the user asks to revise specific sections, use `revise_report`.\nDO NOT trigger revise_report if:\n- The user is asking ABOUT the revision/modification feature itself\n- The user is reporting a bug, issue, or problem with the report generation\n- The user mentions functionality is 'broken', 'not working', '有问题', '不工作'\n- The user is analyzing or evaluating the report output, not requesting changes\nThese should use `continue_chat` instead.\n"
@@ -1265,15 +1416,30 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
                 user_prompt = self._build_followup_prompt(accumulated_context, tool_history, user_input, history_text, dialogue_context)
             try:
                 from src.config.settings import settings as app_settings
-                _model = llm_config.get('model', app_settings.llm.model)
+                # An empty session config means "use the configured profile
+                # chain".  Passing settings.llm values explicitly here would
+                # bypass dynamic fallback (for example, an expired optional
+                # provider could remain pinned in the streaming path).
+                _model = llm_config.get('model') or None
                 _max_tokens = llm_config.get('max_tokens', app_settings.llm.max_tokens)
                 _temperature = temperature if temperature is not None else app_settings.llm.temperature
-                _api_key = llm_config.get('api_key', app_settings.llm.api_key)
-                _base_url = llm_config.get('api_endpoint', app_settings.llm.base_url)
+                _api_key = llm_config.get('api_key') or None
+                _base_url = llm_config.get('api_endpoint') or None
 
                 if SessionStreamer and iteration == 0:
                     full_content = ""
+                    stream_error = None
                     try:
+                        stream_filter = _ThinkTagFilter()
+
+                        def _publish_stream_piece(piece_type, piece_text):
+                            if not piece_text or not SessionStreamer:
+                                return
+                            if piece_type == "think":
+                                SessionStreamer.push_chat_thinking(session_id, piece_text)
+                            else:
+                                SessionStreamer.push_chat_token(session_id, piece_text)
+
                         async def _collect_stream():
                             nonlocal full_content
                             async for token in call_llm_stream(
@@ -1282,35 +1448,50 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
                                 api_key=_api_key, base_url=_base_url,
                             ):
                                 full_content += token
+                                for piece_type, piece_text in stream_filter.feed(token):
+                                    _publish_stream_piece(piece_type, piece_text)
 
-                        await asyncio.wait_for(_collect_stream(), timeout=STREAM_TIMEOUT)
-                    except (asyncio.TimeoutError, Exception) as stream_err:
-                        if isinstance(stream_err, asyncio.TimeoutError):
+                            for piece_type, piece_text in stream_filter.flush():
+                                _publish_stream_piece(piece_type, piece_text)
+
+                        await _collect_stream()
+                    except Exception as stream_err:
+                        stream_error = stream_err
+
+                    # A provider can close a successful stream without
+                    # emitting any delta, or fail before the first token.
+                    # Make exactly one non-stream fallback attempt.  Keep the
+                    # fallback outside the stream exception handler so a
+                    # failed fallback is not accidentally called a second time.
+                    if stream_error is not None or not full_content.strip():
+                        if isinstance(stream_error, asyncio.TimeoutError):
                             logger.warning(f"Stream timed out (iteration {iteration}), degrading to non-stream")
+                        elif stream_error is not None:
+                            logger.warning(f"Stream failed (iteration {iteration}), degrading: {stream_error}")
                         else:
-                            logger.warning(f"Stream failed (iteration {iteration}), degrading: {stream_err}")
-                        result = await asyncio.wait_for(
-                            call_llm(prompt=user_prompt, system_prompt=system_prompt,
-                                     model=_model, max_tokens=_max_tokens, temperature=_temperature,
-                                     api_key=_api_key, base_url=_base_url),
-                            timeout=60)
-                        if not result.get('success'):
-                            raise ValueError(f"LLM call failed: {result.get('message') or result.get('error', 'Unknown error')}")
+                            logger.warning("LLM stream completed without content; falling back to non-stream")
+                        result = await call_llm(prompt=user_prompt, system_prompt=system_prompt,
+                                                model=_model, max_tokens=_max_tokens, temperature=_temperature,
+                                                api_key=_api_key, base_url=_base_url)
+                        if not result or not result.get('success'):
+                            result_info = result if isinstance(result, dict) else {}
+                            error_message = result_info.get('message') or result_info.get('error') or 'LLM returned no response'
+                            raise ValueError(f"LLM call failed: {error_message}")
                         full_content = result.get('content', '')
                 else:
-                    result = await asyncio.wait_for(
-                        call_llm(prompt=user_prompt, system_prompt=system_prompt,
-                                 model=_model, max_tokens=_max_tokens, temperature=_temperature,
-                                 api_key=_api_key, base_url=_base_url),
-                        timeout=60)
-                    if not result.get('success'):
-                        raise ValueError(f"LLM call failed: {result.get('message') or result.get('error', 'Unknown error')}")
+                    result = await call_llm(prompt=user_prompt, system_prompt=system_prompt,
+                                           model=_model, max_tokens=_max_tokens, temperature=_temperature,
+                                           api_key=_api_key, base_url=_base_url)
+                    if not result or not result.get('success'):
+                        result_info = result if isinstance(result, dict) else {}
+                        error_message = result_info.get('message') or result_info.get('error') or 'LLM returned no response'
+                        raise ValueError(f"LLM call failed: {error_message}")
                     full_content = result.get('content', '')
             except asyncio.TimeoutError:
                 logger.warning(f"LLM call timed out (iteration {iteration}), using accumulated results")
                 break
             except Exception as e:
-                logger.error(f"LLM call failed: {e}")
+                logger.exception(f"LLM call failed: {e}")
                 break
             content = full_content
             if not content or not content.strip():
@@ -1363,9 +1544,14 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
             query_display = tool_args.get('query', tool_args.get('url', ''))
             if SessionStreamer:
                 SessionStreamer.push_agent_message(session_id, {'agent_id': tool_name, 'agent_name': agent_name, 'action': 'searching', 'content': f"Searching for: {query_display[:100]}"})
-            tool_result = await self._tool_set.execute_tool(tool_name, tool_args)
+            tool_result = await self._tool_set.execute_tool(tool_name, tool_args, task_id=session_id)
             if SessionStreamer:
-                SessionStreamer.push_agent_message(session_id, {'agent_id': tool_name, 'agent_name': agent_name, 'action': 'completed', 'content': f"Completed: {tool_name}"})
+                search_metadata = {
+                    key: tool_result[key]
+                    for key in ('provider', 'quality_score', 'cache_hit', 'stop_reason')
+                    if isinstance(tool_result, dict) and key in tool_result and tool_result[key] is not None
+                }
+                SessionStreamer.push_agent_message(session_id, {'agent_id': tool_name, 'agent_name': agent_name, 'action': 'completed', 'content': f"Completed: {tool_name}", **search_metadata})
             result_summary = json.dumps({k: v for k, v in tool_result.items() if k not in ('success', 'message', 'error')}, ensure_ascii=False)
             accumulated_context += f"\n### Tool: {tool_name} (iteration {iteration + 1})\nArguments: {json.dumps(tool_args, ensure_ascii=False)}\nResult:\n```json\n{result_summary}\n```\n"
             tool_history.append({'iteration': iteration + 1, 'name': tool_name, 'args': tool_args})
@@ -1441,14 +1627,14 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
         retry_prompt = f"""## CRITICAL: Your previous response was not valid JSON.\nYou MUST respond with ONLY a valid JSON object starting with `{{` and ending with `}}`.\nNo markdown, no code fences, no explanation before or after the JSON.\nNo natural language text outside the JSON structure.\n\n{self._JSON_OUTPUT_SCHEMA}\n\nOutput ONLY the JSON object now."""
         try:
             from src.config.settings import settings as app_settings
-            result = await asyncio.wait_for(
-                call_llm(prompt=retry_prompt, system_prompt=system_prompt,
-                         model=llm_config.get('model', app_settings.llm.model),
-                         max_tokens=llm_config.get('max_tokens', app_settings.llm.max_tokens), temperature=0.1,
-                         api_key=llm_config.get('api_key', app_settings.llm.api_key),
-                         base_url=llm_config.get('api_endpoint', app_settings.llm.base_url)),
-                timeout=60)
-            if not result.get('success'):
+            result = await call_llm(
+                prompt=retry_prompt, system_prompt=system_prompt,
+                model=llm_config.get('model') or None,
+                max_tokens=llm_config.get('max_tokens', app_settings.llm.max_tokens), temperature=0.1,
+                api_key=llm_config.get('api_key') or None,
+                base_url=llm_config.get('api_endpoint') or None,
+            )
+            if not result or not result.get('success'):
                 return None
             content = result.get('content', '')
             if not content or not content.strip():
@@ -1461,7 +1647,7 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
 
     def _build_response(self, parsed, tool_results, note, thinking_content=None):
         """Build standardized response dict from parsed LLM output"""
-        response = {'status': 'done', 'message': parsed.get('message', ''), 'action': parsed.get('action', 'continue_chat'), 'topic': parsed.get('topic'), 'directions': parsed.get('directions', []), 'framework_sections': parsed.get('framework_sections'), 'framework_tree': parsed.get('framework_tree'), 'clarification_questions': parsed.get('clarification_questions', []), 'identified_aspects': parsed.get('identified_aspects', []), 'is_composite': parsed.get('is_composite', False), 'suggestions': parsed.get('suggestions', []), 'inject_ops': parsed.get('inject_ops', []), 'complexity': parsed.get('complexity', 'single'), 'research_types': parsed.get('research_types', []), 'hidden_requirements': parsed.get('hidden_requirements', [])}
+        response = {'status': 'done', 'message': parsed.get('message', ''), 'action': parsed.get('action', 'continue_chat'), 'topic': parsed.get('topic'), 'directions': parsed.get('directions', []), 'framework_sections': parsed.get('framework_sections'), 'framework_tree': parsed.get('framework_tree'), 'clarification_questions': parsed.get('clarification_questions', []), 'identified_aspects': parsed.get('identified_aspects', []), 'is_composite': parsed.get('is_composite', False), 'suggestions': parsed.get('suggestions', []), 'inject_ops': parsed.get('inject_ops', []), 'complexity': parsed.get('complexity', 'single'), 'research_types': parsed.get('research_types', []), 'hidden_requirements': parsed.get('hidden_requirements', []), 'base_report_version': parsed.get('base_report_version')}
         if thinking_content:
             response['thinking_content'] = thinking_content
         if note:
@@ -1487,12 +1673,16 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
         """Launch the remaining tool chain as a background task after first tool_call returns processing."""
         generation = self._background_task_gen.get(session_id, 0)
         self._cancel_existing_task(session_id)
-        task = asyncio.create_task(
+        task = safe_create_task(
             self._continue_tool_chain(session_id, user_input, system_prompt, llm_config, accumulated_context, tool_history, parsed, last_thinking_content, cancel_flag, generation),
             name=f"tool_chain_{session_id}"
         )
         self._background_tasks[session_id] = task
-        task.add_done_callback(lambda _: self._background_tasks.pop(session_id, None))
+        def _clear_background_task(done_task):
+            # An old task must never remove a newer task for this session.
+            if self._background_tasks.get(session_id) is done_task:
+                self._background_tasks.pop(session_id, None)
+        task.add_done_callback(_clear_background_task)
 
     async def _continue_tool_chain(self, session_id, user_input, system_prompt, llm_config, accumulated_context, tool_history, parsed, last_thinking_content, cancel_flag, generation):
         """Continue the tool execution loop in background after first tool_call returns processing."""
@@ -1544,16 +1734,14 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
             user_prompt = self._build_followup_prompt(accumulated_context, tool_history, user_input, history_text, dialogue_context)
             try:
                 from src.config.settings import settings as app_settings
-                _model = llm_config.get('model', app_settings.llm.model)
+                _model = llm_config.get('model') or None
                 _max_tokens = llm_config.get('max_tokens', app_settings.llm.max_tokens)
                 _temperature = llm_config.get('temperature', app_settings.llm.temperature)
-                _api_key = llm_config.get('api_key', app_settings.llm.api_key)
-                _base_url = llm_config.get('api_endpoint', app_settings.llm.base_url)
-                result = await asyncio.wait_for(
-                    call_llm(prompt=user_prompt, system_prompt=system_prompt,
-                             model=_model, max_tokens=_max_tokens, temperature=_temperature,
-                             api_key=_api_key, base_url=_base_url),
-                    timeout=60)
+                _api_key = llm_config.get('api_key') or None
+                _base_url = llm_config.get('api_endpoint') or None
+                result = await call_llm(prompt=user_prompt, system_prompt=system_prompt,
+                                        model=_model, max_tokens=_max_tokens, temperature=_temperature,
+                                        api_key=_api_key, base_url=_base_url)
                 if not result.get('success'):
                     break
                 full_content = result.get('content', '')
@@ -1593,9 +1781,14 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
             query_display = tool_args.get('query', tool_args.get('url', ''))
             if SessionStreamer:
                 SessionStreamer.push_agent_message(session_id, {'agent_id': tool_name, 'agent_name': agent_name, 'action': 'searching', 'content': f"Searching for: {query_display[:100]}"})
-            tool_result = await self._tool_set.execute_tool(tool_name, tool_args)
+            tool_result = await self._tool_set.execute_tool(tool_name, tool_args, task_id=session_id)
             if SessionStreamer:
-                SessionStreamer.push_agent_message(session_id, {'agent_id': tool_name, 'agent_name': agent_name, 'action': 'completed', 'content': f"Completed: {tool_name}"})
+                search_metadata = {
+                    key: tool_result[key]
+                    for key in ('provider', 'quality_score', 'cache_hit', 'stop_reason')
+                    if isinstance(tool_result, dict) and key in tool_result and tool_result[key] is not None
+                }
+                SessionStreamer.push_agent_message(session_id, {'agent_id': tool_name, 'agent_name': agent_name, 'action': 'completed', 'content': f"Completed: {tool_name}", **search_metadata})
             result_summary = json.dumps({k: v for k, v in tool_result.items() if k not in ('success', 'message', 'error')}, ensure_ascii=False)
             accumulated_context += f"\n### Tool: {tool_name} (iteration {iteration + 1})\nArguments: {json.dumps(tool_args, ensure_ascii=False)}\nResult:\n```json\n{result_summary}\n```\n"
             tool_history.append({'iteration': iteration + 1, 'name': tool_name, 'args': tool_args})
@@ -1703,22 +1896,14 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
         user_lang = 'Chinese' if lang == 'zh' else 'English'
         prompt = f"""You are helping the user refine their research framework.\n\nCurrent research topic: {topic}\nCurrent framework sections:\n{sections_str}{tree_str}\n\nUser's request: {user_input}\n\n## Rules\n\n1. If the user confirms (e.g., '确认', '可以', '没问题', 'ok', '好的', '开始吧', 'looks good', 'proceed'), set action="confirm".\n2. If the user wants ANY change, set action="modify" with COMPLETE new section list in `new_sections`.\n3. If the user wants to cancel, set action="cancel".\n4. When action="modify", `new_sections` MUST be a non-empty array.\n5. Remove duplicate or semantically overlapping sections.\n6. When modifying a multi-level framework, also provide `new_framework_tree` reflecting the updated structure.\n7. Your `message` MUST be in {user_lang}.\n\nOutput JSON only:\n{{"action": "confirm" | "modify" | "cancel", "message": "...", "new_sections": [...], "new_framework_tree": [{{"name": "...", "sub_sections": [{{"name": "...", "points": [...]}}]}}]}}\n"""
         try:
-            from src.core.llm_client import call_llm
             from src.config.llm_profiles import RoutingHint
-            from src.config.settings import settings as app_settings
             llm_config = session.get('llm_config', {})
-            result = await asyncio.wait_for(
-                call_llm(
-                    prompt=prompt,
-                    model=llm_config.get('model') or None,
-                    max_tokens=llm_config.get('max_tokens') or None,
-                    routing_hint=RoutingHint(action="framework_modify"),
-                ),
-                timeout=60,
+            result = await call_llm(
+                prompt=prompt,
+                model=llm_config.get('model') or None,
+                max_tokens=llm_config.get('max_tokens') or None,
+                routing_hint=RoutingHint(action="framework_modify"),
             )
-        except asyncio.TimeoutError:
-            logger.warning(f"[{session_id}] _llm_framework_modify LLM call timed out (60s)")
-            return {'action': 'modify', 'message': "抱歉，处理超时了，请重新告诉我您想如何调整框架。", 'new_sections': None}
         except Exception as e:
             logger.warning(f"[{session_id}] _llm_framework_modify LLM call failed: {e}")
             return {'action': 'modify', 'message': "I understand you'd like to adjust the framework. Please tell me what changes you'd like to make.", 'new_sections': None}
@@ -1873,7 +2058,13 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
         if get_cancel_manager().is_cancelled(session_id) or session.get('status') == 'cancelled':
             logger.warning(f"[{session_id}] Cannot enter framework — session was cancelled")
             return {'session_id': session_id, 'error': 'Session was cancelled', 'message': self._l('该研究任务已被取消，请新建一个任务。', 'This research task was cancelled. Please start a new one.', lang)}
-        existing_fw = context.get('framework')
+        l5_pending = session.pop('ppt_l5_pending', None)
+        existing_fw = None if l5_pending else context.get('framework')
+        if l5_pending:
+            context['framework_revision_reason'] = l5_pending.get('reason', '')
+            context.pop('framework', None)
+            session['research_context'] = context
+            logger.info(f"[{session_id}] Rebuilding framework after PPT L5 escalation")
         if existing_fw and existing_fw.get('sections'):
             logger.info(f"Framework already exists for {session_id}, returning existing")
             session['mode'] = 'framework'
@@ -1904,7 +2095,13 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
                     framework['sections_tree'] = template_tree
             logger.info(f"[{session_id}] Framework derived from conversation: {len(all_sections)} sections")
         elif not directions:
-            framework = self._generate_research_framework(context)
+            # A topic-only request has no explicit directions.  The previous
+            # synchronous helper only maps directions to sections, so this
+            # branch produced an empty framework and made confirmation loop
+            # forever in framework_confirm.  Use the fallback chain here so
+            # topic-only deep-research requests always receive executable
+            # sections (LLM inference -> topic template -> safe defaults).
+            framework = await self._build_framework_with_fallback(session_id, context)
         else:
             framework = await self._build_framework_with_fallback(session_id, context)
         context.pop('_suggested_sections', None)
@@ -1948,6 +2145,7 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
             state_machine.transition(ConversationState.EXECUTING)
         session['mode'] = 'research'
         session['current_step'] = 6
+        self._refresh_report_context(session_id, session, phase='researching')
         sd_from_tree = self._build_section_details_from_tree(sections_tree) if sections_tree else []
         sd_from_session = session.get('section_details', [])
         final_plan = {'topic': topic, 'output_type': framework.get('output_type', 'industry_report'), 'aspects': sections, 'sections_tree': sections_tree, 'section_details': sd_from_tree or self._build_section_details_from_template(sd_from_session), 'region': context.get('details', {}).get('region', 'China'), 'time_range': context.get('details', {}).get('time_range', 'Last 3 years'), 'framework': framework.get('depth', 'standard'), 'language': session.get('language', 'zh'), 'output_format': session.get('output_format', 'docx')}
@@ -1963,7 +2161,12 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
         executor = get_executor()
         task = safe_create_task(executor.execute(session_id, final_plan, session_manager), name=f"exec_{session_id}")
         self._executor_tasks[session_id] = task
-        task.add_done_callback(lambda _: self._executor_tasks.pop(session_id, None))
+        def _clear_executor_task(done_task, task_id=session_id):
+            # Do not let an old task's callback remove a newer task registered
+            # for the same session after pause/resume.
+            if self._executor_tasks.get(task_id) is done_task:
+                self._executor_tasks.pop(task_id, None)
+        task.add_done_callback(_clear_executor_task)
         ProgressStreamer.set_disconnect_callback(session_id, self._on_sse_disconnect)
         lang = session.get('language', 'zh')
         exec_msg = self._l(f"研究任务已启动！\n\n**研究主题**: {topic}\n\n正在执行研究，请耐心等待...", f"Research task has been started!\n\n**Research Topic**: {topic}\n\nExecuting research, please wait...", lang)
@@ -1978,8 +2181,17 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
         session = session_manager.get(session_id)
         if not session:
             return {'session_id': session_id, 'error': 'Session not found'}
+        dag_error = _routing_dag_error(routing_result)
+        if dag_error:
+            return {
+                'session_id': session_id,
+                'status': 'failed',
+                'error': dag_error,
+                'dag_document': getattr(routing_result, 'dag_document', None),
+            }
         session['mode'] = 'research'
         session['current_step'] = 6
+        self._refresh_report_context(session_id, session, phase='researching')
         user_request = routing_result.user_request
         topic = routing_result.requirement.get('topic', user_request)
         final_plan = {'topic': topic, 'output_type': routing_result.requirement.get('output_type', 'industry_report'), 'aspects': routing_result.requirement.get('aspects', []), 'region': routing_result.requirement.get('region', 'China'), 'time_range': routing_result.requirement.get('time_range', 'Last 3 years'), 'framework': 'standard', 'language': session.get('language', 'zh'), '_routing_result': routing_result.to_dict(), 'output_format': session.get('output_format', 'docx')}
@@ -1989,7 +2201,10 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
         executor = get_executor()
         task = safe_create_task(executor.execute(session_id, final_plan, session_manager), name=f"exec_route_{session_id}")
         self._executor_tasks[session_id] = task
-        task.add_done_callback(lambda _: self._executor_tasks.pop(session_id, None))
+        def _clear_executor_task(done_task, task_id=session_id):
+            if self._executor_tasks.get(task_id) is done_task:
+                self._executor_tasks.pop(task_id, None)
+        task.add_done_callback(_clear_executor_task)
         ProgressStreamer.set_disconnect_callback(session_id, self._on_sse_disconnect)
         return {'session_id': session_id, 'task_id': session_id, 'step': 6, 'mode': 'research', 'status': 'running', 'message': self._l(f"研究任务已启动！\n\n**研究主题**: {topic}\n\n正在执行研究，请耐心等待...", f"Research task has been started!\n\n**Research Topic**: {topic}\n\nExecuting research, please wait...", session.get('language', 'zh')), 'final_plan': final_plan, 'next_step': 'execute'}
 
@@ -2151,15 +2366,12 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
         try:
             from src.core.llm_client import call_llm
             from src.config.llm_profiles import RoutingHint
-            result = await asyncio.wait_for(
-                call_llm(
-                    prompt=prompt,
-                    temperature=0.3,
-                    routing_hint=RoutingHint(action="section_inference"),
-                ),
-                timeout=30,
+            result = await call_llm(
+                prompt=prompt,
+                temperature=0.3,
+                routing_hint=RoutingHint(action="section_inference"),
             )
-        except (asyncio.TimeoutError, Exception) as e:
+        except Exception as e:
             logger.warning(f"Failed to infer framework sections: {e}")
             return []
         if not result or not result.get('success'):
@@ -2357,13 +2569,15 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
                 lines.append(f"{i}. {section}")
         return '\n'.join(lines)
 
-    def _get_lang(self, session):
+    @staticmethod
+    def _get_lang(session):
         """Get user language from session, defaulting to 'zh'"""
         if session:
             return session.get('language', 'zh')
         return 'zh'
 
-    def _l(self, msg_zh, msg_en, lang):
+    @staticmethod
+    def _l(msg_zh, msg_en, lang="zh"):
         """Localize a message based on language code"""
         if lang == 'zh':
             return msg_zh
@@ -2421,12 +2635,15 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
                 event.set()
                 return {'status': 'ok', 'message': 'clarification received'}
         if not session:
-            if step == 0:
+            # An invalid non-empty ID must not silently create a new task from
+            # a stale frontend request. Auto-create is reserved for the
+            # explicit pending state.
+            if step == 0 and session_id in (None, '', '__pending__'):
                 user_message = response.get('text', response.get('message', ''))
                 new_session_id = f"ses_{uuid.uuid4().hex[:8]}"
                 logger.info(f"Auto-creating session {new_session_id} (original {session_id} not found)")
                 state_machine = ConversationStateMachine(research_id=new_session_id)
-                detected_lang = detect_language(user_message).value
+                detected_lang = _detect_session_language(user_message)
                 session_manager.create(new_session_id, {
                     'user_input': user_message, 'state_machine': state_machine,
                     'clarifier': SmartClarifier(), 'created_at': datetime.now(),
@@ -2566,7 +2783,10 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
             from src.api.research_executor import get_executor
             executor = get_executor()
             task = safe_create_task(executor.execute(task_id, final_plan, session_manager), name=f"exec_quick_{task_id}")
-            task.add_done_callback(lambda _: self._executor_tasks.pop(task_id, None))
+            def _clear_executor_task(done_task, task_id=task_id):
+                if self._executor_tasks.get(task_id) is done_task:
+                    self._executor_tasks.pop(task_id, None)
+            task.add_done_callback(_clear_executor_task)
             self._executor_tasks[task_id] = task
             return {'session_id': task_id, 'task_id': task_id, 'step': 6, 'mode': 'research', 'status': 'running',
                     'message': f"Starting research with template **{template_id}**.",
@@ -2709,7 +2929,24 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
                 src = Path(output_path)
                 if src.exists():
                     preview_path.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(src, preview_path)
+                    if src.suffix.lower() in {'.html', '.htm'}:
+                        shutil.copy2(src, preview_path)
+                    else:
+                        # Never copy DOCX/PDF bytes to an HTML preview path.
+                        # Ask the preview generator to produce an actual HTML
+                        # (or image) representation first; if it cannot, keep
+                        # the preview unavailable instead of returning binary
+                        # garbage as text/html.
+                        try:
+                            generated = self._preview_generator.generate_preview(
+                                str(src), src.suffix.lower().lstrip('.') or format,
+                            )
+                            generated_path = getattr(generated, 'preview_path', None)
+                            generated_format = getattr(generated, 'preview_format', None)
+                            if generated_path and generated_format == 'html' and Path(generated_path).is_file():
+                                shutil.copy2(generated_path, preview_path)
+                        except Exception as exc:
+                            logger.warning("Failed to generate HTML preview from %s: %s", src, exc)
         preview_url = None
         html_content = None
         if preview_path.exists():
@@ -2746,19 +2983,25 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
         if not session:
             return {'error': 'Session not found', 'error_code': 'SESSION_NOT_FOUND'}
         research_result = session.get('research_result', {})
-        sections = research_result.get('report', {}).get('sections', [])
+        report_payload = research_result.get('report')
+        if not isinstance(report_payload, dict):
+            report_payload = {}
+        sections = report_payload.get('sections') or research_result.get('sections', [])
         if not sections:
             sections = research_result.get('sections', [])
         return {'task_id': task_id, 'sections': sections}
 
-    async def revise_sections(self, task_id, aspects=None, adjustment=None):
+    async def revise_sections(self, task_id, aspects=None, adjustment=None, base_report_version=None):
         """遗留 API 端点 (main.py L371) — 已迁移到 v2 修订管道"""
         logger.info(f"revise_sections (legacy) for {task_id}, routing to v2")
-        conv_result = {'adjustment': adjustment or '', 'aspects': aspects or [], 'revision_type': 'section'}
+        conv_result = {
+            'adjustment': adjustment or '', 'aspects': aspects or [],
+            'revision_type': 'section', 'base_report_version': base_report_version,
+        }
         return await self._handle_v2_revision(task_id, conv_result)
 
     async def pause_research(self, task_id):
-        """Pause research task — save snapshot + set flag + notify frontend. No Task.cancel()."""
+        """Pause research task and persist a resumable checkpoint."""
         session = session_manager.get(task_id)
         if not session:
             return {'error': 'Session not found', 'error_code': 'SESSION_NOT_FOUND'}
@@ -2766,12 +3009,29 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
         from src.core.progress_streamer import ProgressStreamer
         cm = get_cancel_manager()
         state_machine = session.get('state_machine')
-        if state_machine:
-            try:
-                state_machine.transition(ConversationState.PAUSED)
-            except Exception as e:
-                logger.warning(f"State transition to PAUSED failed: {e}")
-        await self._save_cancel_snapshot(task_id, session)
+        lock = self._get_session_lock(task_id)
+        async with lock:
+            if session.get('status') in ('pausing', 'cancelling', 'resuming'):
+                return {'task_id': task_id, 'status': 'accepted', 'error_code': 'CONTROL_IN_PROGRESS', 'message': 'Another control request is already in progress'}
+            if state_machine and state_machine.current_state == ConversationState.PAUSED:
+                return {'task_id': task_id, 'status': 'paused', 'message': 'Research task is already paused', 'resumable': True}
+            if state_machine and not state_machine.can_transition_to(ConversationState.PAUSED):
+                return {'task_id': task_id, 'status': 'rejected', 'error_code': 'INVALID_PAUSE_STATE', 'message': f'Cannot pause from {state_machine.current_state.value}'}
+            if state_machine:
+                try:
+                    state_machine.transition(ConversationState.PAUSED)
+                except Exception as e:
+                    logger.warning(f"State transition to PAUSED failed: {e}")
+                    return {'task_id': task_id, 'status': 'rejected', 'error_code': 'PAUSE_STATE_TRANSITION_FAILED', 'message': 'Research could not be paused'}
+            session['status'] = 'pausing'
+            session['resumable'] = False
+        if not await self._save_cancel_snapshot(task_id, session, snapshot_kind='pause_checkpoint'):
+            async with lock:
+                session['status'] = 'running'
+                session['resumable'] = False
+                if state_machine:
+                    state_machine.force_set_state(ConversationState.EXECUTING)
+            return {'task_id': task_id, 'status': 'failed', 'error_code': 'PAUSE_CHECKPOINT_FAILED', 'message': 'Unable to save pause checkpoint'}
         cm.pause(task_id)
         try:
             from src.core.task_persistence import TaskPersistenceManager
@@ -2782,11 +3042,14 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
                 tp.save_task(task)
         except Exception as e:
             logger.warning(f"Failed to persist pause state: {e}")
+        async with lock:
+            session['status'] = 'paused'
+            session['resumable'] = True
         ProgressStreamer.pause_task(task_id, 'Task paused by user')
-        return {'task_id': task_id, 'status': 'paused', 'message': 'Research task paused'}
+        return {'task_id': task_id, 'status': 'paused', 'message': 'Research task paused', 'resumable': True}
 
     async def resume_research(self, task_id):
-        """Resume research task — clear flag + wake Engine. With snapshot recovery Path B."""
+        """Resume only from a valid paused/cancelled checkpoint."""
         session = session_manager.get(task_id)
         if not session:
             return {'error': 'Session not found', 'error_code': 'SESSION_NOT_FOUND'}
@@ -2796,33 +3059,48 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
         rr = session.get('research_result')
         if rr and rr.get('status') in ('completed', 'completed_with_warnings'):
             return {'task_id': task_id, 'status': 'completed', 'message': 'Research already completed while paused'}
-        if cm.is_cancelled(task_id):
-            return {'task_id': task_id, 'status': 'cancelled', 'message': 'Research was cancelled, cannot resume'}
-        is_engine_dead = task_id not in self._executor_tasks or self._executor_tasks[task_id].done()
-        if session.get('status') == 'cancelled' or is_engine_dead:
-            snapshot = await self._load_cancel_snapshot(task_id)
-            if snapshot and snapshot.get('pending_sections'):
-                return await self._resume_from_snapshot(task_id, session, snapshot)
-            if session.get('status') == 'cancelled' and not is_engine_dead:
-                return {'task_id': task_id, 'status': 'cancelled', 'message': 'Research was cancelled, cannot resume'}
-            session['status'] = 'paused'
-            state_machine = session.get('state_machine')
-            if state_machine and hasattr(state_machine, 'current_state'):
-                try:
-                    if state_machine.can_transition_to(ConversationState.PAUSED):
-                        state_machine.transition(ConversationState.PAUSED)
-                except Exception:
-                    pass
-            return {'task_id': task_id, 'status': 'paused', 'message': 'Research engine has stopped. You can start a new task or continue chatting.'}
-        cm.resume(task_id)
         state_machine = session.get('state_machine')
+        lock = self._get_session_lock(task_id)
+        async with lock:
+            state_value = state_machine.current_state.value if state_machine else session.get('status')
+            if session.get('status') in ('pausing', 'cancelling', 'resuming'):
+                return {'task_id': task_id, 'status': 'accepted', 'error_code': 'CONTROL_IN_PROGRESS', 'message': 'Another control request is already in progress'}
+            if state_value not in (ConversationState.PAUSED.value, ConversationState.CANCELLED.value) and session.get('status') not in ('paused', 'cancelled'):
+                return {'task_id': task_id, 'status': 'rejected', 'error_code': 'INVALID_RESUME_STATE', 'message': 'Research is not paused or resumably stopped'}
+            session['status'] = 'resuming'
+        snapshot = await self._load_cancel_snapshot(task_id)
+        expected_generation = session.get('checkpoint_generation')
+        if (
+            not snapshot
+            or snapshot.get('resumable') is not True
+            or snapshot.get('task_id') != task_id
+            or not isinstance(snapshot.get('execution_generation'), int)
+            or expected_generation != snapshot.get('execution_generation')
+        ):
+            async with lock:
+                session['status'] = 'paused'
+            return {'task_id': task_id, 'status': 'failed', 'error_code': 'RESUME_CHECKPOINT_INVALID', 'message': 'No valid resumable checkpoint is available'}
+        if snapshot.get('snapshot_kind') not in ('pause_checkpoint', 'cancel_checkpoint'):
+            async with lock:
+                session['status'] = 'paused'
+            return {'task_id': task_id, 'status': 'failed', 'error_code': 'RESUME_CHECKPOINT_KIND_INVALID', 'message': 'Checkpoint is not resumable'}
+        is_engine_dead = task_id not in self._executor_tasks or self._executor_tasks[task_id].done()
+        if is_engine_dead:
+            if snapshot.get('pending_sections'):
+                return await self._resume_from_snapshot(task_id, session, snapshot)
+            async with lock:
+                session['status'] = 'paused'
+            return {'task_id': task_id, 'status': 'failed', 'error_code': 'RESUME_CHECKPOINT_EMPTY', 'message': 'The resumable checkpoint has no pending research sections'}
+        cm.resume(task_id)
         if state_machine and state_machine.can_transition_to(ConversationState.EXECUTING):
             try:
                 state_machine.transition(ConversationState.EXECUTING)
             except Exception as e:
                 logger.warning(f"State transition to EXECUTING failed: {e}")
         ProgressStreamer.resume_task(task_id, 'Task resumed by user')
-        return {'task_id': task_id, 'status': 'resumed', 'message': 'Research task resumed'}
+        session['status'] = 'running'
+        session['resumable'] = True
+        return {'task_id': task_id, 'status': 'resumed', 'message': 'Research task resumed', 'resumable': True}
 
     async def _resume_from_snapshot(self, task_id, session, snapshot):
         """Resume research from a saved cancel snapshot when the engine is dead.
@@ -2846,6 +3124,14 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
                 requirement={'topic': topic, 'aspects': pending_sections},
                 completed_aspects=completed_sections,
                 topic=topic)
+            dag_error = _routing_dag_error(routing_result)
+            if dag_error:
+                return {
+                    'task_id': task_id,
+                    'status': 'failed',
+                    'error': dag_error,
+                    'dag_document': getattr(routing_result, 'dag_document', None),
+                }
             new_plan = {}
             if hasattr(routing_result, 'execution_plan'):
                 plan = routing_result.execution_plan
@@ -2858,6 +3144,12 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
             logger.warning(f"Routing failed during snapshot resume for {task_id}: {e}")
             new_plan = session.get('final_plan', {})
         session['final_plan'] = new_plan
+        # A snapshot resume creates a new execution generation. Late results
+        # from the stopped executor must never be accepted by the new one.
+        generation = self._background_task_gen.get(task_id, 0) + 1
+        self._background_task_gen[task_id] = generation
+        session['execution_generation'] = generation
+        session['checkpoint_generation'] = generation
         session['mode'] = 'research'
         session['status'] = 'running'
         from src.core.orchestrator.execution.coordinator.cancel_manager import get_cancel_manager
@@ -2871,11 +3163,23 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
         executor = get_executor()
         resume_task = safe_create_task(executor.execute(task_id, new_plan, session_manager), name=f"resume_{task_id}")
         self._executor_tasks[task_id] = resume_task
-        resume_task.add_done_callback(lambda _: self._executor_tasks.pop(task_id, None))
+        def _clear_resume_task(done_task, task_id=task_id):
+            if self._executor_tasks.get(task_id) is done_task:
+                self._executor_tasks.pop(task_id, None)
+        resume_task.add_done_callback(_clear_resume_task)
         from src.core.progress_streamer import ProgressStreamer
         ProgressStreamer.resume_task(task_id, 'Resumed from snapshot')
         logger.info(f"Resumed research from snapshot for {task_id}: {len(pending_sections)} pending sections")
         return {'task_id': task_id, 'status': 'resumed', 'message': f"Research resumed from snapshot. {len(pending_sections)} sections remaining."}
+
+    def _refresh_report_context(self, session_id, session, **kwargs):
+        """Persist and publish the current public report context safely."""
+        try:
+            from src.core.report_context import update_report_context
+            return update_report_context(session_id, session, **kwargs)
+        except Exception as exc:
+            logger.warning("Report context update failed for %s: %s", session_id, exc)
+            return None
 
     async def _generate_documents_from_cache(self, session_id, research_result_data, output_dir, session):
         """Generate preview + document from cached research result, skipping orchestrator.
@@ -2904,8 +3208,33 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
                 session['research_result'] = result
                 session['mode'] = 'chat'
                 session['current_step'] = 0
+                self._refresh_report_context(
+                    session_id, session, phase='awaiting_user_decision',
+                    document_version='html-draft', report_version_increment=True,
+                    pending_decision={'type': 'preview_confirmation', 'options': ['confirm', 'revise', 'cancel']},
+                )
                 complete_task(session_id)
                 logger.info(f"HTML-only document generated from cache: {preview_path}")
+                return preview_path
+
+            # HTML-first gate: PPTX is not exported until the user confirms
+            # the audited HTML draft.
+            if output_format == 'pptx' and not session.get('ppt_user_confirmed', False):
+                self._persist_ppt_revision_context(
+                    session_id, research_result_data, None, session,
+                    html_path=preview_path,
+                )
+                result = {
+                    'status': 'previewing', 'report': research_result_data,
+                    'document_path': preview_path,
+                    'export_status': 'HTML_DRAFT',
+                }
+                session['research_result'] = result
+                session['mode'] = 'chat'
+                session['current_step'] = 0
+                self._refresh_report_context(session_id, session, phase='completed', report_version_increment=True)
+                complete_task(session_id)
+                logger.info(f"HTML-first PPT preview ready; export deferred: {preview_path}")
                 return preview_path
 
             doc_input = {'action': 'produce_document', 'research_result': research_result_data, 'output_format': output_format, 'output_dir': str(output_dir), 'task_id': session_id, '_preview_html_path': preview_path}
@@ -2914,8 +3243,14 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
             final_doc_path = doc_path or preview_path
             result = {'status': 'completed', 'report': research_result_data, 'document_path': final_doc_path}
             session['research_result'] = result
+            if output_format == 'pptx' and (doc_path or preview_path):
+                self._persist_ppt_revision_context(
+                    session_id, research_result_data, doc_path, session,
+                    html_path=preview_path,
+                )
             session['mode'] = 'chat'
             session['current_step'] = 0
+            self._refresh_report_context(session_id, session, phase='completed', report_version_increment=True)
             complete_task(session_id)
             logger.info(f"Document generated from cache: preview={preview_path}, doc={doc_path or 'none'}")
             return doc_path or ''
@@ -2923,12 +3258,158 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
             logger.info(f"Cache doc generation cancelled: {session_id}")
             session['research_result'] = {'status': 'cancelled'}
             session['mode'] = 'chat'
+            self._refresh_report_context(session_id, session, phase='failed')
         except Exception as e:
             logger.error(f"Cache-based doc generation failed: {e}", exc_info=True)
             session['research_result'] = {'status': 'completed', 'report': research_result_data, 'document_path': ''}
             session['mode'] = 'chat'
+            self._refresh_report_context(session_id, session, phase='failed')
             fail_task(session_id, str(e))
             return
+
+    def _persist_ppt_revision_context(self, session_id, research_result_data, pptx_path, session, html_path=None):
+        from src.core.adjustment.slide_data_builder import SlideDataBuilder
+        from src.core.adjustment.slide_data_store import SlideDataStore
+        from src.core.adjustment.html_ppt_artifact_store import HtmlPptArtifactStore
+
+        state_dir = Path('data') / session_id / 'ppt_state'
+        store = SlideDataStore(str(state_dir), session_id)
+        slide_data = SlideDataBuilder().build_from_research_result(research_result_data)
+        store.persist(session_id, slide_data)
+        if pptx_path:
+            store.set_pptx_path(session_id, str(pptx_path))
+        html_artifact = None
+        if html_path and os.path.exists(str(html_path)):
+            html_artifact = HtmlPptArtifactStore(str(Path('data')), session_id)
+            html_text = Path(html_path).read_text(encoding='utf-8')
+            html_artifact.initialize(
+                html_text,
+                content_model={'research_result': research_result_data},
+                replace=True,
+            )
+        session['ppt_revision_context'] = {
+            'data_dir': str(state_dir),
+            'pptx_path': str(pptx_path) if pptx_path else None,
+            'html_path': str(html_artifact.html_path) if html_artifact else str(html_path) if html_path else None,
+            'html_artifact_dir': str(html_artifact.root) if html_artifact else None,
+            'version': store.get_version(session_id),
+        }
+
+    async def handle_ppt_revision(self, request) -> dict:
+        """Execute a controlled PPT revision against persisted slide data."""
+        session_id = getattr(request, 'session_id', None)
+        if not session_id:
+            return {'status': 'failed', 'error_code': 'MISSING_SESSION_ID', 'error': 'Missing session_id'}
+        session = session_manager.get(session_id)
+        if not session:
+            return {'status': 'failed', 'error_code': 'SESSION_NOT_FOUND', 'error': 'Session not found'}
+        context = session.get('ppt_revision_context') or {}
+        if context.get('html_artifact_dir'):
+            from src.core.adjustment.html_ppt_artifact_store import HtmlPptArtifactStore
+            from src.core.adjustment.html_ppt_revision_service import (
+                HtmlPptRevisionRequest, HtmlPptRevisionService,
+            )
+            artifact_root = Path(context['html_artifact_dir'])
+            artifact_store = HtmlPptArtifactStore(str(artifact_root.parents[1]), session_id)
+            html_request = HtmlPptRevisionRequest(
+                task_id=session_id,
+                level=getattr(request, 'revision_level', None) or 'L1',
+                revision_type=getattr(request, 'revision_type', 'replace_text'),
+                slide_index=getattr(request, 'slide_index', None),
+                target_field=getattr(request, 'target_field', None),
+                new_value=getattr(request, 'new_value', None),
+                description=getattr(request, 'description', ''),
+                new_html=getattr(request, 'new_html', None),
+            )
+            html_result = HtmlPptRevisionService(artifact_store).revise(html_request)
+            if html_result.error == 'requires_framework_regeneration':
+                session['ppt_l5_pending'] = {
+                    'reason': html_request.description or 'HTML/PPT revision requires new research data',
+                    'html_version': artifact_store.state().get('version'),
+                }
+                state_machine = session.get('state_machine')
+                if state_machine:
+                    try:
+                        state_machine.force_set_state(ConversationState.FRAMEWORK_CONFIRM)
+                    except Exception:
+                        logger.warning("Unable to move PPT L5 request to framework confirmation")
+                session_manager.force_save(session_id)
+                return {
+                    'status': 'framework_confirmation_required',
+                    'success': False,
+                    'level': 'L5',
+                    'message': '需要回到研究框架/数据阶段重新生成 HTML',
+                    'error': html_result.error,
+                    'html_version': artifact_store.state().get('version'),
+                }
+            context.update({
+                'html_path': str(artifact_store.html_path),
+                'html_version': html_result.version or artifact_store.state().get('version'),
+                'html_audit': html_result.audit_report,
+                'export_status': artifact_store.state().get('status'),
+            })
+            session['ppt_revision_context'] = context
+            session_manager.force_save(session_id)
+            return {
+                'status': 'success' if html_result.success else 'failed',
+                'success': html_result.success,
+                'level': html_result.level,
+                'message': html_result.message,
+                'error': html_result.error,
+                'audit_report': html_result.audit_report,
+                'html_path': str(artifact_store.html_path),
+                'html_version': context.get('html_version'),
+                'export_status': context.get('export_status'),
+            }
+        if not context.get('data_dir') or not context.get('pptx_path'):
+            return {'status': 'failed', 'error_code': 'PPT_REVISION_CONTEXT_MISSING',
+                    'error': 'PPT revision context is not available; regenerate the PPT first'}
+
+        from src.core.adjustment.slide_data_store import SlideDataStore
+        from src.core.adjustment.ppt_revision_service import PptRevisionRequest, PptRevisionService
+        store = SlideDataStore(context['data_dir'], session_id)
+        store.set_pptx_path(session_id, context['pptx_path'])
+        base_version = getattr(request, 'base_version', None)
+        if base_version is not None and store.get_version(session_id) != base_version:
+            return {'status': 'conflict', 'error_code': 'PPT_VERSION_CONFLICT',
+                    'error': 'PPT changed since this request was created',
+                    'current_version': store.get_version(session_id)}
+        state_machine = session.get('state_machine')
+        revision = PptRevisionRequest(
+            task_id=session_id,
+            source=getattr(request, 'source', 'natural_language'),
+            description=getattr(request, 'description', ''),
+            revision_level=getattr(request, 'revision_level', None),
+            revision_type=getattr(request, 'revision_type', 'modify'),
+            slide_index=getattr(request, 'slide_index', None),
+            target_field=getattr(request, 'target_field', None),
+            new_value=getattr(request, 'new_value', None),
+            new_chart_type=getattr(request, 'new_chart_type', None),
+            rollback_version=getattr(request, 'rollback_version', None),
+            html=getattr(request, 'html', None),
+            state_machine=state_machine,
+        )
+        service = PptRevisionService(store)
+        entered_revision_state = False
+        if state_machine:
+            state_machine.update_context('ppt_revision_level', revision.revision_level or 'auto')
+            if state_machine.can_transition_to(ConversationState.PPT_REVISING):
+                state_machine.transition(ConversationState.PPT_REVISING)
+                entered_revision_state = True
+        result = await service.revise(revision)
+        if result.success:
+            if state_machine and state_machine.can_transition_to(ConversationState.PREVIEWING):
+                state_machine.transition(ConversationState.PREVIEWING)
+            context['version'] = store.get_version(session_id)
+            session['ppt_revision_context'] = context
+            session_manager.force_save(session_id)
+        elif state_machine and entered_revision_state and state_machine.can_transition_to(ConversationState.PREVIEWING):
+            state_machine.transition(ConversationState.PREVIEWING)
+            session_manager.force_save(session_id)
+        return {'status': 'success' if result.success else 'failed',
+                'success': result.success, 'level': result.level,
+                'message': result.message, 'error': result.error,
+                'version': store.get_version(session_id)}
 
     def _convert_session_to_cache_format(self, session_rr):
         """Convert session['research_result'] to the format expected by _document_agent.
@@ -2937,15 +3418,84 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
         cache format:   sections at top-level 'sections'
         """
         converted = dict(session_rr)
-        if "report" in converted and "sections" not in converted:
+        # Some legacy session records contain ``sections: []`` at the
+        # top-level while the authoritative report still has populated
+        # ``report.sections``.  Testing key presence alone silently converts
+        # a complete report into an empty cache during regeneration/revision.
+        if "report" in converted and not converted.get("sections"):
             report = converted.get("report", {})
-            converted["sections"] = report.get("sections", [])
-            converted["topic"] = converted.get("topic", report.get("topic", ""))
+            report_sections = report.get("sections", []) if isinstance(report, dict) else []
+            if report_sections:
+                converted["sections"] = report_sections
+            else:
+                converted.setdefault("sections", [])
+            converted["topic"] = converted.get("topic", report.get("topic", "") if isinstance(report, dict) else "")
             converted["title"] = converted.get("topic", "")
-            converted["aspects"] = converted.get("aspects", report.get("aspects", []))
-            converted["sources"] = converted.get("sources", report.get("sources", []))
-            converted["key_findings"] = converted.get("key_findings", report.get("key_findings", []))
+            converted["aspects"] = converted.get("aspects", report.get("aspects", []) if isinstance(report, dict) else [])
+            converted["sources"] = converted.get("sources", report.get("sources", []) if isinstance(report, dict) else [])
+            converted["key_findings"] = converted.get("key_findings", report.get("key_findings", []) if isinstance(report, dict) else [])
         return converted
+
+    def _persist_latest_report_result(self, session_id: str, session: dict) -> None:
+        """Keep result.json and the session on the same report revision.
+
+        The UI reads the session while downloads/history often read the
+        result store. Revision used to update only the former, leaving
+        result.json pointing at the pre-revision artifact.
+        """
+        try:
+            from src.core.storage.research_result_store import ResearchResultStore, ResearchStatus
+            rr = session.get("research_result") or {}
+            if not isinstance(rr, dict):
+                return
+            status = (ResearchStatus.COMPLETED_WITH_WARNINGS
+                      if rr.get("status") == "completed_with_warnings"
+                      else ResearchStatus.COMPLETED)
+            ResearchResultStore(storage_path="data").save_result(session_id, rr, status=status)
+        except Exception:
+            logger.exception("Failed to persist latest report result: %s", session_id)
+
+    @staticmethod
+    def _recheck_report_defense_audit(session: dict) -> dict:
+        """Re-run the deterministic L1-L5 audit on the current report.
+
+        Revision used to re-run only the legacy quality checker.  Keep this
+        helper deliberately small and use the same report payload that will
+        be persisted and rendered, so a successful text revision cannot skip
+        the evidence gate.
+        """
+        from src.agents.fixed_agents.report_upgrade.defense_audit import ReportDefenseAudit
+        from src.api.research_api_helpers import restore_data_registry
+
+        research_result = session.get("research_result") or {}
+        report = research_result.get("report") or {}
+        if not isinstance(report, dict):
+            return {"passed": False, "score": 0.0, "issues": [], "layers": {}}
+
+        registry = restore_data_registry(session)
+        audit = ReportDefenseAudit().audit(
+            report,
+            registry_conflicts=registry.serialize_conflicts(),
+        )
+        report["defense_audit"] = audit
+        research_result["defense_audit"] = audit
+        if audit.get("passed", False):
+            research_result["quality_gate_status"] = "passed"
+        else:
+            # A report may still be delivered in degraded form, but it must
+            # never retain the formal completed state after a failed audit.
+            research_result["status"] = "completed_with_warnings"
+            research_result["quality_gate_status"] = (
+                "blocked" if audit.get("layers", {}).get("L5") else "degraded"
+            )
+        session["research_result"] = research_result
+        recheck_record = {
+            "status": "passed" if audit.get("passed", False) else "failed",
+            "audit": audit,
+        }
+        session["l1_l5_recheck"] = recheck_record
+        research_result["l1_l5_recheck"] = recheck_record
+        return audit
 
     async def _regenerate_report(self, session_id):
         """Regenerate HTML preview from cached research result, without re-running research.
@@ -3007,8 +3557,8 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
             'message': '文档已重新生成',
         }
 
-    async def _save_cancel_snapshot(self, task_id, session):
-        """Save a snapshot of current research state before cancel/pause for recovery.
+    async def _save_cancel_snapshot(self, task_id, session, snapshot_kind='cancel_checkpoint'):
+        """Save a checkpoint for a pause/cancel operation.
 
         Persists completed sections and pending sections to a JSON file so that
         resume_from_snapshot can reconstruct the research state if the engine dies.
@@ -3031,7 +3581,11 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
         pending_sections = [s for s in all_sections if s not in completed_sections]
         snapshot = {
             'task_id': task_id,
+            'checkpoint_id': f"checkpoint_{uuid.uuid4().hex}",
+            'execution_generation': self._background_task_gen.get(task_id, 0),
             'timestamp': datetime.now().isoformat(),
+            'snapshot_kind': snapshot_kind,
+            'resumable': True,
             'status': session.get('status', 'unknown'),
             'mode': session.get('mode', 'unknown'),
             'current_step': session.get('current_step', 0),
@@ -3042,11 +3596,14 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
             'final_plan': session.get('final_plan'),
             'research_context': context,
         }
+        session['checkpoint_generation'] = snapshot['execution_generation']
         try:
             snapshot_path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding='utf-8')
             logger.info(f"Cancel snapshot saved for {task_id}: {len(completed_sections)} completed, {len(pending_sections)} pending")
+            return True
         except Exception as e:
             logger.error(f"Failed to save cancel snapshot for {task_id}: {e}")
+            return False
 
     async def _load_cancel_snapshot(self, task_id):
         """Load a previously saved cancel snapshot. Returns None if not found."""
@@ -3062,7 +3619,7 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
             return None
 
     async def cancel_research(self, task_id):
-        """Cancel research task — cascade cancel + save snapshot + update session + notify frontend."""
+        """Stop the current execution while retaining a resumable checkpoint."""
         session = session_manager.get(task_id)
         if not session:
             return {'error': 'Session not found', 'error_code': 'SESSION_NOT_FOUND'}
@@ -3070,92 +3627,62 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
         from src.core.progress_streamer import ProgressStreamer
         cm = get_cancel_manager()
         state_machine = session.get('state_machine')
-        if state_machine and state_machine.can_transition_to(ConversationState.CANCELLED):
-            state_machine.transition(ConversationState.CANCELLED)
-        await self._save_cancel_snapshot(task_id, session)
+        lock = self._get_session_lock(task_id)
+        async with lock:
+            if session.get('status') in ('pausing', 'cancelling', 'resuming'):
+                return {'task_id': task_id, 'status': 'accepted', 'error_code': 'CONTROL_IN_PROGRESS', 'message': 'Another control request is already in progress'}
+            if state_machine and state_machine.current_state == ConversationState.CANCELLED:
+                return {'task_id': task_id, 'status': 'cancelled', 'message': 'Research is already stopped', 'resumable': True}
+            if state_machine and not state_machine.can_transition_to(ConversationState.CANCELLED):
+                return {'task_id': task_id, 'status': 'rejected', 'error_code': 'INVALID_CANCEL_STATE', 'message': f'Cannot stop from {state_machine.current_state.value}'}
+            if state_machine:
+                try:
+                    state_machine.transition(ConversationState.CANCELLED)
+                except Exception as e:
+                    logger.warning(f"State transition to CANCELLED failed: {e}")
+                    return {'task_id': task_id, 'status': 'rejected', 'error_code': 'CANCEL_STATE_TRANSITION_FAILED', 'message': 'Research could not be stopped'}
+            session['status'] = 'cancelling'
+            session['resumable'] = False
+            # Advance the generation before checkpointing. Any late result
+            # from the previous execution is now stale by definition.
+            self._background_task_gen[task_id] = self._background_task_gen.get(task_id, 0) + 1
+        if not await self._save_cancel_snapshot(task_id, session, snapshot_kind='cancel_checkpoint'):
+            async with lock:
+                session['status'] = 'running'
+                session['resumable'] = False
+                if state_machine:
+                    state_machine.force_set_state(ConversationState.EXECUTING)
+            return {'task_id': task_id, 'status': 'failed', 'error_code': 'CANCEL_CHECKPOINT_FAILED', 'message': 'Unable to save resumable checkpoint'}
         cm.cancel(task_id)
         exec_task = self._executor_tasks.get(task_id)
         if exec_task and not exec_task.done():
             exec_task.cancel()
             logger.info(f"Cancelled executor task for {task_id}")
-        self._background_tasks.pop(task_id, None)
-        session['status'] = 'cancelled'
-        session['mode'] = 'chat'
-        session['current_step'] = 0
+        bg_task = self._background_tasks.pop(task_id, None)
+        if bg_task and not bg_task.done():
+            bg_task.cancel()
+            logger.info(f"Cancelled background tool chain for {task_id}")
+        async with lock:
+            session['mode'] = 'chat'
+            session['current_step'] = 0
+            session['status'] = 'cancelled'
+            session['resumable'] = True
         ProgressStreamer.cancel_task(task_id, 'Cancelled by user')
         try:
             from src.core.task_persistence import TaskPersistenceManager
             tp = TaskPersistenceManager()
             task = tp.load_task(task_id)
             if task:
-                task.fail('Cancelled by user')
+                task.cancel('Cancelled by user')
                 tp.save_task(task)
         except Exception as e:
             logger.warning(f"Failed to persist cancel state: {e}")
-        cm.cleanup(task_id)
-        return {'task_id': task_id, 'status': 'cancelled', 'message': 'Research task cancelled'}
+        return {'task_id': task_id, 'status': 'cancelled', 'message': 'Research task stopped; checkpoint can be resumed', 'resumable': True}
 
     def _on_sse_disconnect(self, task_id):
-        """Called when SSE connection drops — schedule delayed pause with reconnect check."""
-        session = session_manager.get(task_id)
-        if not session:
-            return
-        research_result = session.get('research_result', {})
-        _terminal = ('completed', 'completed_with_warnings', 'failed', 'cancelled', 'error')
-        if research_result.get('status') in _terminal:
-            logger.info(f"SSE disconnected for {task_id}, research {research_result.get('status')} - not pausing")
-            return
-        logger.info(f"SSE disconnected for {task_id}, scheduling delayed pause")
-        async def _delayed_pause():
-            await asyncio.sleep(30)
-            s2 = session_manager.get(task_id)
-            if not s2:
-                return
-            rs2 = s2.get('research_result', {})
-            if rs2.get('status') in _terminal:
-                return
-            exec_task = self._executor_tasks.get(task_id)
-            if exec_task is None or exec_task.done():
-                logger.warning(f"SSE disconnected for {task_id}, executor task dead but status not terminal — marking failed")
-                rs2['status'] = 'failed'
-                rs2['error'] = 'Executor task died without setting terminal status'
-                try:
-                    from src.core.progress_streamer import ProgressStreamer
-                    ProgressStreamer.fail_task(task_id, 'Executor task died unexpectedly')
-                except Exception as e:
-                    logger.warning(f"Failed to notify ProgressStreamer of dead executor: {e}")
-                try:
-                    from src.core.task_persistence import TaskPersistenceManager
-                    tp = TaskPersistenceManager()
-                    task = tp.load_task(task_id)
-                    if task:
-                        task.fail('Executor task died unexpectedly')
-                        tp.save_task(task)
-                except Exception as e:
-                    logger.warning(f"Failed to persist fail state: {e}")
-                return
-            from src.core.orchestrator.execution.coordinator.cancel_manager import get_cancel_manager
-            get_cancel_manager().pause(task_id)
-
-            try:
-                from src.core.progress_streamer import ProgressStreamer
-                ProgressStreamer.pause_task(task_id, 'Research paused due to SSE disconnect')
-            except Exception:
-                pass
-
-            try:
-                from src.core.session_streamer import SessionStreamer
-                SessionStreamer.push_agent_message(task_id, {
-                    'agent_id': 'system',
-                    'agent_name': 'System',
-                    'action': 'paused',
-                    'content': f"Research paused due to SSE disconnect. Progress: {s2.get('task_progress', {}).get('progress', 0):.0%}. Say '继续' to resume.",
-                })
-            except Exception:
-                pass
-        task = safe_create_task(_delayed_pause(), name=f"delayed_pause_{task_id}")
-        self._background_tasks[f"_sse_disconnect_{task_id}"] = task
-        task.add_done_callback(lambda _: self._background_tasks.pop(f"_sse_disconnect_{task_id}", None))
+        """Handle transport loss without changing the research business state."""
+        if session_manager.get(task_id):
+            logger.info("SSE disconnected for %s; business state is unchanged", task_id)
 
     async def modify_requirements(self, task_id, new_aspects, new_topic=None):
         """
@@ -3182,6 +3709,14 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
                 requirement={'topic': topic, 'aspects': merged_sections, 'details': context.get('details', {})},
                 completed_aspects=existing_sections,
                 topic=topic)
+            dag_error = _routing_dag_error(routing_result)
+            if dag_error:
+                return {
+                    'task_id': task_id,
+                    'status': 'failed',
+                    'error': dag_error,
+                    'dag_document': getattr(routing_result, 'dag_document', None),
+                }
             new_plan = routing_result.execution_plan.to_dict()
             new_plan['topic'] = topic
             new_plan['output_type'] = framework.get('output_type', 'industry_report')
@@ -3363,6 +3898,19 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
 
     async def _handle_revise_report_gate(self, session_id, conv_result, session):
         """阶段门控：revise_report 只在 PREVIEWING/COMPLETED 状态下允许"""
+        report_context = session.get('report_context')
+        if not isinstance(report_context, dict):
+            self._refresh_report_context(session_id, session)
+            report_context = session.get('report_context') or {}
+        report_phase = report_context.get('report_phase')
+        allowed_phases = {'preview_ready', 'awaiting_user_decision', 'completed'}
+        if report_phase and report_phase not in allowed_phases:
+            logger.info(f"[{session_id}] revise_report blocked by report_phase={report_phase}")
+            if report_phase in {'researching', 'report_generating', 'quality_checking'}:
+                return self._chat_response(session_id, '报告仍在生成或质检中，请等待当前阶段完成。')
+            if report_phase == 'revising':
+                return self._chat_response(session_id, '已有报告修订正在执行中，请等待完成后再提交新的修订。')
+            return self._chat_response(session_id, '当前报告状态不允许修订，请先完成报告生成。')
         conv_machine = session.get('state_machine')
         if conv_machine:
             current_state = conv_machine.current_state
@@ -3402,19 +3950,68 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
         if not research_result or research_result.get('status') not in ('completed', 'completed_with_warnings'):
             return self._chat_response(session_id, '报告尚未生成完成，请等待研究完成后再提出修订需求。')
 
-        sections = research_result.get('report', {}).get('sections', [])
+        report_payload = research_result.get('report')
+        if not isinstance(report_payload, dict):
+            report_payload = {}
+        sections = report_payload.get('sections') or research_result.get('sections', [])
         if not sections:
             return self._chat_response(session_id, '报告内容为空，无法执行修订。')
 
         if not PreviewStorage.path(session_id).exists():
             return self._chat_response(session_id, '报告预览不存在，请先重新生成报告。')
 
-        existing_task = self._executor_tasks.get(f"rev_{session_id}")
-        revision_task = getattr(self, '_revision_task', None)
-        if (existing_task and not existing_task.done()) or (revision_task and not revision_task.done()):
-            return self._chat_response(session_id, '已有修订任务正在执行中，请等待完成后再发起新的修订。')
+        # Claim the session revision slot atomically.  The old implementation
+        # checked the slot before registering the task, so two concurrent
+        # requests could both pass the check and apply the same revision.
+        revision_lock = self._get_revision_lock(session_id)
+        current_task = asyncio.current_task()
+        async with revision_lock:
+            existing_task = self._executor_tasks.get(f"rev_{session_id}")
+            revision_task = self._revision_tasks.get(session_id)
+            if (existing_task and not existing_task.done()) or (revision_task and not revision_task.done()):
+                return self._chat_response(session_id, '已有修订任务正在执行中，请等待完成后再发起新的修订。')
+            self._revision_tasks[session_id] = current_task
+
+        def _release_revision_slot(done_task):
+            if self._revision_tasks.get(session_id) is done_task:
+                self._revision_tasks.pop(session_id, None)
+
+        if current_task is not None:
+            current_task.add_done_callback(_release_revision_slot)
 
         adjustment = conv_result.get('adjustment') or conv_result.get('user_input', '')
+
+        report_context = session.get('report_context')
+        if not isinstance(report_context, dict):
+            report_context = self._refresh_report_context(session_id, session) or {}
+        base_report_version = conv_result.get('base_report_version')
+        if base_report_version is not None:
+            try:
+                base_report_version = int(base_report_version)
+            except (TypeError, ValueError):
+                return {
+                    'status': 'conflict',
+                    'error_code': 'INVALID_BASE_REPORT_VERSION',
+                    'message': '修订请求中的报告版本无效，请重新打开报告后再试。',
+                }
+            current_report_version = int(report_context.get('report_version', 0) or 0)
+            if base_report_version != current_report_version:
+                return {
+                    'status': 'conflict',
+                    'error_code': 'REPORT_VERSION_CONFLICT',
+                    'message': '报告已发生变化，请重新获取最新报告上下文后再提交修订。',
+                    'base_report_version': base_report_version,
+                    'current_report_version': current_report_version,
+                }
+
+        self._refresh_report_context(
+            session_id, session, phase='revising',
+            last_revision={
+                'status': 'executing', 'request': adjustment,
+                'affected_sections': conv_result.get('aspects', []),
+                'revision_type': conv_result.get('revision_type', 'section'),
+            },
+        )
 
         quality_lock = self._get_quality_lock(session_id)
         async with quality_lock:
@@ -3480,18 +4077,12 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
                             issue["revising_since"] = time.time()
             session["quality_state"] = quality_state_data
 
-        current_task = asyncio.current_task()
-        old_task = self._revision_task
-        self._revision_task = current_task
-        if old_task and not old_task.done():
-            old_task.cancel()
-
         try:
             from src.agents.fixed_agents.report_upgrade.orchestrator import ReportOrchestrator
             from src.agents.fixed_agents.report_upgrade.chapter_writer import ChapterWriter
             from src.agents.fixed_agents.report_upgrade.chapter_reviewer import ChapterReviewAgent
             from src.agents.fixed_agents.report_upgrade.global_reviewer import GlobalReviewAgent
-            from src.agents.fixed_agents.report_upgrade.data_repair import DataRepairAgent, ConflictResolver
+            from src.agents.fixed_agents.report_upgrade.data_repair import ConflictResolver
             from src.agents.fixed_agents.report_upgrade.prompt_manager import PromptManager
         except ImportError as e:
             logger.warning(f"ReportOrchestrator import failed: {e}, falling back to V2 executor")
@@ -3502,20 +4093,23 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
         web_scraper_skill = skill_registry.get("web_scraper") if skill_registry else None
 
         pm = PromptManager()
+        task_gateway = None
+        if hasattr(self._orchestrator, "_configure_task_search_gateway"):
+            task_gateway = self._orchestrator._configure_task_search_gateway(session_id)
         ro = ReportOrchestrator(
             chapter_writer=ChapterWriter(prompt_manager=pm),
             chapter_reviewer=ChapterReviewAgent(prompt_manager=pm),
             global_reviewer=GlobalReviewAgent(prompt_manager=pm),
-            data_repair_agent=DataRepairAgent(
-                search_skill=search_skill, web_scraper_skill=web_scraper_skill,
-                prompt_manager=pm,
-            ),
             conflict_resolver=ConflictResolver(
                 search_skill=search_skill,
                 web_scraper_skill=web_scraper_skill, prompt_manager=pm,
+                search_gateway=task_gateway,
             ),
             prompt_manager=pm,
             skill_registry=skill_registry,
+            search_gateway=task_gateway,
+            search_skill=search_skill,
+            web_scraper_skill=web_scraper_skill,
         )
 
         chapters = self._sections_to_chapters(sections)
@@ -3550,16 +4144,49 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
         except Exception as e:
             logger.error(f"ReportOrchestrator.revision() failed: {e}", exc_info=True)
             self._rollback_revising_issues(session)
-            return self._chat_response(session_id, f"修订执行失败: {e}")
+            self._refresh_report_context(
+                session_id, session, phase='failed',
+                last_revision={'status': 'failed', 'request': adjustment, 'affected_sections': aspects},
+            )
+            response = self._chat_response(session_id, f"修订执行失败: {e}")
+            response.update({
+                'status': 'failed', 'error_code': 'REPORT_REVISION_FAILED',
+                'task_id': session_id, 'revised_aspects': aspects,
+            })
+            return response
 
         self._apply_revision_to_session(session, result, ro._chapters, ro._data_registry)
 
         await self._regenerate_from_revision(session_id, session, ro._chapters)
 
+        # Re-run the deterministic evidence defense on the revised report
+        # before persisting/publishing it.  The legacy quality recheck below
+        # is complementary and must not replace this L1-L5 gate.
+        self._recheck_report_defense_audit(session)
+
+        # Persist revised sections and artifact pointers before publishing the
+        # completed report context. This keeps legacy top-level ``sections``
+        # and ``report.sections`` projections consistent with result.json.
+        self._persist_latest_report_result(session_id, session)
+
         if quality_state_data:
             await self._post_revision_recheck(session)
 
-        return self._chat_response(session_id)
+        self._refresh_report_context(
+            session_id, session, phase='completed', report_version_increment=True,
+            last_revision={'status': 'completed', 'request': adjustment, 'affected_sections': aspects,
+                           'revision_type': conv_result.get('revision_type', 'section')},
+        )
+
+        response = self._chat_response(session_id, '报告修订已完成。')
+        response.update({
+            'status': 'completed',
+            'task_id': session_id,
+            'report_version': (session.get('report_context') or {}).get('report_version'),
+            'affected_sections': aspects,
+            'revised_aspects': aspects,
+        })
+        return response
 
     async def _confirm_v2_revision(self, session_id, accept):
         """用户确认/拒绝 v2 修订结果"""
@@ -3815,7 +4442,10 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
         SessionStreamer.push_agent_message(session_id, {'agent_id': 'modify', 'agent_name': 'Plan Modification', 'action': 'completed', 'content': f"""Plan updated. Added: {add_aspects}, Removed: {remove_aspects}. Resuming..."""})
         task = safe_create_task(self._resume_after_modify(session_id, new_plan), name=f"modify_{session_id}")
         self._executor_tasks[session_id] = task
-        task.add_done_callback(lambda t: self._executor_tasks.pop(session_id, None))
+        def _clear_modified_task(done_task, task_id=session_id):
+            if self._executor_tasks.get(task_id) is done_task:
+                self._executor_tasks.pop(task_id, None)
+        task.add_done_callback(_clear_modified_task)
         def _log_resume_error(t):
             if not t.cancelled():
                 exc = t.exception()
@@ -3888,6 +4518,15 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
                 SessionStreamer.push_preview_refresh(session_id, preview_url, 'v1')
             except Exception:
                 pass
+            if output_format == 'pptx' and not session.get('ppt_user_confirmed', False):
+                session['research_result']['document_path'] = preview_path
+                session['research_result']['output_path'] = preview_path
+                self._persist_ppt_revision_context(
+                    session_id, research_result_data, None, session,
+                    html_path=preview_path,
+                )
+                logger.info("HTML-first PPT revision preview ready; export deferred")
+                return
             if output_format != 'html' and preview_path:
                 doc_input = {
                     'action': 'produce_document',
@@ -3902,14 +4541,76 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
                 final_doc_path = doc_path or preview_path or ''
                 if final_doc_path:
                     session['research_result']['document_path'] = final_doc_path
+                    # Keep both legacy result pointers on the same newest
+                    # artifact.  Leaving output_path on the pre-revision file
+                    # makes the UI reopen v1 after a successful revision.
+                    session['research_result']['output_path'] = final_doc_path
+                    if output_format == 'pptx' and doc_path:
+                        self._persist_ppt_revision_context(
+                            session_id, research_result_data, doc_path, session,
+                            html_path=preview_path,
+                        )
                     logger.info(f"Post-revision document generated: format={output_format}, path={doc_path or 'none'}")
         except Exception as e:
             logger.warning(f"Post-revision document regeneration failed: {e}")
+
+    async def confirm_ppt_export(self, session_id: str) -> dict:
+        """Confirm audited HTML and export the final PPTX."""
+        session = session_manager.get(session_id)
+        if not session:
+            return {'status': 'failed', 'error_code': 'SESSION_NOT_FOUND'}
+        context = session.get('ppt_revision_context') or {}
+        if not context.get('html_artifact_dir'):
+            return {'status': 'failed', 'error_code': 'HTML_ARTIFACT_MISSING'}
+        from src.core.adjustment.html_ppt_artifact_store import HtmlPptArtifactStore
+        from src.core.adjustment.html_ppt_revision_service import HtmlPptRevisionService
+        from src.converters.html_to_ppt import HTMLToPPTConverter
+        artifact_root = Path(context['html_artifact_dir'])
+        artifact = HtmlPptArtifactStore(str(artifact_root.parents[1]), session_id)
+        service = HtmlPptRevisionService(artifact)
+        try:
+            state = service.confirm()
+            output_dir = Path('data') / session_id
+            output_dir.mkdir(parents=True, exist_ok=True)
+            output_path = output_dir / f"{session_id}.pptx"
+            result = HTMLToPPTConverter().convert(
+                html=artifact.load_html(), output_path=str(output_path)
+            )
+            if not result.success:
+                return {'status': 'failed', 'error_code': 'PPT_EXPORT_FAILED', 'error': result.error}
+            artifact.mark_exported(str(output_path))
+            context.update({
+                'pptx_path': str(output_path),
+                'export_status': 'PPTX_EXPORTED',
+                'html_version': state.get('version'),
+            })
+            session['ppt_revision_context'] = context
+            session['ppt_user_confirmed'] = True
+            session.setdefault('research_result', {})['document_path'] = str(output_path)
+            session_manager.force_save(session_id)
+            return {
+                'status': 'success',
+                'pptx_path': str(output_path),
+                'html_version': state.get('version'),
+                'download_url': f'/api/v1/download/{session_id}?format=pptx',
+                'file_name': f'{session_id}_report.pptx',
+            }
+        except Exception as exc:
+            return {'status': 'failed', 'error_code': 'PPT_CONFIRM_EXPORT_FAILED', 'error': str(exc)}
 
     async def _run_v2_revision_fallback(self, session_id, conv_result, session, adjustment, quality_state_data):
         from src.core.adjustment.report_adapter import SessionReportAdapter
         from src.core.adjustment.revision_executor import RevisionExecutor, ProgressNotifier
         from src.core.adjustment.revision_types import ExecutionStatus, TaskStatus
+
+        self._refresh_report_context(
+            session_id, session, phase='revising',
+            last_revision={
+                'status': 'executing', 'request': adjustment,
+                'affected_sections': conv_result.get('aspects', []),
+                'revision_type': conv_result.get('revision_type', 'section'),
+            },
+        )
 
         adapter = SessionReportAdapter(session)
         if not hasattr(self, '_v2_lock_manager'):
@@ -3919,7 +4620,10 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
         executor = RevisionExecutor(lock_manager=self._v2_lock_manager, notifier=notifier)
         revision_task = safe_create_task(executor.handle_feedback(adjustment, adapter), name=f"rev_{session_id}")
         self._executor_tasks[f"rev_{session_id}"] = revision_task
-        revision_task.add_done_callback(lambda _: self._executor_tasks.pop(f"rev_{session_id}", None))
+        def _clear_revision_task(done_task, task_key=f"rev_{session_id}"):
+            if self._executor_tasks.get(task_key) is done_task:
+                self._executor_tasks.pop(task_key, None)
+        revision_task.add_done_callback(_clear_revision_task)
         try:
             flow = await asyncio.shield(revision_task)
         except asyncio.CancelledError:
@@ -3937,6 +4641,14 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
                 self._sync_lightweight_to_preview(session_id, session, action)
             if quality_state_data:
                 await self._post_revision_recheck(session)
+            self._refresh_report_context(
+                session_id, session, phase='completed', report_version_increment=True,
+                last_revision={
+                    'status': 'completed', 'request': adjustment,
+                    'affected_sections': conv_result.get('aspects', []),
+                    'revision_type': conv_result.get('revision_type', 'section'),
+                },
+            )
             return self._chat_response(session_id)
         if flow.current_index < len(flow.tasks):
             pending_data = {'flow': flow, 'adapter': adapter, 'snapshot_id': flow.snapshot_id}
@@ -3960,6 +4672,10 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
             return self._chat_response(session_id)
         if flow.status == ExecutionStatus.FULL_RESEARCH_NEEDED:
             self._rollback_revising_issues(session)
+            self._refresh_report_context(
+                session_id, session, phase='researching',
+                last_revision={'status': 'requires_research', 'request': adjustment, 'affected_sections': conv_result.get('aspects', [])},
+            )
             routing_result = getattr(flow, '_routing_result', None)
             if routing_result:
                 session['mode'] = 'research'
@@ -4186,3 +4902,20 @@ class QualityActionRequest:
         self.issue_id = kwargs.get('issue_id')
         self.version_id = kwargs.get('version_id')
         self.section_name = kwargs.get('section_name')
+
+
+class PptRevisionAPIRequest:
+    def __init__(self, **kwargs):
+        self.session_id = kwargs.get('session_id')
+        self.source = kwargs.get('source', 'natural_language')
+        self.description = kwargs.get('description', '')
+        self.revision_level = kwargs.get('revision_level')
+        self.revision_type = kwargs.get('revision_type', 'modify')
+        self.slide_index = kwargs.get('slide_index')
+        self.target_field = kwargs.get('target_field')
+        self.new_value = kwargs.get('new_value')
+        self.new_chart_type = kwargs.get('new_chart_type')
+        self.rollback_version = kwargs.get('rollback_version')
+        self.base_version = kwargs.get('base_version')
+        self.html = kwargs.get('html')
+        self.new_html = kwargs.get('new_html')

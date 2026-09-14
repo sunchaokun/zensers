@@ -3,6 +3,7 @@ ManifestStrategyBuilder - 从 SkillManifest 动态构建策略映射，替代 st
 
 内部复用 SkillRegistries 的构建结果，额外提供业务方法。
 """
+import re
 from typing import Any, Dict, List, Optional
 
 from src.skills.discovery import SkillDiscovery, SkillManifest
@@ -93,7 +94,7 @@ class ManifestStrategyBuilder:
         priority_map = self.build_skill_priority_map()
         aspect_lower = aspect.lower()
         for keyword, extra_skills in ds_map.items():
-            if keyword in aspect_lower:
+            if self._aspect_keyword_matches(keyword, aspect_lower):
                 aspect_skills.extend(extra_skills)
         if intent_result:
             primary_type = getattr(intent_result, 'primary_research_type', None)
@@ -102,6 +103,10 @@ class ManifestStrategyBuilder:
                 "industry_research", "brand_research",
             ):
                 for name, m in self._manifests.items():
+                    # Competitive landscape is a web/market-source task;
+                    # company financial APIs are not automatically relevant.
+                    if primary_type.value == "competitive_analysis" and name == "stock_data":
+                        continue
                     if m.priority == "structured_db" and name not in aspect_skills:
                         aspect_skills.append(name)
         all_unique = list(dict.fromkeys(aspect_skills + base_skills))
@@ -112,3 +117,9 @@ class ManifestStrategyBuilder:
             else:
                 web_skills.append(skill)
         return db_skills + web_skills
+
+    @staticmethod
+    def _aspect_keyword_matches(keyword: str, aspect_lower: str) -> bool:
+        if keyword.isascii() and any(char.isalpha() for char in keyword):
+            return re.search(rf"(?<![a-z0-9]){re.escape(keyword)}(?![a-z0-9])", aspect_lower) is not None
+        return keyword in aspect_lower

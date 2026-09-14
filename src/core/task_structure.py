@@ -28,6 +28,59 @@ import asyncio
 
 logger = logging.getLogger(__name__)
 
+
+def canonical_runtime_section_id(section_id: Any) -> str:
+    """Return the stable section identity used by execution and aggregation.
+
+    Older routing output appended the display/aspect name to runtime IDs
+    (for example ``section_0_市场规模``).  The display name belongs in section
+    metadata, not in the identity used by dependencies, locks, caches, or
+    result aggregation.  Report sub-sections use ``::`` and are intentionally
+    left untouched here.
+    """
+    value = str(section_id or "").strip()
+    match = re.match(r"^(section|synthesis)_(\d+)(?:_.+)?$", value)
+    return f"{match.group(1)}_{match.group(2)}" if match else value
+
+
+def normalize_task_structure_runtime_ids(task_structure: "TaskStructure") -> Dict[str, str]:
+    """Normalize a TaskStructure in-place and return its old→new ID map.
+
+    This must run before phase orchestration and ContentLockManager creation;
+    normalizing only serialized results is too late because the lock graph and
+    scheduler have already captured the legacy IDs by then.
+    """
+    if task_structure is None:
+        return {}
+
+    id_map: Dict[str, str] = {}
+    for section in task_structure.sections:
+        old_id = str(section.section_id or "")
+        new_id = canonical_runtime_section_id(old_id)
+        if old_id:
+            id_map[old_id] = new_id
+        section.section_id = new_id
+
+    def resolve(value: str) -> str:
+        value = str(value or "")
+        return id_map.get(value, canonical_runtime_section_id(value))
+
+    for dependency in task_structure.dependencies:
+        dependency.from_section = resolve(dependency.from_section)
+        dependency.to_section = resolve(dependency.to_section)
+    task_structure.execution_graph = {
+        resolve(key): [resolve(item) for item in values]
+        for key, values in (task_structure.execution_graph or {}).items()
+    }
+    task_structure.parallel_groups = [
+        [resolve(item) for item in group]
+        for group in (task_structure.parallel_groups or [])
+    ]
+    task_structure.critical_path = [
+        resolve(item) for item in (task_structure.critical_path or [])
+    ]
+    return id_map
+
 # Import existing types
 from .semantic_intent import DeepIntentResult
 from .research_type import ResearchType
@@ -131,6 +184,11 @@ class TaskStructure:
     critical_path: List[str] = field(default_factory=list)
     total_estimated_agents: int = 0
     analysis_method: str = "rule_based"     # "rule_based" / "llm_based"
+    # Optional data contract produced by intent/decomposition analysis.  It
+    # is carried into the dynamic phase planner so subsection leaves can be
+    # expanded before agents are created.
+    section_data_specs: List[Any] = field(default_factory=list)
+    section_manifest: List[Dict[str, Any]] = field(default_factory=list)
 
     def get_section_by_id(self, section_id: str) -> Optional[SectionSpec]:
         """Get section by ID"""
@@ -194,6 +252,8 @@ class TaskStructure:
             "critical_path": self.critical_path,
             "total_estimated_agents": self.total_estimated_agents,
             "analysis_method": self.analysis_method,
+            "section_data_specs": self.section_data_specs,
+            "section_manifest": self.section_manifest,
         }
 
 
@@ -311,15 +371,14 @@ class TaskStructureAnalyzer:
                 if loop is not None:
                     # We are inside an async context — schedule the coroutine
                     # on the existing loop rather than creating a new one.
-                    future = asyncio.ensure_future(
-                        self._analyze_with_llm(intent, aspects, task_id, topic),
-                        loop=loop,
-                    )
-                    # Run until complete in a thread-safe manner.
-                    # Note: this blocks the caller but does NOT attempt to
-                    # create a new event loop.
+                    # This synchronous compatibility bridge may block until
+                    # the LLM call completes.  It must not impose a hidden
+                    # business timeout: cancellation belongs to the owning
+                    # task/executor, not this bridge.
                     if not loop.is_running():
-                        return loop.run_until_complete(future)
+                        return loop.run_until_complete(
+                            self._analyze_with_llm(intent, aspects, task_id, topic)
+                        )
                     else:
                         # Loop is running (we're inside an async handler).
                         # Use run_coroutine_threadsafe on a dedicated thread
@@ -329,7 +388,7 @@ class TaskStructureAnalyzer:
                             return pool.submit(
                                 asyncio.run,
                                 self._analyze_with_llm(intent, aspects, task_id, topic),
-                            ).result(timeout=120)
+                            ).result()
                 else:
                     return asyncio.run(self._analyze_with_llm(
                         intent, aspects, task_id, topic
@@ -378,13 +437,21 @@ class TaskStructureAnalyzer:
             prompt=prompt,
             system_prompt=system_prompt,
             model=self._llm_model or None,
-            max_tokens=2048,
+            # A section analysis contains one object per report section.  The
+            # old fixed 2048-token ceiling truncated real 10+ section plans,
+            # producing invalid JSON and silently falling back to an empty
+            # analysis.  Scale the budget with the input while keeping a hard
+            # ceiling for unusually large templates.
+            max_tokens=min(8192, max(2048, 512 * len(aspects))),
             temperature=0.1,
             routing_hint=RoutingHint(action="task_structure"),
         )
         
-        if not result.get("success"):
-            raise ValueError(f"LLM call failed: {result.get('error')}")
+        if not isinstance(result, dict) or not result.get("success"):
+            result_info = result if isinstance(result, dict) else {}
+            raise ValueError(
+                f"LLM call failed: {result_info.get('error') or result_info.get('message') or 'LLM returned no response'}"
+            )
 
         content = result.get("content", "")
 
@@ -487,9 +554,16 @@ class TaskStructureAnalyzer:
 
             sections.append(section)
 
-        # Parse dependencies
+        # Parse and normalize dependencies.  MIMO sometimes emits a dense
+        # analysis->analysis graph even though those sections are independent
+        # research slices.  Keeping those speculative edges serializes the
+        # whole report and can also manufacture cycles.  We retain the edges
+        # that represent real stage boundaries (data -> analysis and anything
+        # feeding synthesis), then let rule inference fill in missing edges.
         dependencies = []
         dep_analyses = llm_output.get("dependencies", [])
+        role_by_id = {section.section_id: section.section_role for section in sections}
+        seen_dependencies = set()
 
         for dep in dep_analyses:
             from_name = dep.get("from")
@@ -498,18 +572,34 @@ class TaskStructureAnalyzer:
             from_id = section_id_map.get(from_name)
             to_id = section_id_map.get(to_name)
 
-            if from_id and to_id:
-                dependencies.append(ContentDependency(
-                    from_section=from_id,
-                    to_section=to_id,
-                    dependency_type=dep.get("type", "synthesis"),
-                    dependency_reason=dep.get("reason", ""),
-                ))
+            if not from_id or not to_id or from_id == to_id:
+                continue
 
-                # Update section's dependency list
-                for s in sections:
-                    if s.section_id == to_id:
-                        s.content_dependency.append(from_id)
+            from_role = role_by_id.get(from_id)
+            to_role = role_by_id.get(to_id)
+            if from_role == SectionRole.ANALYSIS and to_role == SectionRole.ANALYSIS:
+                continue
+
+            dependency_type = dep.get("type", "synthesis")
+            key = (from_id, to_id, dependency_type)
+            if key in seen_dependencies:
+                continue
+            seen_dependencies.add(key)
+            dependencies.append(ContentDependency(
+                from_section=from_id,
+                to_section=to_id,
+                dependency_type=dependency_type,
+                dependency_reason=dep.get("reason", ""),
+            ))
+
+        # Update section dependency lists only after sanitization so the
+        # execution graph and the per-section metadata cannot disagree.
+        for dependency in dependencies:
+            for section in sections:
+                if section.section_id == dependency.to_section:
+                    if dependency.from_section not in section.content_dependency:
+                        section.content_dependency.append(dependency.from_section)
+                    break
 
         # If LLM didn't output dependencies, use rule inference
         if not dependencies:
@@ -768,7 +858,12 @@ class TaskStructureAnalyzer:
 
         reverse_graph: Dict[str, List[str]] = {s.section_id: [] for s in sections}
         for dep in dependencies:
-            reverse_graph[dep.to_section].append(dep.from_section)
+            # ``current_group`` contains completed source nodes.  When a
+            # source is removed, its outgoing target becomes less dependent;
+            # storing source -> target is therefore required here.  The old
+            # target -> source direction decremented the wrong node and
+            # manufactured cycles in otherwise valid routing DAGs.
+            reverse_graph[dep.from_section].append(dep.to_section)
 
         groups: List[List[str]] = []
         remaining = set(in_degree.keys())
