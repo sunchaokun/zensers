@@ -173,7 +173,11 @@ class Layer2MethodologyScorer:
             if not result:
                 return self._regex_framework_fallback(content, framework)
             parsed = self._parse_match_response(result)
-            return float(parsed.get("match_score", 50.0))
+            parsed_score = float(parsed.get("match_score", 0.0) or 0.0)
+            # The rule-based coverage is the deterministic safety net.  An
+            # unavailable/uninitialised router can otherwise return a valid
+            # but meaningless 0 and erase evidence already found locally.
+            return max(parsed_score, self._regex_framework_fallback(content, framework))
 
         except Exception as e:
             logger.warning(f"Layer 2 framework match LLM failed: {e}")

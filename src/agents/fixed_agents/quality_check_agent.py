@@ -31,6 +31,7 @@ Output:
 """
 
 import logging
+import re
 from typing import Any, Dict, List, Optional, Callable
 from datetime import datetime
 from pathlib import Path
@@ -267,7 +268,17 @@ class QualityCheckAgent(FixedAgent):
                 sections = report["data"].get("sections", [])
         
         section_quality = {}
-        if sections and isinstance(sections, list):
+        # Some callers provide compact section index entries alongside the
+        # authoritative full report in ``report.content``.  Treating those
+        # summaries as full sections assigns score 0 and unfairly drags down
+        # an otherwise complete report.  Only fuse section-level scores when
+        # at least one section contains substantive content.
+        has_substantive_sections = any(
+            isinstance(section, dict)
+            and len(str(section.get("content") or "").strip()) >= 50
+            for section in sections
+        ) if isinstance(sections, list) else False
+        if sections and isinstance(sections, list) and has_substantive_sections:
             try:
                 session_id = task_input.get("session_id", "")
                 research_id = task_input.get("task_id", "")
@@ -294,17 +305,22 @@ class QualityCheckAgent(FixedAgent):
             except Exception as e:
                 logger.warning(f"Section-level quality check failed: {e}")
         
-        # Determine if passed
-        # Robust gate: score + structural completeness.
-        # Individual missing recommended sections or format issues do not block.
+        # A report-level summary must not mask an empty or degraded chapter.
+        # Missing chapter content is a hard delivery failure.
         high_severity_issues = [i for i in issues if i.get("severity") == "high"]
-        placeholder_issues = [i for i in high_severity_issues if "占位符" in i.get("message", "") or "placeholder" in i.get("message", "").lower()]
+        placeholder_issues = [
+            i for i in high_severity_issues
+            if "占位符" in i.get("message", "")
+            or "placeholder" in i.get("message", "").lower()
+            or "degraded" in i.get("message", "").lower()
+            or i.get("type") in {"chapter_content_missing", "placeholder_content"}
+        ]
         
         passed = (
             quality_score >= 60
             and completeness_result.get("passed", False)
-            and len(high_severity_issues) <= 1  # allow 1 high-severity issue (fuzzy border)
-            and len(placeholder_issues) == 0   # placeholder content always fails
+            and len(high_severity_issues) == 0
+            and len(placeholder_issues) == 0
         )
         
         # If there are low-severity issues, log but don't block
@@ -407,13 +423,41 @@ class QualityCheckAgent(FixedAgent):
                 })
                 suggestions.append(f"Add '{req_section}' section if applicable")
         
-        # Check for placeholder/degraded sections
+        # Empty and degraded sections are hard failures.  Otherwise a
+        # populated top-level report.content can incorrectly hide missing
+        # chapter bodies.
         import re
         placeholder_count = 0
+        empty_count = 0
+
+        def _content_tree(section: Any) -> str:
+            if not isinstance(section, dict):
+                return str(section or "")
+            parts = [str(section.get(key) or "") for key in ("content", "body", "text")]
+            for child_key in ("subsections", "sub_sections", "children", "sections"):
+                children = section.get(child_key) or []
+                if isinstance(children, list):
+                    parts.extend(_content_tree(child) for child in children)
+            return "\n".join(parts)
+
         for section in sections:
-            sec_content = section.get("content", "") if isinstance(section, dict) else str(section)
-            if re.search(r'本章节数据不足|数据不足.*无法生成|请检查上游数据采集', sec_content):
+            sec_content = _content_tree(section)
+            if not sec_content.strip():
+                empty_count += 1
+            if re.search(
+                r'本章节数据不足|数据不足.*(?:无法生成|待补充)|本章节待补充|请检查上游数据采集'
+                r'|insufficient data|not enough data',
+                sec_content,
+                flags=re.IGNORECASE,
+            ):
                 placeholder_count += 1
+        if empty_count > 0:
+            issues.append({
+                "type": "chapter_content_missing",
+                "severity": "high",
+                "message": f"{empty_count}/{len(sections)} sections have no substantive chapter content",
+            })
+            suggestions.append(f"Generate actual analysis for {empty_count} empty sections before delivery")
         if placeholder_count > 0:
             issues.append({
                 "type": "completeness",
@@ -422,8 +466,11 @@ class QualityCheckAgent(FixedAgent):
             })
             suggestions.append(f"Re-run research to generate actual content for {placeholder_count} sections")
         
-        # completeness only blocks on severe structural defects
-        completeness_passed = len(sections) >= min_sections
+        completeness_passed = (
+            len(sections) >= min_sections
+            and empty_count == 0
+            and placeholder_count == 0
+        )
         
         return {
             "passed": completeness_passed,
@@ -431,6 +478,7 @@ class QualityCheckAgent(FixedAgent):
             "suggestions": suggestions,
             "word_count": word_count,
             "section_count": len(sections),
+            "min_sections": min_sections,
         }
     
     def _check_accuracy(
@@ -547,8 +595,11 @@ class QualityCheckAgent(FixedAgent):
             section_count = max(len(section_markers), 1)
         reasonable_repeat_per_section = 3
         
+        # Five or more identical decimal values in a single section is the
+        # minimum signal used by the quality contract.  The old threshold of
+        # twelve allowed obvious placeholder repetition to pass unnoticed.
         for num, count in number_counts.most_common(5):
-            if count < 12 or float(num) <= 0:
+            if count < 5 or float(num) <= 0:
                 continue
             if 2000 <= float(num) <= 2100:
                 continue
@@ -674,8 +725,12 @@ class QualityCheckAgent(FixedAgent):
         
         content = report.get("content", "")
         
-        # Check title format
-        if "# " not in content:
+        # The quality check runs after HTML preview generation.  Treat a
+        # rendered HTML <h1> as a valid top-level heading too; the previous
+        # Markdown-only check produced a false warning for valid previews.
+        has_markdown_heading = bool(re.search(r"(?m)^#\s+", content))
+        has_html_heading = bool(re.search(r"<h1\b[^>]*>.*?</h1\s*>", content, re.IGNORECASE | re.DOTALL))
+        if not (has_markdown_heading or has_html_heading or str(report.get("title") or "").strip()):
             issues.append({
                 "type": "format",
                 "severity": "low",
@@ -713,8 +768,18 @@ class QualityCheckAgent(FixedAgent):
         """
         base_score = 100.0
         
-        # Deduct based on issue count
-        issue_penalty = min(total_issues * 5, 50)  # Max 50 point deduction
+        # Deduct based on issue count and the size of structural gaps. A
+        # one-section report and a two-section report must not receive the
+        # same score merely because both fail the minimum-section check.
+        issue_penalty = total_issues * 5
+        completeness = check_details.get("completeness", {})
+        section_gap = max(
+            0,
+            int(completeness.get("min_sections", 0) or 0)
+            - int(completeness.get("section_count", 0) or 0),
+        )
+        issue_penalty += section_gap * 5
+        issue_penalty = min(issue_penalty, 50)  # Max 50 point deduction
         
         # Adjust based on check pass rate
         passed_count = sum(
@@ -1137,9 +1202,9 @@ class QualityCheckAgent(FixedAgent):
                 "message": f"跨章节数值一致性评分: {consistency_score:.0f}/100",
             })
         
-        report_dict = {"content": "\n".join(s.get("content", "") for s in sections)}
-        format_issues = self._check_format(report_dict, self.DEFAULT_STANDARDS).get("issues", [])
-        overall_issues.extend(format_issues)
+        # Title format belongs to the complete-report check above.  A
+        # section-only synthetic report has no document-level heading by
+        # design, so checking it here creates duplicate false warnings.
         
         full_content = "\n".join(s.get("content", "") for s in sections)
         placeholder_issues = self._check_placeholders(full_content)

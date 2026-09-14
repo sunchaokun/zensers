@@ -1,13 +1,21 @@
 import re
 import json
 import logging
+from pathlib import Path
 from typing import Dict, Any, List
+from urllib.parse import urlparse
 
 from .models import ChapterWriteInput, ChapterWriteOutput, DataPoint
 from .prompt_manager import PromptManager
-from src.core.llm_client import call_llm
+from src.core.llm_client import call_llm, call_llm_with_tools
+from src.skills.file_skill import FileSkill
 
-DATAPOINT_FIELDS = {"metric", "value", "unit", "source", "chapter_id", "confidence"}
+DATAPOINT_FIELDS = {
+    "metric", "value", "unit", "source", "chapter_id", "sub_section_id", "confidence",
+    "source_url", "evidence_id", "provenance_id", "evidence_excerpt", "locator",
+    "geographic_scope", "period", "population",
+    "epistemic_level", "evidence_status",
+}
 
 logger = logging.getLogger(__name__)
 
@@ -16,11 +24,12 @@ class ChapterWriter:
 
     def __init__(self, prompt_manager: PromptManager = None) -> None:
         self._prompts = prompt_manager
+        self._raw_data_location = ""
 
     async def write(self, input_data: ChapterWriteInput) -> ChapterWriteOutput:
+        self._raw_data_location = input_data.raw_data_location or ""
         chapter_spec = input_data.chapter_spec
-        prompt = self._prompts.get(
-            "chapter_write",
+        prompt_kwargs = dict(
             topic=input_data.task_structure.get('topic', ''),
             framework_name=input_data.framework_config.get('name', '通用研究报告'),
             section_name=chapter_spec.get('section_name', ''),
@@ -34,8 +43,24 @@ class ChapterWriter:
             base_content=input_data.base_content if input_data.base_content else '无分析初稿，请基于数据从头撰写',
             upstream_data_points_json=json.dumps(input_data.upstream_data_points, ensure_ascii=False, indent=2)
                                       if input_data.upstream_data_points else '无可用数据',
+            global_evidence_pool_json=json.dumps(input_data.global_evidence_pool, ensure_ascii=False, indent=2)
+                                      if input_data.global_evidence_pool else '无可用原始搜索证据',
+            raw_data_location=input_data.raw_data_location or '未提供（请使用当前任务的原始证据池）',
+            chapter_requirements_json=json.dumps(input_data.chapter_requirements, ensure_ascii=False, indent=2)
+                                      if input_data.chapter_requirements else '无明确章节需求',
+            used_evidence_ids_json=json.dumps(input_data.used_evidence_ids, ensure_ascii=False),
         )
-        raw_output = await self._call_llm(prompt)
+        prompt_name = "chapter_write_pptx" if input_data.output_format == "pptx" else "chapter_write"
+        try:
+            prompt = self._prompts.get(prompt_name, **prompt_kwargs)
+        except FileNotFoundError:
+            # Keep custom/legacy prompt directories working until they add the
+            # optional PPT template.
+            prompt = self._prompts.get("chapter_write", **prompt_kwargs)
+        raw_output = await self._call_llm(
+            prompt,
+            raw_data_location=input_data.raw_data_location,
+        )
         return self._parse_output(raw_output, chapter_spec)
 
     async def rewrite(self, original_chapter: ChapterWriteOutput,
@@ -57,7 +82,7 @@ class ChapterWriter:
             chapter_data=json.dumps(chapter_data, ensure_ascii=False, indent=2)
                          if chapter_data else '无可用数据',
         )
-        raw_output = await self._call_llm(prompt)
+        raw_output = await self._call_llm(prompt, raw_data_location=self._raw_data_location)
         return self._parse_output(raw_output, chapter_spec)
 
     async def patch_data(self, chapter: ChapterWriteOutput,
@@ -70,17 +95,141 @@ class ChapterWriter:
             section_name=chapter.title,
             section_id=chapter.chapter_id,
         )
-        raw_output = await self._call_llm(prompt)
-        chapter_spec = {"section_id": chapter.chapter_id, "section_name": chapter.title}
-        return self._parse_output(raw_output, chapter_spec)
+        raw_output = await self._call_llm(prompt, raw_data_location=self._raw_data_location)
+        chapter_spec = {
+            "section_id": chapter.chapter_id,
+            "section_name": chapter.title,
+            "sub_section_id": chapter.sub_section_id,
+        }
+        patched = self._parse_output(raw_output, chapter_spec)
+        patched.data_points_used = self._merge_patched_data_points(
+            chapter.data_points_used, patched.data_points_used,
+            chapter_id=chapter.chapter_id,
+            sub_section_id=chapter.sub_section_id,
+        )
+        return patched
 
-    async def _call_llm(self, prompt: str) -> str:
-        result = await call_llm(prompt=prompt, max_tokens=8192, temperature=0.7)
+    @staticmethod
+    def _merge_patched_data_points(
+        original: List[DataPoint],
+        patched: List[DataPoint],
+        *,
+        chapter_id: str,
+        sub_section_id: str = "",
+    ) -> List[DataPoint]:
+        """Preserve evidence identity when an LLM patch omits unchanged fields."""
+        original_by_metric = {
+            str(point.metric).strip().lower(): point
+            for point in (original or [])
+            if str(point.metric).strip()
+        }
+        merged: List[DataPoint] = []
+        seen_metrics = set()
+        for point in patched or []:
+            metric_key = str(point.metric).strip().lower()
+            previous = original_by_metric.get(metric_key)
+            if previous is not None:
+                for field_name in (
+                    "source", "source_url", "evidence_id", "provenance_id",
+                    "evidence_excerpt", "locator",
+                    "geographic_scope", "period", "population", "epistemic_level",
+                    "evidence_status",
+                ):
+                    current_value = getattr(point, field_name, "")
+                    previous_value = getattr(previous, field_name, "")
+                    if (
+                        not current_value
+                        or (
+                            field_name == "evidence_status"
+                            and current_value == "unverified"
+                            and previous_value == "verified"
+                        )
+                    ):
+                        setattr(point, field_name, getattr(previous, field_name, ""))
+            point.chapter_id = point.chapter_id or chapter_id
+            point.sub_section_id = point.sub_section_id or sub_section_id
+            merged.append(point)
+            if metric_key:
+                seen_metrics.add(metric_key)
+
+        # Data patches are content corrections, not permission to discard
+        # unchanged structured evidence. Keep omitted original points so the
+        # final audit cannot lose valid citations merely because the LLM
+        # returned a partial JSON payload.
+        for point in original or []:
+            metric_key = str(point.metric).strip().lower()
+            if metric_key and metric_key not in seen_metrics:
+                preserved = DataPoint(**{
+                    field_name: getattr(point, field_name)
+                    for field_name in DataPoint.__dataclass_fields__
+                })
+                preserved.chapter_id = preserved.chapter_id or chapter_id
+                preserved.sub_section_id = preserved.sub_section_id or sub_section_id
+                merged.append(preserved)
+        return merged
+
+    async def _call_llm(self, prompt: str, raw_data_location: str = "") -> str:
+        # Preserve the legacy path for callers/tests that do not provide a
+        # task-scoped raw-data file.  Tool use is enabled only when the report
+        # has an explicit, validated file location.
+        if not raw_data_location or not Path(raw_data_location).is_file():
+            result = await call_llm(prompt=prompt, max_tokens=8192, temperature=0.7)
+            if not result.get("success"):
+                raise RuntimeError(f"LLM call failed: {result}")
+            return result["content"]
+        raw_path = Path(raw_data_location).resolve() if raw_data_location else None
+
+        async def _read_raw_json(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+            if tool_name != "read_json":
+                return {"success": False, "error": f"Unsupported tool: {tool_name}"}
+            requested = Path(str(arguments.get("filepath", ""))).resolve()
+            # The report writer may read only the current task's cache file.
+            if raw_path is None or requested != raw_path:
+                logger.warning("ChapterWriter denied file read outside current raw-data file: %s", requested)
+                return {"success": False, "error": "Only the current task raw-data cache may be read"}
+            skill = FileSkill(allowed_dirs=[str(raw_path.parent)])
+            result = await skill.execute(action="read_json", filepath=str(requested))
+            logger.info(
+                "ChapterWriter raw-data read %s: success=%s",
+                requested,
+                result.get("success", False),
+            )
+            return result
+
+        tools = [{
+            "type": "function",
+            "function": {
+                "name": "read_json",
+                "description": "Read the current report task's complete raw-data JSON cache. Use it before concluding that data is missing.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"filepath": {"type": "string"}},
+                    "required": ["filepath"],
+                    "additionalProperties": False,
+                },
+            },
+        }]
+        result = await call_llm_with_tools(
+            prompt=prompt,
+            tools=tools,
+            tool_handler=_read_raw_json,
+            max_tokens=8192,
+            temperature=0.7,
+        )
+        # Fall back to the legacy call when an OpenAI-compatible endpoint does
+        # not support tool calls; the report remains backward compatible.
+        if result.get("error") == "llm_tool_call_failed":
+            result = await call_llm(prompt=prompt, max_tokens=8192, temperature=0.7)
         if not result.get("success"):
             raise RuntimeError(f"LLM call failed: {result}")
         return result["content"]
 
-    DATAPOINT_STR_FIELDS = {"metric", "value", "unit", "source", "chapter_id"}
+    DATAPOINT_STR_FIELDS = {
+        "metric", "value", "unit", "source", "chapter_id", "sub_section_id", "source_url",
+        "evidence_id", "provenance_id", "evidence_excerpt", "locator",
+        "geographic_scope", "period", "population",
+        "epistemic_level", "evidence_status",
+    }
 
     def _coerce_data_point(self, dp_dict: Dict[str, Any]) -> DataPoint:
         coerced = {}
@@ -114,13 +263,27 @@ class ChapterWriter:
                     json_str = re.sub(r'[\x00-\x1f\x7f-\x9f]', ' ', brace_match.group(0))
             if json_str:
                 data = json.loads(json_str)
-                title = data.get("title", chapter_spec.get("section_name", ""))
+                # The manifest owns the reader-facing chapter identity.  A
+                # model-generated title is allowed to drift into a sentence
+                # (or a nested heading), which later makes the report look as
+                # if a paragraph were a chapter.  Keep the model title only
+                # as a legacy fallback when no manifest title is available.
+                manifest_title = str(chapter_spec.get("section_name", "") or "").strip()
+                model_title = str(data.get("title", "") or "").strip()
+                # Preserve concise legacy titles for compatibility, but reject
+                # paragraph-shaped titles that are clearly content leakage.
+                model_title_is_paragraph = (
+                    len(model_title) > 60
+                    or bool(re.search(r"[。！？；]", model_title))
+                )
+                title = manifest_title if (manifest_title and model_title_is_paragraph) else (model_title or manifest_title)
                 if title in _SKIP_TITLES or any(p in title for p in _GENERIC_PATTERNS):
-                    title = chapter_spec.get("section_name", "")
+                    title = manifest_title
                 return ChapterWriteOutput(
                     chapter_id=chapter_spec.get("section_id", ""),
                     title=title,
-                    content=data.get("content", ""),
+                    content=self._sanitize_report_content(data.get("content", "")),
+                    sub_section_id=str(chapter_spec.get("sub_section_id", "") or ""),
                     data_points_used=[
                         self._coerce_data_point(dp)
                         for dp in data.get("data_points_used", [])
@@ -135,12 +298,75 @@ class ChapterWriter:
         return ChapterWriteOutput(
             chapter_id=chapter_spec.get("section_id", ""),
             title=chapter_spec.get("section_name", ""),
-            content=raw,
+            content=self._sanitize_report_content(raw),
+            sub_section_id=str(chapter_spec.get("sub_section_id", "") or ""),
             data_points_used=[],
             key_conclusions=self._extract_conclusions(raw),
             self_check_passed=False,
             self_check_issues=["JSON解析失败，输出格式不规范"],
         )
+
+    @staticmethod
+    def _sanitize_report_content(content: Any) -> str:
+        """Remove model work-log leakage from user-facing chapter content.
+
+        Chapter content is a deliverable, not a transcript.  Models sometimes
+        put cache-reading attempts or rewrite instructions inside the JSON
+        ``content`` field even when the surrounding response is valid JSON.
+        Keep the actual chapter starting at the first Markdown heading and
+        discard trailing instructions addressed to the user.
+        """
+        text = str(content or "").strip()
+        if not text:
+            return text
+
+        internal_start = re.search(r"\[数据获取尝试\]", text)
+        if internal_start:
+            heading = re.search(r"\n#{1,6}\s+", text[internal_start.end():])
+            if heading:
+                # Drop the model's preamble as well; it is an execution
+                # transcript, not report prose.
+                text = text[internal_start.end() + heading.start():]
+            else:
+                text = text[:internal_start.start()]
+
+        rewrite_note = re.search(r"(?:\n---\s*\n|\n)\s*\**改写说明\**\s*[：:]", text)
+        if rewrite_note:
+            text = text[:rewrite_note.start()]
+
+        # A user-directed offer at the end is also internal narration.
+        text = re.split(r"\n\s*如果您需要(?:更简练|进一步|继续)", text, maxsplit=1)[0]
+        return ChapterWriter._normalize_source_lists(text.strip())
+
+    @staticmethod
+    def _normalize_source_lists(text: str) -> str:
+        """Render Python/Markdown URL lists as readable linked source names."""
+        # Stop at a paragraph boundary, not the first `]` inside a Markdown
+        # link.  The latter caused only the first URL fragment to be matched.
+        pattern = re.compile(
+            r"来源\s*[：:]\s*(\[[^\r\n。！？]*https?://[^\r\n。！？]*\])",
+            re.DOTALL,
+        )
+
+        def replace(match: re.Match) -> str:
+            raw = match.group(1)[1:-1]
+            # Accept both Markdown links and the common Python repr emitted
+            # by models (including HTML-escaped quotes after export).
+            links = re.findall(r"\[([^\]]+)\]\((https?://[^)]+)\)", raw)
+            if not links:
+                links = [("", url) for url in re.findall(r"https?://[^\s,\]'\"]+", raw)]
+            if not links:
+                return match.group(0)
+            rendered = []
+            for label, url in links:
+                label = label.strip().strip("'\"")
+                if label.startswith(("http://", "https://")):
+                    parsed = urlparse(url)
+                    label = parsed.netloc.removeprefix("www.") or url
+                rendered.append(f"[{label}]({url})")
+            return "来源：" + "、".join(rendered)
+
+        return pattern.sub(replace, text)
 
     @staticmethod
     def _extract_conclusions(text: str) -> List[str]:

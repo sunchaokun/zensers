@@ -99,6 +99,20 @@ class TestGlobalReviewAgentParseOutput:
 
 
 class TestGlobalReviewAgentVerifyIssues:
+    def test_extract_relevant_chapters_accepts_list_location(self, reviewer):
+        issue = ReviewIssue(
+            dimension="data_consistency",
+            severity="HIGH",
+            description="跨章节问题",
+            location=["ch1", "ch2"],
+            evidence="ev",
+        )
+
+        result = reviewer._extract_relevant_chapters(issue, make_chapters())
+
+        assert "市场规模" in result
+        assert "竞争格局" in result
+
     @pytest.mark.asyncio
     async def test_verify_confirmed_issues(self, reviewer):
         with patch(_CALL_LLM_PATH, new_callable=AsyncMock) as mock_call:

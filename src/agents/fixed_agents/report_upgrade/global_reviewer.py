@@ -77,7 +77,11 @@ class GlobalReviewAgent:
     @staticmethod
     def _extract_relevant_chapters(issue: ReviewIssue,
                                    chapters: List[ChapterWriteOutput]) -> str:
-        location_ids = [loc.strip() for loc in issue.location.split(",")]
+        raw_location = issue.location
+        if isinstance(raw_location, (list, tuple, set)):
+            location_ids = [str(loc).strip() for loc in raw_location if str(loc).strip()]
+        else:
+            location_ids = [loc.strip() for loc in str(raw_location or "").split(",") if loc.strip()]
         parts = []
         for ch in chapters:
             if ch.chapter_id in location_ids:

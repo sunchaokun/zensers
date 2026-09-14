@@ -115,7 +115,7 @@ class TestD1ConflictResolutionWithCaliber:
             ],
         )
         resolver = ConflictResolver()
-        resolution = asyncio.get_event_loop().run_until_complete(resolver.resolve(conflict, "比亚迪"))
+        resolution = asyncio.run(resolver.resolve(conflict, "比亚迪"))
         assert "口径" in resolution.reason or "调整" in resolution.reason, f"reason应包含口径差异标注, got: {resolution.reason}"
 
 

@@ -1,0 +1,55 @@
+# PPT章节编排任务
+
+你是负责研究型演示文稿的资深编辑。请把本章节整理成适合投影演示的内容，而不是报告正文。所有数字、来源和结论必须来自给定材料，不得编造。
+
+主题：${topic}
+框架：${framework_name}
+章节名：${section_name}
+章节ID：${section_id}
+章节角色：${section_role}
+
+前文脉络：
+${preceding_summary}
+
+已有初稿：
+${base_content}
+
+可用数据：
+${chapter_data}
+
+原始数据摘要：
+${raw_data_summary}
+
+全局证据池：
+${global_evidence_pool_json}
+
+完整原始数据位置（优先读取）：
+${raw_data_location}
+
+请优先使用完整原始数据分析当前章节；不要因 chapter_id 或
+sub_section_id 不匹配而忽略语义相关数据。只有原始数据不足时才补充搜索。
+
+章节需求与覆盖状态：
+${chapter_requirements_json}
+
+已使用证据：
+${used_evidence_ids_json}
+
+请遵守：
+1. 先提炼核心结论，再组织 2-5 条要点；每条要点尽量控制在 25 个中文字符以内，保留关键数字和单位。
+2. 一个章节如果包含多个互不相同的观点，用 Markdown 小标题或空行分组，供后续页面拆分；不要把所有内容合并成一段。
+3. 明确指出可视化机会，例如趋势、排名、构成、对比或 KPI；只能基于实际数据建议图表。
+4. 不要输出长篇论证、套话、目录式标题或“感谢关注”等演示无关内容。
+5. 保留可溯源的数据点和来源身份；不能因为压缩文字而删除数据点。
+
+输出严格为 JSON，并包裹在 ```json``` 中：
+```json
+{
+  "title": "章节标题",
+  "content": "Markdown格式的PPT章节内容",
+  "data_points_used": [{"metric": "指标名", "value": "数值", "unit": "单位", "source": "来源", "source_url": "原始来源URL", "geographic_scope": "中国/全球/其他", "period": "期间", "population": "统计对象", "epistemic_level": "factual/inferential/speculative"}],
+  "key_conclusions": ["结论1", "结论2"],
+  "self_check_passed": true,
+  "self_check_issues": []
+}
+```

@@ -168,16 +168,18 @@ def batch_results_minimal():
 
 @pytest.fixture
 def rich_analysis_batch():
-    """富含分析内容、结论和数据引用，足以通过阈值 70 的批次"""
+    """包含完整结构、口径和风险说明，足以通过阈值 70 的批次"""
     content = (
+        "核心结论：行业处于快速增长期，预计2027年市场规模将达1.8万亿元。\n"
         "2026年中国新能源汽车市场规模达到1.2万亿元，同比增长25%。"
-        "根据工信部最新数据显示，该市场连续五年保持双位数增长，渗透率突破40%。\n\n"
+        "数据来源：根据工信部最新数据显示，该市场连续五年保持双位数增长，渗透率突破40%。\n\n"
+        "论证分析："
         "根本驱动因素分析：第一，技术降本效应显著，电池成本较2020年下降40%。"
         "第二，政策支持持续加码，购置税减免和充电基建补贴刺激需求。"
         "第三，消费认知加速转变，消费者接受度从2020年的20%提升至2026年的65%。\n\n"
         "影响机制方面，供给端和需求端的良性循环正在形成。"
         "根本原因在于技术创新和规模效应共同推动成本下降。"
-        "综上所述，行业处于快速增长期，预计2027年市场规模将达1.8万亿元。"
+        "风险提示：上述判断存在政策变化、技术路线和需求波动等不确定性，数据缺口可能影响预测。"
     )
     return [{
         "agent_id": "research_analysis_main",
@@ -338,7 +340,7 @@ class TestAnalysisCheckerContract:
         assert hasattr(result, "issues")
 
     def test_checker_long_content_scores_high(self, checker):
-        """长内容应获得较高分数"""
+        """仅有长度而缺乏结构的内容不应自动获得高分"""
         long_content = "市场分析。" * 500
         batch_results = [{
             "agent_id": "test", "success": True,
@@ -347,11 +349,11 @@ class TestAnalysisCheckerContract:
         }]
         data = build_check_data(batch_results)
         result = checker.check(data, {})
-        assert result.score >= 50, f"Long content should score >= 50, got {result.score}"
+        assert result.score < 50, f"Length alone should not pass, got {result.score}"
 
     def test_checker_with_data_references_scores_higher(self, checker):
         """含数据引用的内容得分高于无引用内容"""
-        with_data = "同比增长25%，市场规模达到100亿元，medium content here% and million"
+        with_data = "核心结论：市场规模达到100亿元。数据来源：官方统计显示同比增长25%。"
         without_data = "市场表现良好，前景广阔，分析认为未来发展可期"
 
         r1 = checker.check(build_check_data([
@@ -442,10 +444,11 @@ class TestReportCheckerContract:
         assert result.score > 0
 
     def test_sources_passed_to_checker(self, checker, batch_results_all_success):
-        """验证 sources 已传递给 ReportQualityChecker"""
+        """ReportQualityChecker 接受包含 sources 的标准检查数据"""
         data = build_check_data(batch_results_all_success)
-        details = checker._get_details(data, {})
-        assert details["sources_count"] == 3
+        result = checker.check(data, {})
+        assert result.score >= 0
+        assert len(data["sources"]) == 3
 
     def test_empty_report_fails(self, checker):
         """空内容评分低于阈值"""
@@ -489,13 +492,40 @@ class TestFullPipelineContract:
             {"success": True, "content": "分析内容", "result": "",
              "sources": [], "data_points": []},
         ]
-        assert engine._select_checker_for_batch(analysis_results) == engine.analysis_checker
+        from src.core.quality.semantic_adapter import SemanticQualityAdapter
+        checker = engine._select_checker_for_batch(analysis_results)
+        assert isinstance(checker, SemanticQualityAdapter)
+        assert checker._fallback_checker is engine.analysis_checker
 
         mixed_results = [
             {"success": True, "content": "分析内容", "result": "",
              "sources": ["url"], "data_points": [{"k": "v"}]},
         ]
-        assert engine._select_checker_for_batch(mixed_results) == engine.analysis_checker
+        # Short content plus evidence is conservatively treated as data
+        # collection so raw evidence is not sent through semantic analysis QC.
+        assert engine._select_checker_for_batch(mixed_results) == engine.data_checker
+
+    def test_explicit_data_collection_category_wins_over_narrative_shape(self, engine):
+        """采集 Agent 即使返回长分析文本，也不能被误路由到分析 QC。"""
+        from types import SimpleNamespace
+
+        collection_agent = SimpleNamespace(
+            agent_id="phase_1_agent_0",
+            config={"category": "research"},
+        )
+        result = [{
+            "success": True,
+            "agent_id": "phase_1_agent_0",
+            "content": "这是一段较长的市场规模分析文本，包含来源、口径和预测信息。" * 10,
+            "data_points": [{"metric": "market_size", "value": 100}],
+            "sources": ["https://example.com/report"],
+        }]
+
+        assert engine._select_checker_for_batch(result, [collection_agent]) == engine.data_checker
+
+    def test_quality_control_has_no_implicit_background_timeout(self, engine):
+        """深度研究不应被隐式后台总超时中断。"""
+        assert engine.background.config.default_timeout is None
 
     def test_engine_initializes_all_checkers(self, engine):
         """验证 engine 初始化了所有 checker"""

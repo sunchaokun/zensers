@@ -13,7 +13,8 @@ from src.agents.fixed_agents.report_upgrade.prompt_manager import PromptManager
 
 @pytest.fixture
 def mock_prompts(tmp_path):
-    (tmp_path / "chapter_write.tmpl").write_text("${topic} ${section_name} ${base_content}", encoding="utf-8")
+    (tmp_path / "chapter_write.tmpl").write_text("${topic} ${section_name} ${base_content} ${raw_data_location} 只有确认原始数据无法支持当前章节时，才执行补充搜索", encoding="utf-8")
+    (tmp_path / "chapter_write_pptx.tmpl").write_text("PPTX ${topic} ${section_name}", encoding="utf-8")
     (tmp_path / "chapter_rewrite.tmpl").write_text("${original_content} ${review_feedback}", encoding="utf-8")
     (tmp_path / "chapter_patch_data.tmpl").write_text("${chapter_content} ${patch_instructions}", encoding="utf-8")
     return PromptManager(prompts_dir=tmp_path)
@@ -76,6 +77,23 @@ class TestChapterWriterWrite:
         assert "分析Agent的精炼内容" in prompt_text
 
     @pytest.mark.asyncio
+    async def test_write_tells_llm_raw_data_location_and_priority(self, writer):
+        with patch(_CALL_LLM_PATH, new_callable=AsyncMock) as mock_call:
+            mock_call.return_value = _llm_ok(f"```json\n{_VALID_CHAPTER_JSON}\n```")
+            await writer.write(make_input(raw_data_location="E:/task/research_result_cache.json"))
+            prompt_text = mock_call.call_args[1]["prompt"]
+        assert "E:/task/research_result_cache.json" in prompt_text
+        assert "只有确认原始数据无法支持当前章节时，才执行补充搜索" in prompt_text
+
+    @pytest.mark.asyncio
+    async def test_write_uses_pptx_prompt_when_requested(self, writer):
+        with patch(_CALL_LLM_PATH, new_callable=AsyncMock) as mock_call:
+            mock_call.return_value = _llm_ok(f"```json\n{_VALID_CHAPTER_JSON}\n```")
+            await writer.write(make_input(output_format="pptx"))
+            prompt_text = mock_call.call_args[1]["prompt"]
+        assert prompt_text.startswith("PPTX ")
+
+    @pytest.mark.asyncio
     async def test_write_llm_failure_raises(self, writer):
         with patch(_CALL_LLM_PATH, new_callable=AsyncMock) as mock_call:
             mock_call.return_value = {"success": False, "message": "error"}
@@ -105,6 +123,30 @@ class TestChapterWriterPatchData:
             chapter = ChapterWriteOutput(chapter_id="ch1", title="市场规模", content="旧正文")
             result = await writer.patch_data(chapter, ["补充数据：市场规模=2000亿元"], {"name": "行业研究"})
         assert result.content == "修补后正文"
+
+    @pytest.mark.asyncio
+    async def test_patch_data_preserves_omitted_evidence_identity(self, writer):
+        with patch(_CALL_LLM_PATH, new_callable=AsyncMock) as mock_call:
+            mock_call.return_value = _llm_ok(
+                '```json\n{"title": "市场规模", "content": "修补后正文", '
+                '"data_points_used": [{"metric": "市场规模", "value": "2000", '
+                '"unit": "亿元", "source": "来源"}], "key_conclusions": [], '
+                '"self_check_passed": true, "self_check_issues": []}\n```'
+            )
+            chapter = ChapterWriteOutput(
+                chapter_id="ch1", title="市场规模", content="旧正文",
+                data_points_used=[DataPoint(
+                    metric="市场规模", value="2000", unit="亿元", source="来源",
+                    chapter_id="ch1", source_url="https://example.test/market",
+                    evidence_id="ev-1", provenance_id="prov-1",
+                    evidence_status="verified",
+                )],
+            )
+            result = await writer.patch_data(chapter, ["删除无据数字"], {"name": "行业研究"})
+        assert result.data_points_used[0].source_url == "https://example.test/market"
+        assert result.data_points_used[0].evidence_id == "ev-1"
+        assert result.data_points_used[0].provenance_id == "prov-1"
+        assert result.data_points_used[0].evidence_status == "verified"
 
 
 class TestChapterWriterParseOutput:
@@ -142,6 +184,26 @@ class TestChapterWriterParseOutput:
         assert result.content == "市场规模达2000亿"
         assert len(result.key_conclusions) == 1
 
+    def test_parse_removes_internal_cache_and_rewrite_notes(self, writer):
+        content = (
+            "我将检查缓存。\n\n[数据获取尝试] 缓存 JSON 解析失败。\n\n"
+            "---\n\n## 核心结论\n正文结论。\n\n---\n**改写说明**：内部说明\n"
+            "如果您需要更简练，我可以继续优化。"
+        )
+        raw = json.dumps({"title": "测试", "content": content}, ensure_ascii=False)
+        result = writer._parse_output(raw, {"section_id": "ch1", "section_name": "测试"})
+        assert result.content == "## 核心结论\n正文结论。"
+        assert "数据获取尝试" not in result.content
+        assert "改写说明" not in result.content
+
+    def test_parse_normalizes_source_url_list(self, writer):
+        content = "结论。来源：['[https://m.21jingji.com/a](https://m.21jingji.com/a)', '[https://example.com/x](https://example.com/x)']"
+        raw = json.dumps({"title": "测试", "content": content}, ensure_ascii=False)
+        result = writer._parse_output(raw, {"section_id": "ch1", "section_name": "测试"})
+        assert "['" not in result.content
+        assert "[m.21jingji.com](https://m.21jingji.com/a)" in result.content
+        assert "[example.com](https://example.com/x)" in result.content
+
 
 class TestChapterWriterExtractConclusions:
     def test_extract_conclusion_lines(self, writer):
@@ -169,6 +231,7 @@ class TestDataPointFields:
         assert "source" in DATAPOINT_FIELDS
         assert "chapter_id" in DATAPOINT_FIELDS
         assert "confidence" in DATAPOINT_FIELDS
+        assert "evidence_id" in DATAPOINT_FIELDS
         assert "year" not in DATAPOINT_FIELDS
 
 
@@ -186,6 +249,11 @@ class TestDataPointCoercion:
         dp = result.data_points_used[0]
         assert isinstance(dp.value, str)
         assert dp.value == "38"
+
+    def test_evidence_id_is_preserved(self, writer):
+        raw = '```json\n{"title": "测试", "content": "正文", "data_points_used": [{"metric": "销量", "value": 38, "unit": "万辆", "source": "公告", "evidence_id": "ev-1"}], "key_conclusions": [], "self_check_passed": true, "self_check_issues": []}\n```'
+        result = writer._parse_output(raw, {"section_id": "ch1", "section_name": "测试"})
+        assert result.data_points_used[0].evidence_id == "ev-1"
 
     def test_numeric_key_conclusions_coerced_to_str(self, writer):
         raw = '```json\n{"title": "测试", "content": "正文", "data_points_used": [], "key_conclusions": [3.5, "正常结论"], "self_check_passed": true, "self_check_issues": [1]}\n```'

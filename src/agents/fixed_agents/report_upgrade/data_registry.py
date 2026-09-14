@@ -13,16 +13,21 @@ class DataRegistry:
         self._metrics: Dict[str, MetricEntry] = {}
 
     def register(self, metric: str, value: str, unit: str,
-                 chapter_id: str, source: str) -> None:
+                 chapter_id: str, source: str, **evidence: Any) -> None:
         key = self._normalize_metric(metric)
         if key in self._metrics:
             existing = self._metrics[key]
-            if existing.value != value:
+            # Compare semantic numeric values rather than presentation text.
+            # For example, "下滑3" and "-3" describe the same change; they
+            # must not create an L5 conflict merely because the wording
+            # differs.  The original strings are retained for traceability.
+            if self._normalize_value(existing.value) != self._normalize_value(value):
                 existing.conflicts.append({
                     "chapter_id": chapter_id,
                     "value": value,
                     "unit": unit,
                     "source": source,
+                    **{k: v for k, v in evidence.items() if v not in (None, "")},
                 })
         else:
             self._metrics[key] = MetricEntry(
@@ -30,6 +35,13 @@ class DataRegistry:
                 canonical_chapter=chapter_id, source=source,
                 conflicts=[],
             )
+
+        # Keep the canonical evidence contract available to report repair and
+        # checkpoint consumers without breaking the legacy MetricEntry shape.
+        entry = self._metrics[key]
+        for key_name, value_item in evidence.items():
+            if value_item not in (None, ""):
+                setattr(entry, key_name, value_item)
 
     def get_canonical_value(self, metric: str) -> Optional[str]:
         key = self._normalize_metric(metric)
@@ -64,7 +76,7 @@ class DataRegistry:
         entry = self._metrics.get(key)
         if not entry:
             return False
-        return entry.value == value
+        return self._normalize_value(entry.value) == self._normalize_value(value)
 
     def serialize_used_metrics(self) -> str:
         if not self._metrics:
@@ -97,6 +109,12 @@ class DataRegistry:
                     "metric": v.metric, "value": v.value, "unit": v.unit,
                     "canonical_chapter": v.canonical_chapter,
                     "source": v.source, "conflicts": v.conflicts,
+                    "evidence_id": getattr(v, "evidence_id", ""),
+                    "provenance_id": getattr(v, "provenance_id", ""),
+                    "source_url": getattr(v, "source_url", ""),
+                    "period": getattr(v, "period", ""),
+                    "geographic_scope": getattr(v, "geographic_scope", ""),
+                    "population": getattr(v, "population", ""),
                 }
                 for k, v in self._metrics.items()
             }
@@ -111,8 +129,23 @@ class DataRegistry:
                 canonical_chapter=v["canonical_chapter"],
                 source=v["source"], conflicts=v.get("conflicts", []),
             )
+            for key_name in (
+                "evidence_id", "provenance_id", "source_url", "period",
+                "geographic_scope", "population",
+            ):
+                if key_name in v:
+                    setattr(registry._metrics[k], key_name, v[key_name])
         return registry
 
     @staticmethod
     def _normalize_metric(metric: str) -> str:
         return re.sub(r'\s+', '', metric.lower().strip())
+
+    @staticmethod
+    def _normalize_value(value: Any) -> str:
+        """Normalize common Chinese numeric qualifiers for conflict checks."""
+        text = str(value or "").strip().replace(",", "")
+        text = text.replace("下滑", "-").replace("下降", "-")
+        text = re.sub(r"^(接近|约为|约|超过|达到)", "", text)
+        match = re.search(r"-?\d+(?:\.\d+)?", text)
+        return match.group(0) if match else text

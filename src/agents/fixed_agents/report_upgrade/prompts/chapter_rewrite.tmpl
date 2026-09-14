@@ -26,6 +26,7 @@ ${chapter_data}
 2. **禁止删除审查员未指出的内容** — 即使你觉得"不够好"，只要审查员没指出问题就保留
 3. **禁止编造数据** — 不得引入可用数据中不存在的新数值
 4. **禁止引入模糊来源** — 不得使用"据行业分析""据公开信息"等无法溯源的表述
+5. **证据字段必须完整** — 每个数据点必须保留或补齐 source_url、geographic_scope、period、population、epistemic_level；无法确认时删除该数据点，不得猜测
 
 ### 修正方式
 - **数据锚定问题**：删除无据断言，或补充数据来源，或标注数据缺口
@@ -39,7 +40,7 @@ ${chapter_data}
 {
   "title": "章节标题",
   "content": "Markdown格式的精修后章节正文",
-  "data_points_used": [{"metric": "指标名", "value": "数值", "unit": "单位", "source": "来源"}],
+  "data_points_used": [{"metric": "指标名", "value": "数值", "unit": "单位", "source": "来源", "source_url": "原始来源URL", "geographic_scope": "中国/全球/其他", "period": "2025年或2025年Q1", "population": "统计对象", "epistemic_level": "factual/inferential/speculative"}],
   "key_conclusions": ["结论1", "结论2"],
   "self_check_passed": true,
   "self_check_issues": []

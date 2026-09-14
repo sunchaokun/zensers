@@ -44,6 +44,11 @@ class TestDataPoint:
         assert d == {
             "metric": "增速", "value": "15", "unit": "%",
             "source": "gov.cn", "chapter_id": "", "confidence": 1.0,
+            "sub_section_id": "",
+            "source_url": "", "evidence_id": "", "provenance_id": "",
+            "evidence_excerpt": "", "locator": "",
+            "geographic_scope": "", "period": "", "population": "",
+            "epistemic_level": "factual", "evidence_status": "unverified",
         }
 
     def test_from_dict_filters_extra_fields(self):

@@ -1,11 +1,13 @@
 import pytest
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from dataclasses import asdict
 from pathlib import Path
 
 from src.agents.fixed_agents.report_upgrade.orchestrator import (
     ReportOrchestrator, RetryPolicy, DATAPOINT_FIELDS, _is_vague_source,
+    _checkpoint_filename,
 )
 from src.agents.fixed_agents.report_upgrade.models import (
     ChapterWriteOutput, ChapterReviewOutput, ChapterIssue,
@@ -34,6 +36,644 @@ def make_review_fail(score=40.0):
         passed=False, score=score,
         issues=[ChapterIssue(category="data_support", severity="HIGH", location="p:1", description="无数据", suggestion="补充")],
     )
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_restore_preserves_evidence_id(tmp_path, monkeypatch):
+    task_id = "checkpoint-evidence"
+    checkpoint_dir = tmp_path / "data" / task_id / "checkpoints"
+    checkpoint_dir.mkdir(parents=True)
+    payload = {
+        "chapter_id": "ch1",
+        "title": "规模",
+        "content": "市场规模达到100亿元。",
+        "data_points_used": [{
+            "metric": "市场规模", "value": "100", "unit": "亿元",
+            "source": "官方报告", "chapter_id": "ch1",
+            "source_url": "https://example.test/report",
+            "evidence_id": "ev-checkpoint",
+            "provenance_id": "prov-checkpoint",
+            "geographic_scope": "中国", "period": "2025年",
+            "population": "目标市场", "evidence_status": "verified",
+        }],
+        "key_conclusions": [],
+        "self_check_passed": True,
+        "self_check_issues": [],
+    }
+    (checkpoint_dir / "chapter_1.json").write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+    )
+    monkeypatch.chdir(tmp_path)
+
+    restored = await ReportOrchestrator._restore_from_checkpoint(task_id)
+
+    assert restored is not None
+    assert restored[0][0].data_points_used[0].evidence_id == "ev-checkpoint"
+    assert restored[0][0].data_points_used[0].provenance_id == "prov-checkpoint"
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_write_supports_subsection_ids_on_windows(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    chapter = make_chapter(chapter_id="section_0::sub_0_0")
+    orchestrator = ReportOrchestrator.__new__(ReportOrchestrator)
+    orchestrator._data_registry = MagicMock()
+    orchestrator._data_registry.to_snapshot.return_value = {}
+
+    await orchestrator._checkpoint_chapter("portable-checkpoint", chapter)
+
+    checkpoint_dir = tmp_path / "data" / "portable-checkpoint" / "checkpoints"
+    files = list(checkpoint_dir.glob("chapter_*.json"))
+    assert len(files) == 1
+    assert ":" not in files[0].name
+    payload = json.loads(files[0].read_text(encoding="utf-8"))
+    assert payload["chapter_id"] == "section_0::sub_0_0"
+    assert files[0].name == _checkpoint_filename("section_0::sub_0_0")
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_restore_ignores_stale_sections_from_previous_report(
+    tmp_path, monkeypatch,
+):
+    task_id = "checkpoint-stale-sections"
+    checkpoint_dir = tmp_path / "data" / task_id / "checkpoints"
+    checkpoint_dir.mkdir(parents=True)
+    for chapter_id, title in (("section_0_current", "当前章节"), ("section_0_old", "旧章节")):
+        payload = {
+            "chapter_id": chapter_id,
+            "title": title,
+            "content": f"{title}内容",
+            "data_points_used": [],
+            "key_conclusions": [],
+        }
+        (checkpoint_dir / f"chapter_{chapter_id}.json").write_text(
+            json.dumps(payload, ensure_ascii=False), encoding="utf-8",
+        )
+    monkeypatch.chdir(tmp_path)
+
+    restored = await ReportOrchestrator._restore_from_checkpoint(
+        task_id, allowed_section_ids={"section_0_current"},
+    )
+
+    assert restored is not None
+    assert [chapter.chapter_id for chapter in restored[0]] == ["section_0_current"]
+
+
+@pytest.mark.asyncio
+async def test_data_repair_evidence_is_written_back_to_structured_data_point(orchestrator):
+    repaired_chapter = make_chapter()
+    repaired_chapter.data_points_used[0].source = "官方机构"
+    repair = DataRepairResult(
+        gap=DataGap(chapter_id="ch1", metric="市场规模", context="缺少数据"),
+        found=True,
+        value="2000",
+        unit="亿元",
+        source="官方机构",
+        source_title="官方市场报告",
+        source_url="https://example.test/report",
+        evidence_id="ev-1",
+        provenance_id="prov-1",
+        evidence_excerpt="2024年市场规模为2000亿元",
+        locator="page=4",
+        task_id="task-1",
+        request_id="req-1",
+        geographic_scope="中国",
+        period="2024年",
+        population="新能源汽车市场",
+    )
+    orchestrator._chapter_writer.patch_data.return_value = repaired_chapter
+
+    chapters, patched_ids = await orchestrator._apply_data_repairs(
+        [make_chapter()], [repair], [], {}
+    )
+
+    point = chapters[0].data_points_used[0]
+    assert "ch1" in patched_ids
+    assert point.source_url == "https://example.test/report"
+    assert point.evidence_id == "ev-1"
+    assert point.provenance_id == "prov-1"
+    assert point.evidence_status == "verified"
+    assert point.geographic_scope == "中国"
+    assert point.period == "2024年"
+    assert point.population == "新能源汽车市场"
+
+
+@pytest.mark.asyncio
+async def test_defense_repair_loop_reaudits_after_l3_search_repair(orchestrator, monkeypatch):
+    first_report = {
+        "sections": [],
+        "defense_audit": {
+            "passed": False,
+            "issues": [{
+                "layer": "L3",
+                "code": "missing_source_url",
+                "chapter_id": "ch1",
+                "metric": "市场规模",
+                "message": "缺少来源 URL",
+            }],
+        },
+    }
+    final_report = {
+        "sections": [],
+        "defense_audit": {"passed": True, "issues": [], "layers": {}},
+    }
+    repair = DataRepairResult(
+        gap=DataGap(chapter_id="ch1", metric="市场规模", context="缺少来源 URL"),
+        found=True,
+        value="2000",
+        unit="亿元",
+        source="官方机构",
+        source_title="官方市场报告",
+        source_url="https://example.test/report",
+        evidence_id="ev-1",
+        provenance_id="prov-1",
+        evidence_excerpt="市场规模为2000亿元",
+    )
+
+    monkeypatch.setattr(
+        ReportOrchestrator,
+        "_assemble_final_report",
+        staticmethod(MagicMock(side_effect=[first_report, final_report])),
+    )
+    orchestrator._generate_exec_summary = AsyncMock(return_value="摘要")
+    orchestrator._data_repair_agent.repair_batch = AsyncMock(return_value=[repair])
+    orchestrator._apply_data_repairs = AsyncMock(return_value=([], {"ch1"}))
+
+    result = await orchestrator._run_defense_repair_loop(
+        chapters=[],
+        review=make_global_review(),
+        framework_config={},
+        topic="新能源汽车",
+        task_structure={"sections": []},
+        original_sources=[],
+        quality_report=None,
+        conflicts_summary="无已知数据冲突。",
+    )
+
+    assert result["defense_audit"]["passed"] is True
+    assert result["defense_loop"]["rounds"] == 1
+    orchestrator._data_repair_agent.repair_batch.assert_awaited_once()
+
+
+def test_repair_source_is_added_to_final_source_catalog():
+    repair = DataRepairResult(
+        gap=DataGap(chapter_id="ch1", metric="市场规模", context="缺少数据"),
+        found=True,
+        source="官方机构",
+        source_title="官方市场报告",
+        source_url="https://example.test/report",
+        evidence_id="ev-1",
+        provenance_id="prov-1",
+        evidence_excerpt="市场规模为2000亿元",
+        locator="page=4",
+    )
+
+    merged = ReportOrchestrator._merge_repair_sources(
+        [{"title": "已有来源", "url": "https://existing.test"}], [repair]
+    )
+
+    assert len(merged) == 2
+    assert merged[1] == {
+        "title": "官方市场报告",
+        "url": "https://example.test/report",
+        "type": "web",
+        "evidence_id": "ev-1",
+        "provenance_id": "prov-1",
+        "evidence_excerpt": "市场规模为2000亿元",
+        "locator": "page=4",
+    }
+
+
+def test_defense_audit_builds_deduplicated_l2_l3_search_gaps_only():
+    audit = {
+        "passed": False,
+        "issues": [
+            {
+                "layer": "L3", "code": "missing_source_url",
+                "chapter_id": "ch1", "metric": "市场规模", "message": "缺少 URL",
+            },
+            {
+                "layer": "L3", "code": "unverified_evidence",
+                "chapter_id": "ch1", "metric": "市场规模", "message": "未验证",
+            },
+            {
+                "layer": "L2", "code": "missing_period",
+                "chapter_id": "ch1", "metric": "渗透率", "message": "缺少期间",
+            },
+            {
+                "layer": "L4", "code": "scope_collision",
+                "chapter_id": "ch1", "metric": "市场规模", "message": "口径冲突",
+            },
+            {
+                "layer": "L3", "code": "missing_source_url",
+                "chapter_id": "", "metric": "无章节指标", "message": "无法定位",
+            },
+        ],
+    }
+
+    gaps = ReportOrchestrator._build_defense_search_gaps(audit)
+
+    assert len(gaps) == 2
+    assert {(gap.chapter_id, gap.metric) for gap in gaps} == {
+        ("ch1", "市场规模"), ("ch1", "渗透率")
+    }
+    assert {gap.metric: gap.audit_layer for gap in gaps} == {
+        "市场规模": "L3",
+        "渗透率": "L2",
+    }
+
+
+def test_missing_chapter_coverage_is_promoted_to_p0_search_gap():
+    audit = {
+        "passed": False,
+        "issues": [{
+            "layer": "coverage", "code": "missing_topic",
+            "chapter_id": "summary", "topic": "核心结论",
+            "section_title": "摘要与核心结论", "message": "摘要内容缺失",
+        }],
+    }
+
+    gaps = ReportOrchestrator._build_defense_search_gaps(audit)
+
+    assert len(gaps) == 1
+    assert gaps[0].chapter_id == "summary"
+    assert gaps[0].metric == "核心结论"
+    assert gaps[0].audit_layer == "coverage"
+    assert gaps[0].search_keywords[1] == "摘要与核心结论"
+
+
+def test_post_write_coverage_audit_finds_placeholder_chapter_before_l1_l5():
+    from src.agents.fixed_agents.report_upgrade.models import ChapterWriteOutput
+
+    orchestrator = ReportOrchestrator.__new__(ReportOrchestrator)
+    orchestrator._coverage_checker = MagicMock()
+    chapters = [ChapterWriteOutput(
+        chapter_id="summary", title="摘要与核心结论",
+        content="本章节数据不足，无法生成完整分析",
+    )]
+    issues = orchestrator._build_report_coverage_issues(chapters, {
+        "sections": [{"section_id": "summary", "name": "摘要与核心结论"}],
+    })
+
+    assert issues[0]["layer"] == "coverage"
+    assert issues[0]["code"] == "chapter_content_missing"
+    assert issues[0]["chapter_id"] == "summary"
+
+
+def test_post_write_coverage_audit_uses_manifest_and_detects_missing_leaf():
+    from src.agents.fixed_agents.report_upgrade.models import ChapterWriteOutput
+
+    orchestrator = ReportOrchestrator.__new__(ReportOrchestrator)
+    orchestrator._coverage_checker = MagicMock()
+    chapters = [ChapterWriteOutput(
+        chapter_id="section_0::tam", title="TAM",
+        content="市场规模为100亿元。",
+    )]
+    issues = orchestrator._build_report_coverage_issues(chapters, {
+        # Deliberately provide a misleading parent tree.  The manifest must
+        # remain authoritative for the coverage audit.
+        "sections": [{"section_id": "section_0", "name": "市场规模"}],
+        "section_manifest": [
+            {"section_id": "section_0::tam", "title": "TAM", "role": "analysis"},
+            {"section_id": "section_0::cagr", "title": "CAGR", "role": "analysis"},
+        ],
+    })
+
+    assert [issue["chapter_id"] for issue in issues] == ["section_0::cagr"]
+
+
+def test_post_write_coverage_audit_rejects_failed_chapter_even_with_text():
+    from src.agents.fixed_agents.report_upgrade.models import ChapterWriteOutput
+
+    orchestrator = ReportOrchestrator.__new__(ReportOrchestrator)
+    orchestrator._coverage_checker = MagicMock()
+    chapters = [ChapterWriteOutput(
+        chapter_id="section_0::tam", title="TAM",
+        content="系统已记录该章节失败状态。", status="failed",
+    )]
+    issues = orchestrator._build_report_coverage_issues(chapters, {
+        "section_manifest": [{"section_id": "section_0::tam", "title": "TAM", "role": "analysis"}],
+    })
+
+    assert issues[0]["code"] == "chapter_content_missing"
+
+
+def test_final_assembly_never_serializes_empty_chapter_content():
+    from src.agents.fixed_agents.report_upgrade.models import ChapterWriteOutput, ReviewOutput
+
+    report = ReportOrchestrator._assemble_final_report(
+        chapters=[ChapterWriteOutput(
+            chapter_id="section_0::tam", title="TAM", content="",
+        )],
+        exec_summary="",
+        review=ReviewOutput(overall_score=0),
+        topic="新能源汽车",
+    )
+
+    section = report["sections"][0]
+    assert section["content"]
+    assert section["status"] == "failed"
+
+
+def test_report_writer_restore_and_audit_share_manifest_only_chapter_set():
+    specs = ReportOrchestrator._report_chapter_specs({
+        "sections": [],
+        "section_manifest": [
+            {"section_id": "section_0::tam", "title": "TAM", "role": "analysis"},
+            {"section_id": "synthesis_0", "title": "摘要", "role": "synthesis", "output_slot": "exec_summary"},
+        ],
+    })
+    assert [spec["section_id"] for spec in specs] == ["section_0::tam", "synthesis_0"]
+    assert specs[1]["section_role"] == "synthesis"
+
+
+def test_synthesis_chapters_are_expanded_after_data_chapters():
+    specs = ReportOrchestrator._iter_report_chapter_specs([
+        {"section_id": "summary", "section_name": "摘要", "section_role": "synthesis"},
+        {"section_id": "market", "section_name": "市场规模", "section_role": "analysis"},
+    ])
+
+    assert [spec["section_id"] for spec in specs] == ["market", "summary"]
+
+
+def test_l1_missing_chapter_binding_is_repaired_structurally():
+    chapters = [
+        ChapterWriteOutput(
+            chapter_id="ch1",
+            title="市场规模",
+            content="市场规模达2000亿元",
+            data_points_used=[DataPoint(
+                metric="市场规模", value="2000", unit="亿元", source="官方机构",
+                chapter_id="",
+            )],
+        )
+    ]
+    audit = {
+        "passed": False,
+        "issues": [{
+            "layer": "L1",
+            "code": "missing_chapter_binding",
+            "chapter_id": "ch1",
+            "metric": "市场规模",
+        }],
+    }
+
+    actions = ReportOrchestrator._apply_defense_structural_repairs(chapters, audit)
+
+    assert actions == [{
+        "layer": "L1",
+        "type": "bind_chapter",
+        "chapter_id": "ch1",
+        "metric": "市场规模",
+    }]
+    assert chapters[0].data_points_used[0].chapter_id == "ch1"
+
+
+def test_defense_audit_builds_scoped_l4_rewrite_actions():
+    audit = {
+        "passed": False,
+        "issues": [
+            {
+                "layer": "L4",
+                "code": "scope_collision",
+                "chapter_id": "ch1",
+                "message": "全球和国内口径混用",
+            },
+            {
+                "layer": "L4",
+                "code": "unlabeled_future_value",
+                "chapter_id": "ch2",
+                "message": "2030年未标注预测",
+            },
+            {
+                "layer": "L5",
+                "code": "unresolved_registry_conflict",
+                "chapter_id": "",
+                "message": "存在冲突",
+            },
+        ],
+    }
+
+    actions = ReportOrchestrator._build_defense_rewrite_actions(audit)
+
+    assert actions == [
+        {
+            "layer": "L4",
+            "type": "rewrite_scope",
+            "chapter_id": "ch1",
+            "code": "scope_collision",
+            "instruction": "全球和国内口径混用",
+        },
+        {
+            "layer": "L4",
+            "type": "rewrite_scope",
+            "chapter_id": "ch2",
+            "code": "unlabeled_future_value",
+            "instruction": "2030年未标注预测",
+        },
+    ]
+
+
+def test_unbound_numeric_claim_creates_l3_rewrite_action():
+    actions = ReportOrchestrator._build_defense_rewrite_actions({
+        "issues": [{
+            "layer": "L3",
+            "code": "unbound_numeric_claim",
+            "chapter_id": "market",
+            "message": "正文定量断言 29% 未绑定结构化数据点",
+        }],
+    })
+    assert actions == [{
+        "layer": "L3",
+        "type": "rewrite_scope",
+        "chapter_id": "market",
+        "code": "unbound_numeric_claim",
+        "instruction": "正文定量断言 29% 未绑定结构化数据点",
+    }]
+
+
+def test_content_safety_repairs_remove_unbound_numbers_and_split_scopes():
+    chapter = ChapterWriteOutput(
+        chapter_id="market",
+        title="市场",
+        content="全球市场增长29%，国内市场增长15%。",
+        data_points_used=[DataPoint(
+            metric="国内增长", value="15", unit="%", source="来源",
+            chapter_id="market",
+        )],
+    )
+    repaired = ReportOrchestrator._apply_defense_content_safety_repairs(
+        [chapter], {
+            "issues": [
+                {"chapter_id": "market", "code": "unbound_numeric_claim"},
+                {"chapter_id": "market", "code": "scope_collision"},
+            ],
+        },
+    )
+    assert repaired
+    assert "29%" not in chapter.content
+    assert "当前数据尚缺少可核验的结构化证据" in chapter.content
+
+
+def test_l5_action_comes_from_structured_registry_conflict():
+    registry = DataRegistry()
+    registry.register("市场规模", "2000", "亿元", "ch1", "来源A")
+    registry.register("市场规模", "1800", "亿元", "ch2", "来源B")
+    audit = {
+        "passed": False,
+        "issues": [{
+            "layer": "L5",
+            "code": "unresolved_registry_conflict",
+            "message": "存在未解决冲突",
+        }],
+    }
+
+    actions = ReportOrchestrator._build_defense_conflict_actions(
+        audit, registry.get_conflicts()
+    )
+
+    assert actions == [{
+        "layer": "L5",
+        "type": "resolve_conflict",
+        "metric": "市场规模",
+    }]
+
+
+def test_l5_loop_rejects_unverified_conflict_fallback():
+    resolution = DataConflictResolution(
+        conflict=DataConflict(metric="市场规模", entries=[]),
+        canonical_value="2000",
+        canonical_unit="亿元",
+        canonical_source="来源A",
+        reason="No search skill available, using first entry",
+        chapters_to_update=["ch2"],
+    )
+
+    assert ReportOrchestrator._is_safe_conflict_resolution(resolution) is False
+
+
+@pytest.mark.asyncio
+async def test_defense_repair_loop_resolves_registry_conflict(orchestrator, monkeypatch):
+    orchestrator._data_registry.register("市场规模", "2000", "亿元", "ch1", "来源A")
+    orchestrator._data_registry.register("市场规模", "1800", "亿元", "ch2", "来源B")
+    first_report = {
+        "sections": [],
+        "defense_audit": {
+            "passed": False,
+            "issues": [{
+                "layer": "L5",
+                "code": "unresolved_registry_conflict",
+                "message": "存在未解决冲突",
+            }],
+        },
+    }
+    final_report = {
+        "sections": [],
+        "defense_audit": {"passed": True, "issues": [], "layers": {}},
+    }
+    resolution = DataConflictResolution(
+        conflict=orchestrator._data_registry.get_conflicts()[0],
+        canonical_value="2000",
+        canonical_unit="亿元",
+        canonical_source="来源A",
+        reason="官方来源优先",
+        chapters_to_update=["ch2"],
+    )
+    monkeypatch.setattr(
+        ReportOrchestrator,
+        "_assemble_final_report",
+        staticmethod(MagicMock(side_effect=[first_report, final_report])),
+    )
+    orchestrator._generate_exec_summary = AsyncMock(return_value="摘要")
+    orchestrator._conflict_resolver.resolve = AsyncMock(return_value=resolution)
+    orchestrator._apply_data_repairs = AsyncMock(return_value=([], {"ch2"}))
+
+    result = await orchestrator._run_defense_repair_loop(
+        chapters=[],
+        review=make_global_review(),
+        framework_config={},
+        topic="新能源汽车",
+        task_structure={"sections": []},
+        original_sources=[],
+        quality_report=None,
+        conflicts_summary="存在未解决冲突",
+    )
+
+    assert result["defense_audit"]["passed"] is True
+    orchestrator._conflict_resolver.resolve.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_none_conflict_resolution_is_ignored(orchestrator):
+    chapters, patched = await orchestrator._apply_data_repairs(
+        chapters=[],
+        repair_results=[],
+        conflict_resolutions=[None],  # resolver failure must not abort the report
+        framework_config={},
+    )
+
+    assert chapters == []
+    assert patched == set()
+
+
+def test_resolve_chapter_id_accepts_multi_location_issue(orchestrator):
+    chapters = [
+        ChapterWriteOutput(chapter_id="ch1", title="市场规模", content="内容"),
+        ChapterWriteOutput(chapter_id="ch2", title="竞争格局", content="内容"),
+    ]
+
+    assert orchestrator._resolve_chapter_id(["ch2", "ch1"], chapters) == "ch2"
+
+
+@pytest.mark.asyncio
+async def test_phase4_batches_structured_repairs_per_chapter(orchestrator, monkeypatch):
+    """Several discovered metrics must result in one chapter patch call."""
+    chapter = make_chapter()
+    issues = [
+        ReviewIssue(
+            dimension="data_support", severity="HIGH", location="ch1",
+            description="缺少市场规模", evidence="补充",
+        ),
+        ReviewIssue(
+            dimension="data_support", severity="HIGH", location="ch1",
+            description="缺少增长率", evidence="补充",
+        ),
+    ]
+    review = make_global_review(issues=issues)
+
+    monkeypatch.setattr(
+        ReportOrchestrator,
+        "_diagnose_issue_source",
+        staticmethod(lambda issue, raw: SimpleNamespace(source_layer="L1_missing")),
+    )
+    monkeypatch.setattr(
+        "src.core.entity_resolver.get_entity_resolver",
+        lambda: SimpleNamespace(resolve=AsyncMock(return_value=[])),
+    )
+    orchestrator._try_fill_data_gap = AsyncMock(side_effect=[
+        {"source": "source-a", "data": {"metric": "市场规模", "value": "100"}},
+        {"source": "source-b", "data": {"metric": "增长率", "value": "10%"}},
+    ])
+    orchestrator._extract_chapter_data = MagicMock(return_value=({}, ""))
+    orchestrator._find_section_spec = MagicMock(return_value={"section_id": "ch1"})
+    orchestrator._aggregated_result = MockAggregationResult()
+    orchestrator._skill_registry = None
+    orchestrator._acquire_evidence_batch = AsyncMock(return_value=[])
+    orchestrator._apply_data_repairs = AsyncMock(return_value=([chapter], set()))
+    monkeypatch.setattr(
+        ReportOrchestrator, "_build_anchor_patch_instructions",
+        staticmethod(lambda *args, **kwargs: []),
+    )
+    orchestrator._chapter_writer.patch_data.return_value = chapter
+
+    await orchestrator._phase4_fix_and_optimize(
+        [chapter], review, {}, "新能源汽车",
+    )
+
+    assert orchestrator._try_fill_data_gap.await_count == 2
+    assert orchestrator._chapter_writer.patch_data.await_count == 1
+    instructions = orchestrator._chapter_writer.patch_data.await_args.kwargs["patch_instructions"]
+    assert len(instructions) == 2
 
 
 def make_global_review(score=75.0, issues=None):
@@ -200,17 +840,15 @@ class TestReportOrchestratorExtractChapterData:
 
 
 class TestReportOrchestratorExtractValidateDataPoints:
-    def test_extracts_from_content_chinese_units(self, orchestrator):
+    def test_does_not_promote_unbound_content_numbers(self, orchestrator):
         ch = ChapterWriteOutput(chapter_id="ch1", title="测试", content="市场规模达到2000亿元，增速15%")
         dps = orchestrator._extract_and_validate_data_points(ch)
-        values = [dp.value for dp in dps]
-        assert "2000" in values
+        assert dps == []
 
-    def test_extracts_from_content_english_units(self, orchestrator):
+    def test_does_not_promote_unbound_english_numbers(self, orchestrator):
         ch = ChapterWriteOutput(chapter_id="ch1", title="测试", content="Revenue reached 5.2 billion USD")
         dps = orchestrator._extract_and_validate_data_points(ch)
-        values = [dp.value for dp in dps]
-        assert "5.2" in values
+        assert dps == []
 
     def test_no_duplicate_extraction(self, orchestrator):
         dp = DataPoint(metric="市场规模", value="2000", unit="亿元", source="iimedia.cn")
@@ -244,7 +882,10 @@ class TestReportOrchestratorAssembleFinalReport:
         review = make_global_review()
         sources = [{"title": "来源1", "url": "https://a.com"}]
         result = orchestrator._assemble_final_report(chapters, "摘要", review, "主题", sources)
-        assert result["sources"] == sources
+        assert result["sources"][0]["title"] == "来源1"
+        assert result["sources"][0]["url"] == "https://a.com"
+        assert result["sources"][0]["evidence_id"].startswith("ev_")
+        assert result["sources"][0]["provenance_id"].startswith("prov_")
 
     def test_assemble_without_sources(self, orchestrator):
         chapters = [make_chapter()]
@@ -305,7 +946,9 @@ class TestReportOrchestratorVerifyDownstreamConsistency:
         )
         import logging
         with caplog.at_level(logging.WARNING):
-            orchestrator._verify_downstream_consistency([patched_ch, other_ch], {"ch1"})
+            result = orchestrator._verify_downstream_consistency([patched_ch, other_ch], {"ch1"})
+        assert result["blocking"] is True
+        assert result["stale_chapter_ids"] == ["ch2"]
         assert len(caplog.records) == 1
 
     def test_no_warning_when_consistent(self, orchestrator, caplog):
@@ -318,7 +961,9 @@ class TestReportOrchestratorVerifyDownstreamConsistency:
         )
         import logging
         with caplog.at_level(logging.WARNING):
-            orchestrator._verify_downstream_consistency([patched_ch, other_ch], {"ch1"})
+            result = orchestrator._verify_downstream_consistency([patched_ch, other_ch], {"ch1"})
+        assert result["blocking"] is False
+        assert result["stale_chapter_ids"] == []
         assert len(caplog.records) == 0
 
 
@@ -358,6 +1003,16 @@ class TestIsVagueSource:
         assert _is_vague_source("中国汽车工业协会") is False
         assert _is_vague_source("乘联会") is False
 
+    def test_list_source_is_normalized_without_crashing(self):
+        grounded = ReportOrchestrator._ground_data_point_sources(
+            [{"metric": "市场规模", "value": "100", "source": ["来源A", "来源B"]}],
+            [{"title": "来源A", "url": "https://example.test/a"}],
+            chapter_id="ch1",
+        )
+
+        assert grounded[0]["chapter_id"] == "ch1"
+        assert isinstance(grounded[0]["source"], str)
+
 
 class TestCleanKeyFindings:
     def test_strips_markdown(self, orchestrator):
@@ -378,11 +1033,13 @@ class TestCleanKeyFindings:
 
 
 class TestGroundDataPointSources:
-    def test_vague_source_replaced(self, orchestrator):
+    def test_vague_source_is_not_replaced_by_unrelated_source(self, orchestrator):
         dps = [{"metric": "销量", "value": "1200", "unit": "万辆", "source": "行业综合数据"}]
         sources = [{"title": "中国汽车工业协会", "url": "https://caam.org.cn", "type": "web"}]
         result = orchestrator._ground_data_point_sources(dps, sources)
-        assert result[0]["source"] == "中国汽车工业协会"
+        assert result[0]["source"] == ""
+        assert result[0]["source_url"] == ""
+        assert result[0]["evidence_status"] == "unverified"
 
     def test_specific_source_kept(self, orchestrator):
         dps = [{"metric": "销量", "value": "1200", "unit": "万辆", "source": "iimedia.cn"}]
@@ -393,7 +1050,8 @@ class TestGroundDataPointSources:
     def test_no_sources_available(self, orchestrator):
         dps = [{"metric": "销量", "value": "1200", "unit": "万辆", "source": "行业综合数据"}]
         result = orchestrator._ground_data_point_sources(dps, [])
-        assert result[0]["source"] == "行业综合数据"
+        assert result[0]["source"] == ""
+        assert result[0]["evidence_status"] == "unverified"
 
 
 class TestAssembleFinalReportP3P5:
@@ -427,7 +1085,8 @@ class TestAssembleFinalReportP3P5:
         )
         sources = [{"title": "乘联会", "url": "https://cpcaauto.com", "type": "web"}]
         result = orchestrator._assemble_final_report([ch], "摘要", make_global_review(), "主题", sources)
-        assert result["sections"][0]["data_points"][0]["source"] == "乘联会"
+        assert result["sections"][0]["data_points"][0]["source"] == ""
+        assert result["sections"][0]["data_points"][0]["evidence_status"] == "unverified"
 
 
 class TestAuditFixesB1toB8:
@@ -464,7 +1123,9 @@ class TestAuditFixesB1toB8:
         dps = [{"metric": "测试", "value": "1", "unit": "个", "source": "行业综合数据"}]
         sources = [{"title": "来源", "href": "https://a.com"}]
         result = ReportOrchestrator._ground_data_point_sources(dps, sources)
-        assert result[0]["source"] == "来源"
+        assert result[0]["source"] == ""
+        assert result[0]["source_url"] == ""
+        assert result[0]["evidence_status"] == "unverified"
 
     def test_extract_chapter_data_tracks_matched_key(self, orchestrator):
         agg = MagicMock()
@@ -621,3 +1282,33 @@ class TestBaseContentExtraction:
         agg.layered_content = {"analysis": {"key1": "分析Agent的字符串输出"}}
         chapter_data, _ = orchestrator._extract_chapter_data(agg, "ch1", [])
         assert chapter_data.get("content") == "分析Agent的字符串输出"
+
+
+class TestSourceEvidenceIdentity:
+    def test_legacy_sources_receive_stable_evidence_and_provenance_ids(self):
+        sources = [{
+            "title": "Legacy source",
+            "url": "https://example.test/report",
+            "snippet": "A cited excerpt",
+        }]
+        first = ReportOrchestrator._ensure_source_evidence_identity(sources, task_id="task-1")
+        second = ReportOrchestrator._ensure_source_evidence_identity(sources, task_id="task-1")
+        assert first[0]["evidence_id"].startswith("ev_")
+        assert first[0]["provenance_id"].startswith("prov_")
+        assert first[0]["evidence_id"] == second[0]["evidence_id"]
+        assert first[0]["provenance_id"] == second[0]["provenance_id"]
+
+    def test_existing_ids_are_preserved_and_data_point_can_be_grounded(self):
+        source = {
+            "title": "Known source",
+            "url": "https://example.test/known",
+            "evidence_id": "ev_existing",
+            "provenance_id": "prov_existing",
+        }
+        normalized = ReportOrchestrator._ensure_source_evidence_identity([source], task_id="task-1")
+        assert normalized[0]["evidence_id"] == "ev_existing"
+        assert normalized[0]["provenance_id"] == "prov_existing"
+        point = [{"metric": "m", "value": "1", "source_url": source["url"]}]
+        grounded = ReportOrchestrator._ground_data_point_sources(point, normalized)
+        assert grounded[0]["evidence_id"] == "ev_existing"
+        assert grounded[0]["provenance_id"] == "prov_existing"

@@ -14,7 +14,10 @@
 """
 import asyncio
 import copy
+import hashlib
+import json
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -29,6 +32,7 @@ from src.core.storage import ResearchResultStore, ResearchStatus
 # Harness constraint layer for agent output validation
 from src.core.harness import check_agent_output
 from src.core.orchestrator.execution.task_utils import safe_create_task
+from src.core.manifest_contract import ManifestContractError
 
 
 from .control import (
@@ -47,6 +51,7 @@ from .coordinator import (
     CoordinatorConfig,
     TaskOptions,
 )
+from .evidence_scope import EvidenceScope
 
 if TYPE_CHECKING:
     from src.core.agents.base import BaseAgent
@@ -58,6 +63,32 @@ if TYPE_CHECKING:
 from src.core.content_lock import SectionState  # R-FIX-10: 用于 mark_section_state
 
 logger = logging.getLogger(__name__)
+
+
+def _canonical_runtime_section_id(section_id: Any) -> str:
+    """Collapse legacy ``section_N_<aspect>`` IDs to ``section_N``."""
+    value = str(section_id or "").strip()
+    match = re.match(r"^(section|synthesis)_(\d+)(?:_|$)", value)
+    return f"{match.group(1)}_{match.group(2)}" if match else value
+
+
+def _evidence_record_key(record: Any, kind: str) -> str:
+    """Stable identity for evidence carried forward between batches."""
+    if not isinstance(record, dict):
+        return f"{kind}:value:{str(record)}"
+    for field in ("evidence_id", "provenance_id", "data_id"):
+        value = str(record.get(field) or "").strip()
+        if value:
+            return f"{kind}:{field}:{value}"
+    url = str(record.get("url") or record.get("source_url") or "").strip()
+    title = str(record.get("title") or record.get("name") or "").strip()
+    content = record.get("content", record.get("data", ""))
+    try:
+        content_text = json.dumps(content, ensure_ascii=False, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        content_text = str(content)
+    payload = f"{url}\x1f{title}\x1f{content_text}"
+    return f"{kind}:hash:{hashlib.sha256(payload.encode('utf-8')).hexdigest()}"
 
 
 class AgentCategory(Enum):
@@ -228,11 +259,13 @@ class ExecutionEngine:
         message_bus: "MessageBus",
         shared_memory: "SharedMemory",
         enable_quality_control: bool = True,  # 新增：是否启用质量控制
+        search_gateway: Any = None,
     ):
         self.config = config
         self.message_bus = message_bus
         self._shared_memory = shared_memory
         self.shared_memory = shared_memory
+        self.search_gateway = search_gateway
         
         # 控制机制
         self.concurrency = ConcurrencyManager(ConcurrencyConfig(
@@ -251,7 +284,9 @@ class ExecutionEngine:
         
         self.background = BackgroundExecutor(BackgroundExecutorConfig(
             max_concurrent_tasks=config.max_concurrent,
-            default_timeout=config.default_timeout,
+            # Long-running research must be governed by session/task control,
+            # not an implicit background timeout.
+            default_timeout=None,
         ))
         
         # 使用适度的验证器配置，确保内容质量
@@ -492,7 +527,7 @@ class ExecutionEngine:
             )
             
             await self._coordinator.setup()
-            
+
             # Use scheduler-driven execution (Path B)
             from .scheduler import ExecutionScheduler
             scheduler = ExecutionScheduler()
@@ -723,6 +758,128 @@ class ExecutionEngine:
         conclusion_content = None
         all_data_points = []
         all_sources = []
+
+        # When the router provides a frozen manifest, it is the only source
+        # of reportable chapter identity and order.  Results are joined by
+        # exact section_id; missing results remain visible as failed chapter
+        # records so the report writer and L0 can distinguish omission from
+        # successful delivery.
+        section_manifest = requirement.get("section_manifest") or []
+        if isinstance(section_manifest, list) and section_manifest:
+            manifest_ids = [
+                _canonical_runtime_section_id(item.get("section_id"))
+                for item in section_manifest
+                if isinstance(item, dict) and item.get("section_id")
+            ]
+            duplicate_manifest_ids = {
+                section_id for section_id in manifest_ids
+                if manifest_ids.count(section_id) > 1
+            }
+            if duplicate_manifest_ids:
+                raise ManifestContractError(
+                    "duplicate_section_id", {"ids": sorted(duplicate_manifest_ids)}
+                )
+            planned_ids = set(manifest_ids)
+            results_by_section = {}
+            for result in previous_results:
+                if not isinstance(result, dict):
+                    continue
+                result_section_id = result.get("section_id") or result.get("_section_id")
+                if not result_section_id:
+                    continue
+                result_section_id = _canonical_runtime_section_id(result_section_id)
+                if result_section_id not in planned_ids:
+                    raise ManifestContractError(
+                        "unknown_section_id", {"ids": [result_section_id]}
+                    )
+                # First result wins only for duplicate successful writes; a
+                # later non-empty result may replace an empty/failed record.
+                content = result.get("content") or result.get("result") or result.get("output") or ""
+                if isinstance(content, dict):
+                    content = str(content)
+                old = results_by_section.get(result_section_id)
+                if old is None or (not old.get("content") and content):
+                    results_by_section[result_section_id] = {
+                        "result": result,
+                        "content": content if isinstance(content, str) else "",
+                    }
+                if isinstance(result.get("data_points"), list):
+                    all_data_points.extend(result["data_points"])
+                if isinstance(result.get("sources"), list):
+                    all_sources.extend(result["sources"])
+
+            manifest_body_sections = []
+            manifest_exec_summary = None
+            manifest_conclusion = None
+            manifest_missing = []
+            for item in section_manifest:
+                if not isinstance(item, dict):
+                    continue
+                section_id = _canonical_runtime_section_id(item.get("section_id", ""))
+                if not section_id:
+                    continue
+                title = str(item.get("title") or item.get("display_title") or section_id)
+                role = str(item.get("role") or "analysis").lower()
+                joined = results_by_section.get(section_id)
+                content = joined.get("content", "") if joined else ""
+                source_result = joined.get("result", {}) if joined else {}
+                section_record = {
+                    "id": section_id,
+                    "section_id": section_id,
+                    "title": title,
+                    "content": content,
+                    "type": role,
+                    "status": "ready" if content.strip() and source_result.get("success", True) else "failed",
+                    "error": "" if content.strip() else "planned_section_result_missing",
+                    "required_metrics": item.get("required_metrics", []),
+                }
+                if not content.strip():
+                    manifest_missing.append(section_id)
+                output_slot = str(item.get("output_slot") or "").strip().lower()
+                if output_slot not in {"body", "exec_summary", "conclusion"}:
+                    # Compatibility for manifests created before output_slot;
+                    # identity remains exact section_id even in this fallback.
+                    title_lower = title.lower()
+                    if role in {"summary", "executive_summary"} or "摘要" in title or "summary" in title_lower:
+                        output_slot = "exec_summary"
+                    elif role == "conclusion" or "结论" in title or "conclusion" in title_lower or "总结" in title:
+                        output_slot = "conclusion"
+                    else:
+                        output_slot = "body"
+                if output_slot == "exec_summary":
+                    manifest_exec_summary = content or manifest_exec_summary
+                elif output_slot == "conclusion":
+                    manifest_conclusion = content or manifest_conclusion
+                else:
+                    # Every planned body chapter remains visible.  A failed
+                    # result is represented by status/error, never removed
+                    # from the report input by a truthiness filter.
+                    manifest_body_sections.append(section_record)
+
+            logger.info(
+                "[Report] Manifest assembly: planned=%d actual=%d missing=%d",
+                len([i for i in section_manifest if isinstance(i, dict) and i.get("section_id")]),
+                len(results_by_section), len(manifest_missing),
+            )
+            return {
+                "action": "produce_document",
+                "task_id": requirement.get("task_id", f"task_{datetime.now().strftime('%Y%m%d_%H%M%S')}"),
+                "topic": requirement.get("topic"),
+                "sections": manifest_body_sections,
+                "exec_summary": manifest_exec_summary,
+                "conclusion": manifest_conclusion,
+                "section_manifest": section_manifest,
+                "missing_section_ids": manifest_missing,
+                "output_format": requirement.get("output_format", "docx"),
+                "research_result": {
+                    "topic": requirement.get("topic"),
+                    "sections": manifest_body_sections,
+                    "data_points": all_data_points,
+                    "sources": all_sources,
+                    "section_manifest": section_manifest,
+                    "missing_section_ids": manifest_missing,
+                },
+            }
         
         for r in previous_results:
             if not r.get("success"):
@@ -923,6 +1080,73 @@ class ExecutionEngine:
             from .scheduler import ExecutionState
         except ImportError:
             ExecutionState = None
+
+        _memory_scope_token = None
+        _subscribed_data_handlers = []
+
+        # Keep one authoritative semantic mapping for boundary checks in the
+        # scheduler path. Scheduler agent ids (for example phase_1_agent_0)
+        # are opaque; deriving an aspect from them is not reliable.
+        agent_aspect_map = {}
+        agent_section_map = {}
+        _requirement_aspects = requirement.get("aspects", []) if isinstance(requirement, dict) else []
+        _dependent_names = {
+            "summary", "conclusion", "executive_summary", "key_insights",
+            "research_summary", "research_conclusion", "synthesis",
+            "key_findings", "insights", "synthesis_analysis", "core_findings",
+            "key_discoveries", "strategic_intent", "strategic intent",
+            "战略意图", "战略意图推断", "执行摘要", "摘要", "结论",
+        }
+        _data_aspects = [
+            str(_aspect) for _aspect in _requirement_aspects
+            if str(_aspect).strip().lower() not in _dependent_names
+        ]
+        _aspect_section_map = {
+            aspect: f"section_{index}"
+            for index, aspect in enumerate(_data_aspects)
+        }
+        _synthesis_index = 0
+        for _agent in agents:
+            _config = getattr(_agent, "config", {}) or {}
+            _context = getattr(_agent, "_context", {}) or {}
+            if not _context:
+                _context = _config.get("context", {}) if isinstance(_config, dict) else {}
+            _section_ids = list(getattr(_agent, "section_ids", []) or [])
+            _metadata = (_config.get("section_metadata", {})
+                         if isinstance(_config, dict) else {}) or {}
+            _explicit_section_id = (
+                _context.get("section_id")
+                or getattr(_agent, "section_id", "")
+                or (_section_ids[0] if _section_ids else "")
+                or _metadata.get("section_id", "")
+            )
+            _aspect = (
+                _context.get("aspect")
+                or _metadata.get("title")
+                or getattr(_agent, "aspect", "")
+                or _explicit_section_id
+            )
+            if (not _aspect or _aspect == _agent.agent_id or
+                    (_agent.agent_id.startswith("phase_") and "_agent_" in _agent.agent_id)):
+                try:
+                    _agent_index = int(_agent.agent_id.rsplit("_", 1)[-1])
+                except (ValueError, AttributeError):
+                    _agent_index = -1
+                if 0 <= _agent_index < len(_requirement_aspects):
+                    _aspect = _requirement_aspects[_agent_index]
+            if _aspect:
+                agent_aspect_map[_agent.agent_id] = _aspect
+                if _explicit_section_id:
+                    agent_section_map[_agent.agent_id] = _canonical_runtime_section_id(_explicit_section_id)
+                elif str(_aspect).strip().lower() in _dependent_names:
+                    agent_section_map[_agent.agent_id] = f"synthesis_{_synthesis_index}"
+                    _synthesis_index += 1
+                else:
+                    agent_section_map[_agent.agent_id] = _aspect_section_map.get(
+                        str(_aspect), f"section_{len(agent_section_map)}"
+                    )
+        self._agent_aspect_map = agent_aspect_map
+        self._agent_section_map = agent_section_map
         
         # 初始化结果
         result = ExecutionResult(
@@ -953,12 +1177,22 @@ class ExecutionEngine:
             
             await self._coordinator.setup()
             
+            # Bind the execution scope before subscribing to the shared data
+            # bus so concurrent runs receive only their own canonical events.
+            from src.core.communication import set_memory_scope
+            _memory_scope = requirement.get("session_id") or requirement.get("task_id", "")
+            _memory_scope_token = set_memory_scope(_memory_scope)
+
             # B-FIX-4: subscribe to MessageBus data events
             from src.core.orchestrator.execution.data_collector import DataCollector
-            self._data_collector = DataCollector()
+            self._data_collector = DataCollector(scope=_memory_scope)
             if self.message_bus:
-                await self.message_bus.subscribe("data.canonical.updated", self._data_collector.on_canonical_updated)
-                await self.message_bus.subscribe("data.conflict.detected", self._data_collector.on_conflict_detected)
+                _canonical_handler = self._data_collector.on_canonical_updated
+                _conflict_handler = self._data_collector.on_conflict_detected
+                await self.message_bus.subscribe("data.canonical.updated", _canonical_handler)
+                _subscribed_data_handlers.append(("data.canonical.updated", _canonical_handler))
+                await self.message_bus.subscribe("data.conflict.detected", _conflict_handler)
+                _subscribed_data_handlers.append(("data.conflict.detected", _conflict_handler))
             
             # P1-R2修复：使用调度器的批次结果驱动执行
             # 生成执行批次（基于依赖关系的拓扑排序）
@@ -973,6 +1207,8 @@ class ExecutionEngine:
                 logger.info(f"  批次{i+1}: {batch}")
             
             # S-FIX-2/3: init canonical data registry for cross-agent data sharing
+            # Bind canonical SharedMemory operations to this research session;
+            # the same Engine may execute multiple sessions concurrently.
             from src.core.data.canonical_registry import CanonicalDataRegistry
             self._canonical_registry = CanonicalDataRegistry()
             self._active_canonical_data: Dict = {}
@@ -1107,7 +1343,7 @@ class ExecutionEngine:
                                 f"[批次{batch_index + 1}] Agent {agent_id} aspect '{agent_aspect}' "
                                 f"cached, skipping execution ({len(content)} chars)"
                             )
-                            section_id = self._get_section_id_from_agent(agent)
+                            section_id = _canonical_runtime_section_id(self._get_section_id_from_agent(agent))
                             completed_results.append({
                                 "success": True,
                                 "agent_id": agent_id,
@@ -1122,7 +1358,7 @@ class ExecutionEngine:
                             continue
                         # 检查内容锁（如果启用）
                         if content_lock is not None:
-                            section_id = self._get_section_id_from_agent(agent)
+                            section_id = _canonical_runtime_section_id(self._get_section_id_from_agent(agent))
                             if not section_id and hasattr(self, '_agent_id_to_section_id'):
                                 section_id = self._agent_id_to_section_id.get(agent_id, "")
                             can_execute, lock_reason = content_lock.can_execute(section_id)
@@ -1154,7 +1390,7 @@ class ExecutionEngine:
                             if content_lock is not None:
                                 agent = scheduler.get_agent_by_id(agent_result.get("agent_id", ""))
                                 if agent:
-                                    section_id = self._get_section_id_from_agent(agent)
+                                    section_id = _canonical_runtime_section_id(self._get_section_id_from_agent(agent))
                                     if not section_id and hasattr(self, '_agent_id_to_section_id'):
                                         section_id = self._agent_id_to_section_id.get(agent_id, "")
                                     agent_result["_section_id"] = section_id
@@ -1179,7 +1415,9 @@ class ExecutionEngine:
                         
                         # CR-FIX-1: cache hit must also pass quality check
                         if self.enable_quality_control and batch_agent_originals:
-                            cache_checker = self._select_checker_for_batch(batch_results)
+                            cache_checker = self._select_checker_for_batch(
+                                batch_results, batch_agent_originals
+                            )
                             if cache_checker:
                                 import datetime as _datetime
                                 _cp = []
@@ -1201,7 +1439,11 @@ class ExecutionEngine:
                                 _cd = {"content":_combined,"sources":_sources,"data_points":_dps,
                                        "quality_metadata":{"data_volume":len(_dps)or len(_sources),
                                                            "sources":_sources,"quality_score":50.0}}
-                                _qr = cache_checker.check(_cd, {"batch_index":batch_index})
+                                _qr = await asyncio.to_thread(
+                                    cache_checker.check,
+                                    _cd,
+                                    {"batch_index": batch_index},
+                                )
                                 if not _qr.passed:
                                     logger.warning(f"Cached results failed QC for batch {batch_index+1}, re-executing")
                                     batch_results = await self._execute_agents_batch(
@@ -1211,14 +1453,17 @@ class ExecutionEngine:
                                     for agent_result in batch_results:
                                         agent_id = agent_result.get("agent_id", "")
                                         agent = scheduler.get_agent_by_id(agent_id)
-                                        section_id = self._get_section_id_from_agent(agent) if agent else self._get_section_id_from_agent_id(agent_id)
+                                        section_id = _canonical_runtime_section_id(
+                                            self._get_section_id_from_agent(agent)
+                                            if agent else self._get_section_id_from_agent_id(agent_id)
+                                        )
                                         if not section_id or section_id == agent_id or (len(section_id) < 5 and "_agent_" in section_id):
                                             _aspects = requirement.get("aspects", []) if isinstance(requirement, dict) else []
                                             if _aspects and "_agent_" in agent_id:
                                                 try:
                                                     _idx = int(agent_id.split("_agent_")[-1])
                                                     if 0 <= _idx < len(_aspects):
-                                                        section_id = str(_aspects[_idx])
+                                                        section_id = f"section_{_idx}"
                                                 except (ValueError, IndexError):
                                                     pass
                                         agent_result["section_id"] = section_id
@@ -1303,7 +1548,10 @@ class ExecutionEngine:
                     agent_id = agent_result.get("agent_id", "")
                     # 注入 section_id 供下游聚合 key 映射使用
                     agent = scheduler.get_agent_by_id(agent_id)
-                    section_id = self._get_section_id_from_agent(agent) if agent else self._get_section_id_from_agent_id(agent_id)
+                    section_id = _canonical_runtime_section_id(
+                        self._get_section_id_from_agent(agent)
+                        if agent else self._get_section_id_from_agent_id(agent_id)
+                    )
                     # Fallback: when section_id is empty or meaningless (e.g. "2_agent" from phase_2_agent_0),
                     # use aspect list index mapping: phase_1/2_agent_{i} -> aspects[i]
                     if not section_id or section_id == agent_id or (len(section_id) < 5 and "_agent_" in section_id):
@@ -1312,7 +1560,7 @@ class ExecutionEngine:
                             try:
                                 _idx = int(agent_id.split("_agent_")[-1])
                                 if 0 <= _idx < len(_aspects):
-                                    section_id = str(_aspects[_idx])
+                                    section_id = f"section_{_idx}"
                             except (ValueError, IndexError):
                                 pass
                     agent_result["section_id"] = section_id
@@ -1419,7 +1667,7 @@ class ExecutionEngine:
                 # Specialized quality checkers: route to appropriate checker based on batch content
                 if self.enable_quality_control and batch_quality:
                     try:
-                        checker = self._select_checker_for_batch(batch_results)
+                        checker = self._select_checker_for_batch(batch_results, batch_agents)
                         if checker:
                             quality_context = {
                                 "batch_index": batch_index,
@@ -1457,7 +1705,11 @@ class ExecutionEngine:
                                      "quality_score": 50.0,
                                  },
                             }
-                            quality_result = checker.check(
+                            # Checkers may call the synchronous LLM bridge.
+                            # Keep that work off the event loop so agent tasks,
+                            # heartbeats and cancellation remain responsive.
+                            quality_result = await asyncio.to_thread(
+                                checker.check,
                                 check_data,
                                 quality_context,
                             )
@@ -1475,6 +1727,35 @@ class ExecutionEngine:
                                         r["quality_score"] = quality_result.score
                                 # Unified retry: handle infrastructure + quality failures
                                 _max_retries = getattr(self.config, 'max_retries', 1)
+                                # A calibration-only batch cannot improve when
+                                # upstream produced no evidence. Retrying the
+                                # same empty input only adds LLM latency and
+                                # can consume the whole E2E timeout budget.
+                                _is_calibration_only = bool(batch_agents) and all(
+                                    self.classify_agent(a) == AgentCategory.CALIBRATION
+                                    for a in batch_agents
+                                )
+                                _is_data_collection_only = bool(batch_agents) and all(
+                                    self.classify_agent(a) == AgentCategory.DATA_COLLECTION
+                                    for a in batch_agents
+                                )
+                                _is_phase1_evidence = bool(batch_agents) and all(
+                                    str(getattr(a, "agent_id", "")).startswith("phase_1_")
+                                    for a in batch_agents
+                                ) and bool(all_data_points or all_sources)
+                                if _is_calibration_only and not all_data_points and not all_sources:
+                                    _max_retries = 0
+                                # Collection quality is evaluated after the
+                                # search result is already available.  When a
+                                # collection batch has evidence, re-running
+                                # the same Agent only repeats search and can
+                                # block calibration/report stages.  Preserve
+                                # the evidence and continue; retry only when
+                                # the collection produced no evidence at all.
+                                if _is_data_collection_only and (all_data_points or all_sources):
+                                    _max_retries = 0
+                                if _is_phase1_evidence:
+                                    _max_retries = 0
                                 _retry_count = 0
                                 _current_batch = batch_results
                                 _current_agents = list(batch_agents)
@@ -1494,7 +1775,11 @@ class ExecutionEngine:
                                     _retry_agents = [_fa["agent"] for _fa in _failed]
                                     _retry_results = await self._execute_agents_batch(
                                         _retry_agents, requirement, all_results, scheduler,
-                                        f"batch_{batch_index+1}_retry{_retry_count}"
+                                        f"batch_{batch_index+1}_retry{_retry_count}",
+                                        # Quality retries are still Agent work;
+                                        # never inject the historical 120s
+                                        # per-Agent deadline here.
+                                        timeout_override=None,
                                     )
                                     _current_batch = self._merge_retry_results(_current_batch, _retry_results)
                                 else:
@@ -1644,6 +1929,19 @@ class ExecutionEngine:
             sid = requirement.get("session_id") or requirement.get("task_id", "")
             if sid:
                 self._cancel_manager.cleanup(sid)
+            if self.message_bus:
+                for _topic, _handler in _subscribed_data_handlers:
+                    try:
+                        await self.message_bus.unsubscribe(_topic, _handler)
+                    except Exception as _unsubscribe_error:
+                        logger.warning(
+                            "Failed to unsubscribe execution data handler (%s): %s",
+                            _topic,
+                            _unsubscribe_error,
+                        )
+            if _memory_scope_token is not None:
+                from src.core.communication import reset_memory_scope
+                reset_memory_scope(_memory_scope_token)
 
     async def execute_with_skip(
         self,
@@ -1725,6 +2023,7 @@ class ExecutionEngine:
         previous_results: List[Dict[str, Any]],
         scheduler: Any,
         stage_name: str,
+        timeout_override: Optional[float] = None,
     ) -> List[Dict[str, Any]]:
         """
         执行一批Agent（阶段内并行执行）
@@ -1752,6 +2051,7 @@ class ExecutionEngine:
             previous_results=previous_results,
             scheduler=scheduler,
             stage_name=stage_name,  # 传递阶段名称
+            timeout_override=timeout_override,
         )
         
         # 更新调度状态
@@ -1769,7 +2069,11 @@ class ExecutionEngine:
         
         return batch_results
     
-    def _select_checker_for_batch(self, batch_results: List[Dict[str, Any]]) -> Optional[Any]:
+    def _select_checker_for_batch(
+        self,
+        batch_results: List[Dict[str, Any]],
+        batch_agents: Optional[List["IAgent"]] = None,
+    ) -> Optional[Any]:
         """Select the appropriate quality checker based on batch content.
         
         Analyzes batch results to determine the execution phase and routes
@@ -1784,7 +2088,39 @@ class ExecutionEngine:
         if not self.enable_quality_control:
             return None
         
-        # Count result types to infer the phase
+        # Prefer the scheduler's explicit Agent category over result shape.
+        # A data-collection Agent may intentionally return an analysis-shaped
+        # narrative together with raw data; inferring the phase from content
+        # would route it to semantic analysis QC and trigger pointless retries.
+        if batch_agents:
+            # The decomposition plan historically labels phase_1 as
+            # ``analysis`` even though it performs search and emits raw
+            # evidence. Route evidence-producing phase_1 batches to data QC;
+            # otherwise semantic QC retries the same search agent and delays
+            # downstream calibration.
+            _phase1_evidence_agents = all(
+                str(getattr(agent, "agent_id", "")).startswith("phase_1_")
+                for agent in batch_agents
+            ) and any(
+                r.get("data_points") or r.get("sources")
+                for r in batch_results if r.get("success")
+            )
+            if _phase1_evidence_agents:
+                return self.data_checker
+
+            categories = {self.classify_agent(agent) for agent in batch_agents}
+            if categories and categories <= {
+                AgentCategory.DATA_COLLECTION,
+            }:
+                return self.data_checker
+            if categories and categories <= {
+                AgentCategory.REPORT_GENERATION,
+                AgentCategory.DOCUMENT_GENERATION,
+            }:
+                return self.report_checker
+
+        # Count result types to infer the phase only for legacy callers that do
+        # not provide the scheduler's Agent objects.
         has_data_points = any(r.get("data_points") for r in batch_results if r.get("success"))
         has_sources = any(r.get("sources") for r in batch_results if r.get("success"))
         # R1-FIX: result may be dict (metadata), only count as content if it's a non-trivial string
@@ -1792,6 +2128,10 @@ class ExecutionEngine:
             (isinstance(c, str) and len(c) > 50) or (isinstance(c, dict) and len(str(c)) > 50)
             for r in batch_results if r.get("success")
             for c in [r.get("content") or r.get("result") or ""]
+        )
+        has_any_content = any(
+            bool(r.get("content") or r.get("result"))
+            for r in batch_results if r.get("success")
         )
         has_validation = any(
             r.get("validation") for r in batch_results if r.get("success")
@@ -1802,7 +2142,7 @@ class ExecutionEngine:
             return self.data_checker
         
         # Analysis phase: results have substantial content with analysis
-        if has_content:
+        if has_content or has_any_content:
             # Track B: three-layer semantic scoring (L1+L2+L3), fallback to analysis_checker
             try:
                 from src.core.quality.semantic_adapter import SemanticQualityAdapter
@@ -1904,6 +2244,9 @@ class ExecutionEngine:
         session_id: str,
         poll_interval: float = 2.0,
         grace_timeout: float = 30.0,
+        requirement: Optional[Dict[str, Any]] = None,
+        stage_name: str = "",
+        agent_task_map: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Optional[Dict[str, Any]]]:
         """
         wait_for_completion 的暂停/取消感知版本。
@@ -1921,6 +2264,7 @@ class ExecutionEngine:
         
         _total_agents_in_batch = len(task_ids)
         _completed_in_batch = 0
+        _checkpointed_task_ids = set()
         
         interrupted = False
         interrupted_reason = ""
@@ -1942,6 +2286,19 @@ class ExecutionEngine:
                     if self._coordinator._active_tasks.get(tid) is not None
                     and self._coordinator._active_tasks[tid].status == "completed"
                 )
+                # Persist each completed agent immediately.  A later agent in
+                # the same batch may hang; completed evidence must still be
+                # available for resume and report generation.
+                if requirement:
+                    for _tid in task_ids:
+                        if _tid in _checkpointed_task_ids:
+                            continue
+                        _active = self._coordinator._active_tasks.get(_tid)
+                        if _active and _active.status == "completed" and _active.result:
+                            _result = dict(_active.result)
+                            _result.setdefault("agent_id", (agent_task_map or {}).get(_tid, ""))
+                            self._persist_agent_checkpoint(requirement, _result, stage_name)
+                            _checkpointed_task_ids.add(_tid)
                 if _completed_in_batch != _prev_completed and session_id and _total_agents_in_batch > 0:
                     try:
                         from src.core.progress_streamer import update_progress as _up
@@ -1962,6 +2319,19 @@ class ExecutionEngine:
                 await asyncio.sleep(poll_interval)
             
             if not interrupted and wait_task.done():
+                # The completion task can finish all agents between two
+                # polling iterations. Flush once more before returning so a
+                # fast/simultaneous batch cannot bypass agent checkpoints.
+                if requirement:
+                    for _tid in task_ids:
+                        if _tid in _checkpointed_task_ids:
+                            continue
+                        _active = self._coordinator._active_tasks.get(_tid)
+                        if _active and _active.status == "completed" and _active.result:
+                            _result = dict(_active.result)
+                            _result.setdefault("agent_id", (agent_task_map or {}).get(_tid, ""))
+                            self._persist_agent_checkpoint(requirement, _result, stage_name)
+                            _checkpointed_task_ids.add(_tid)
                 try:
                     return wait_task.result()
                 except Exception:
@@ -2018,6 +2388,7 @@ class ExecutionEngine:
         previous_results: List[Dict[str, Any]],
         scheduler: Any,
         stage_name: str = "",  # 新增：阶段名称，用于持久化记录
+        timeout_override: Optional[float] = None,
     ) -> List[Dict[str, Any]]:
         """
         执行一批Agent（并行执行）
@@ -2050,7 +2421,8 @@ class ExecutionEngine:
         aggregated_data_points = []
         aggregated_sources = []
         aggregated_content = []
-        research_sections = []  # 新增：收集各章节内容
+        seen_data_point_keys = set()
+        seen_source_keys = set()
         
         # 同时按 agent_id 索引数据点，用于后续按依赖过滤
         data_points_by_agent: Dict[str, List[Dict]] = {}
@@ -2064,13 +2436,30 @@ class ExecutionEngine:
             
             # 提取data_points（即使结果失败也要提取）
             if "data_points" in prev_result:
-                aggregated_data_points.extend(prev_result["data_points"])
-                data_points_by_agent.setdefault(agent_id, []).extend(prev_result["data_points"])
+                for data_point in prev_result["data_points"] or []:
+                    scoped_data_point = dict(data_point) if isinstance(data_point, dict) else data_point
+                    if isinstance(scoped_data_point, dict):
+                        scoped_data_point.setdefault("source_agent_id", agent_id)
+                        if prev_result.get("section_id"):
+                            scoped_data_point.setdefault("section_id", prev_result.get("section_id"))
+                    key = _evidence_record_key(scoped_data_point, "data_point")
+                    if key not in seen_data_point_keys:
+                        seen_data_point_keys.add(key)
+                        aggregated_data_points.append(scoped_data_point)
+                    agent_points = data_points_by_agent.setdefault(agent_id, [])
+                    if not any(_evidence_record_key(item, "data_point") == key for item in agent_points):
+                        agent_points.append(scoped_data_point)
             
             # 提取sources（即使结果失败也要提取）
             if "sources" in prev_result:
-                aggregated_sources.extend(prev_result["sources"])
-                sources_by_agent.setdefault(agent_id, []).extend(prev_result["sources"])
+                for source in prev_result["sources"] or []:
+                    key = _evidence_record_key(source, "source")
+                    if key not in seen_source_keys:
+                        seen_source_keys.add(key)
+                        aggregated_sources.append(source)
+                    agent_sources = sources_by_agent.setdefault(agent_id, [])
+                    if not any(_evidence_record_key(item, "source") == key for item in agent_sources):
+                        agent_sources.append(source)
             
             # 只有成功的结果才提取content
             if prev_result.get("success"):
@@ -2087,18 +2476,6 @@ class ExecutionEngine:
                         "content": content[:2000],  # 限制长度
                     })
                     
-                    # 收集章节内容（用于报告生成）
-                    # 从agent_id提取章节名
-                    if "_" in agent_id:
-                        section_name = agent_id.split("_", 1)[-1]  # 去掉前缀
-                    else:
-                        section_name = agent_id
-                        
-                    research_sections.append({
-                        "id": agent_id,
-                        "title": section_name,
-                        "content": content,
-                    })
         
         # 确保协调器已初始化
         assert self._coordinator is not None
@@ -2126,20 +2503,30 @@ class ExecutionEngine:
                 agent_category = self.classify_agent(agent)
                 
                 if agent_category in (AgentCategory.REPORT_GENERATION, AgentCategory.DOCUMENT_GENERATION):
-                    # 报告生成Agent需要特殊格式的任务
-                    task = {
-                        "action": "produce_document",
-                        "task_id": requirement.get("task_id", f"task_{datetime.now().strftime('%Y%m%d_%H%M%S')}"),
-                        "output_format": requirement.get("output_format", "docx"),
-                        "output_dir": requirement.get("output_dir"),
-                        "research_result": {
-                            "topic": requirement.get("topic"),
-                            "sections": research_sections,
-                            "data_points": aggregated_data_points,
-                            "sources": aggregated_sources,
-                            "total_word_count": sum(len(s.get("content", "")) for s in research_sections),
-                        },
-                    }
+                    # The report boundary has one assembly path.  Do not
+                    # rebuild sections from agent_id here: that legacy path
+                    # silently loses planned chapters and prevents the report
+                    # agent from seeing the full evidence pool.
+                    task = self._build_report_task(requirement, previous_results)
+                    task["output_dir"] = requirement.get("output_dir")
+                    task["section_manifest"] = requirement.get("section_manifest") or []
+                    task["allow_supplementary_research"] = True
+                    task["supplementary_search_scope"] = "missing_manifest_sections"
+                    # Read-only evidence context: the writer may use any raw
+                    # evidence to repair a missing planned chapter, but any
+                    # produced chapter must still carry its exact section_id.
+                    task["raw_data"] = list(previous_results)
+                    task["raw_results"] = list(previous_results)
+                    task["aggregated_content"] = list(aggregated_content)
+                    task["aggregated_data_points"] = list(aggregated_data_points)
+                    task["aggregated_sources"] = list(aggregated_sources)
+                    task["research_result"].update({
+                        "raw_data": list(previous_results),
+                        "raw_results": list(previous_results),
+                        "aggregated_content": list(aggregated_content),
+                        "allow_supplementary_research": True,
+                        "supplementary_search_scope": "missing_manifest_sections",
+                    })
                     # M5-b: Inject calibration results into Report agent task
                     _calib = [r for r in previous_results if r.get("category") == "calibration" and r.get("success")]
                     if _calib:
@@ -2147,8 +2534,11 @@ class ExecutionEngine:
                         task["calibration_report"] = _calib_data.get("calibration_report", {})
                         task["unified_data_reference"] = _calib_data.get("unified_data_reference", {})
                         logger.info(f"[_execute_batch] Report agent: injected calibration results from {_calib[0].get('agent_id', 'unknown')}")
-                    logger.info(f"[_execute_batch] 报告生成任务: sections={len(research_sections)}, "
-                               f"data_points={len(aggregated_data_points)}")
+                    logger.info(f"[_execute_batch] 报告生成任务: planned="
+                               f"{len(task.get('section_manifest') or [])}, "
+                               f"sections={len(task.get('sections') or [])}, "
+                               f"missing={len(task.get('missing_section_ids') or [])}, "
+                               f"raw_results={len(previous_results)}")
                 elif agent_category == AgentCategory.CALIBRATION:
                     task = {
                         "action": "calibration",
@@ -2165,8 +2555,26 @@ class ExecutionEngine:
                     # **正确修复**: 基于 scheduler 中定义的依赖关系过滤数据
                     # synthesis agent 只接收其依赖的 agent 的结果
                     
-                    # 优先使用 section_id，fallback 到 agent_id 解析
-                    target_aspect = getattr(agent, 'section_id', None) or self._extract_aspect_from_agent_id(agent.agent_id)
+                    # Keep the stable section_id for registry/boundary identity,
+                    # but use the semantic aspect from Agent context for prompts.
+                    # Passing "section_6" as the aspect makes the LLM lose the
+                    # actual research dimension and breaks section matching.
+                    agent_context = getattr(agent, '_context', {}) or {}
+                    if not agent_context:
+                        _agent_config = getattr(agent, "config", {}) or {}
+                        agent_context = _agent_config.get("context", {}) if isinstance(_agent_config, dict) else {}
+                    target_section_id = getattr(agent, 'section_id', None) or ""
+                    _agent_section_ids = list(getattr(agent, 'section_ids', []) or [])
+                    _agent_config = getattr(agent, "config", {}) or {}
+                    _agent_metadata = (_agent_config.get("section_metadata", {})
+                                       if isinstance(_agent_config, dict) else {}) or {}
+                    target_aspect = (
+                        agent_context.get("aspect")
+                        or _agent_metadata.get("title")
+                        or target_section_id
+                        or (_agent_section_ids[0] if _agent_section_ids else "")
+                        or self._extract_aspect_from_agent_id(agent.agent_id)
+                    )
                     
                     # 从调度器获取该 agent 的依赖
                     scheduled_agent = scheduler.get_scheduled_agent(agent.agent_id)
@@ -2257,7 +2665,6 @@ class ExecutionEngine:
                     }
                     
                     # [P0-6] Inject annual report data from Agent context
-                    agent_context = getattr(agent, '_context', {})
                     if agent_context.get("document_context"):
                         task["document_context"] = agent_context["document_context"]
                     if agent_context.get("document_tables"):
@@ -2306,9 +2713,30 @@ class ExecutionEngine:
                         filtered_sources = []
                         logger.info(f"[_execute_batch] Agent {agent.agent_id} 无依赖，不接收前序结果")
                     
-                    # **污染修复**: 优先使用 section_id，fallback 到 agent_id 解析
-                    # 避免 LLM 看到所有章节名后混淆输出
-                    agent_aspect = getattr(agent, 'section_id', None) or self._extract_aspect_from_agent_id(agent.agent_id)
+                    # Use the semantic aspect for collection/analysis prompts.
+                    # section_id remains an internal identity only.
+                    agent_context = getattr(agent, '_context', {}) or {}
+                    agent_section_id = getattr(agent, 'section_id', None) or ""
+                    agent_section_ids = list(getattr(agent, 'section_ids', []) or [])
+                    agent_config = getattr(agent, 'config', {}) or {}
+                    agent_metadata = (agent_config.get('section_metadata', {})
+                                      if isinstance(agent_config, dict) else {}) or {}
+                    agent_aspect = (
+                        agent_context.get("aspect")
+                        or agent_metadata.get("title")
+                        or agent_section_id
+                        or (agent_section_ids[0] if agent_section_ids else "")
+                        or self._extract_aspect_from_agent_id(agent.agent_id)
+                    )
+                    if (agent_aspect == agent.agent_id or
+                            (agent.agent_id.startswith("phase_") and "_agent_" in agent.agent_id)):
+                        try:
+                            _agent_index = int(agent.agent_id.rsplit("_", 1)[-1])
+                        except (ValueError, AttributeError):
+                            _agent_index = -1
+                        _requirement_aspects = requirement.get("aspects", []) if isinstance(requirement, dict) else []
+                        if 0 <= _agent_index < len(_requirement_aspects):
+                            agent_aspect = _requirement_aspects[_agent_index]
                     if agent_aspect:
                         agent_aspects = [agent_aspect]
                         logger.info(f"[_execute_batch] Agent {agent.agent_id} 目标章节: {agent_aspect}")
@@ -2322,6 +2750,11 @@ class ExecutionEngine:
                         analysis_agent_id=agent.agent_id,
                         target_aspect=agent_aspect or "",
                         all_agent_ids=list(scheduler._scheduled_agents.keys()) if hasattr(scheduler, '_scheduled_agents') else [],
+                        # The boundary resolver expects agent -> semantic
+                        # aspect, while section identity is used separately
+                        # for persistence/report joins.  Pass the semantic
+                        # map here; the section map must not be substituted.
+                        agent_section_map=getattr(self, "_agent_aspect_map", {}),
                     )
                     # 更新允许的 agents 为实际依赖
                     analysis_boundary.allowed_agents = set(dep_list)
@@ -2348,6 +2781,34 @@ class ExecutionEngine:
                         "document_context": "",
                         "document_tables": [],
                     }
+
+                    if agent_category == AgentCategory.ANALYSIS:
+                        analysis_section_id = _canonical_runtime_section_id(
+                            getattr(self, "_agent_section_map", {}).get(agent.agent_id)
+                            or getattr(agent, "section_id", "")
+                        )
+                        section_spec = self._get_section_spec_map().get(analysis_section_id)
+                        required_metrics = set(section_spec.all_data_needs) if section_spec else set()
+                        evidence_scope = EvidenceScope(
+                            section_id=analysis_section_id,
+                            allowed_source_agents=set(dependencies),
+                            required_metrics=required_metrics,
+                        )
+                        scoped_points, evidence_audit = evidence_scope.select(
+                            task["aggregated_data_points"]
+                        )
+                        task["aggregated_data_points"] = scoped_points
+                        task["evidence_scope"] = {
+                            "section_id": analysis_section_id,
+                            "required_metrics": sorted(required_metrics),
+                            "allowed_source_agents": sorted(dependencies),
+                            "audit": evidence_audit,
+                        }
+                        task["required_metrics"] = sorted(required_metrics)
+                        logger.info(
+                            "[_execute_batch] analysis evidence scope: agent=%s section=%s %s",
+                            agent.agent_id, analysis_section_id, evidence_audit,
+                        )
                     
                     # [P0-6] Inject annual report data from Agent context
                     agent_context = getattr(agent, '_context', {})
@@ -2384,9 +2845,18 @@ class ExecutionEngine:
                                                 seen_urls.add(url)
                                             deduped.append(dp)
                                         # M2: 按 agent 的 aspect 过滤 data_points
-                                        task["aggregated_data_points"] = self._filter_data_by_aspect(
+                                        recovered_points = self._filter_data_by_aspect(
                                             deduped, agent_aspect
                                         )
+                                        if agent_category == AgentCategory.ANALYSIS:
+                                            recovery_scope = EvidenceScope(
+                                                section_id=str(task.get("evidence_scope", {}).get("section_id") or ""),
+                                                allowed_source_agents=set(task.get("evidence_scope", {}).get("allowed_source_agents") or []),
+                                                required_metrics=set(task.get("evidence_scope", {}).get("required_metrics") or []),
+                                            )
+                                            recovered_points, recovery_audit = recovery_scope.select(recovered_points)
+                                            task["evidence_scope"]["recovery_audit"] = recovery_audit
+                                        task["aggregated_data_points"] = recovered_points
                                         injected_data = True
                                     if saved_srcs and len(saved_srcs) > 0:
                                         seen_urls = set()
@@ -2415,16 +2885,20 @@ class ExecutionEngine:
                 # 防御性获取配置
                 agent_config = getattr(agent, 'config', {}) or {}
                 
-                # 数据收集/分析/综合agent需要更长超时（数据量大，LLM处理时间长）
-                default_timeout = self.config.default_timeout
-                if agent_category in (AgentCategory.DATA_COLLECTION, AgentCategory.ANALYSIS, AgentCategory.SYNTHESIS):
-                    default_timeout = 7200  # 2小时，确保大数据量处理不超时
-                
+                # Agent execution has no implicit deadline.  Do not replace
+                # the old 120s limit with another hidden per-agent limit;
+                # cancellation must come from the task/session controller.
+                task_timeout = None
+                if timeout_override is not None:
+                    # An explicit caller deadline remains supported for
+                    # bounded orchestration operations.
+                    task_timeout = float(timeout_override)
+
                 task_id = await self._coordinator.dispatch_task(
                     agent=agent,
                     task=task,
                     options=TaskOptions(
-                        timeout=agent_config.get("timeout", default_timeout),
+                        timeout=task_timeout,
                         max_retries=agent_config.get("max_retries", self.config.max_retries),
                     ),
                 )
@@ -2438,7 +2912,13 @@ class ExecutionEngine:
                 scheduler.mark_failed(agent.agent_id, str(e))
         
         # 等待完成（带暂停/取消检查）
-        results = await self._wait_for_completion_with_pause_check(task_ids, _session_id_for_pause)
+        results = await self._wait_for_completion_with_pause_check(
+            task_ids,
+            _session_id_for_pause,
+            requirement=requirement,
+            stage_name=stage_name,
+            agent_task_map=agent_task_map,
+        )
         
         # Apply harness constraint checks on each agent result
         for task_id in task_ids:
@@ -2485,13 +2965,17 @@ class ExecutionEngine:
             if _ar.get("section_id") or _ar.get("_section_id"):
                 continue
             _agent = scheduler.get_agent_by_id(_aid)
-            _sid = self._get_section_id_from_agent(_agent) if _agent else self._get_section_id_from_agent_id(_aid)
+            _sid = _canonical_runtime_section_id(
+                getattr(self, "_agent_section_map", {}).get(_aid)
+                or (self._get_section_id_from_agent(_agent) if _agent else "")
+                or self._get_section_id_from_agent_id(_aid)
+            )
             if not _sid or _sid == _aid or (len(_sid) < 5 and "_agent_" in _sid):
                 if _aspects and "_agent_" in _aid:
                     try:
                         _idx = int(_aid.split("_agent_")[-1])
                         if 0 <= _idx < len(_aspects):
-                            _sid = str(_aspects[_idx])
+                            _sid = f"section_{_idx}"
                     except (ValueError, IndexError):
                         pass
             _ar["section_id"] = _sid
@@ -2583,7 +3067,52 @@ class ExecutionEngine:
             logger.warning(f"[_execute_batch] ResearchResultStore持久化失败: {e}")
         
         return batch_results
-    
+
+    def _persist_agent_checkpoint(
+        self,
+        requirement: Dict[str, Any],
+        agent_result: Dict[str, Any],
+        stage_name: str,
+    ) -> None:
+        """Persist one completed agent result without waiting for its batch."""
+        task_id = requirement.get("task_id") if isinstance(requirement, dict) else None
+        agent_id = str(agent_result.get("agent_id", "") or "")
+        if not task_id or not agent_id or not agent_result.get("success"):
+            return
+        content = agent_result.get("content") or agent_result.get("result") or ""
+        if isinstance(content, dict):
+            content = json.dumps(content, ensure_ascii=False)
+        agent_contents = {}
+        if isinstance(content, str) and len(content) > 50:
+            agent_contents[agent_id] = {
+                "agent_id": agent_id,
+                "content": content[:50000],
+                "success": True,
+                "phase": stage_name,
+                "section_id": agent_result.get("section_id", ""),
+            }
+        try:
+            ResearchResultStore(storage_path="data").save_result(
+                task_id=task_id,
+                result={
+                    "topic": requirement.get("topic", ""),
+                    "data_points": list(agent_result.get("data_points") or []),
+                    "sources": list(agent_result.get("sources") or []),
+                    "completed_agents": [{
+                        "agent_id": agent_id,
+                        "success": True,
+                        "phase": stage_name,
+                        "section_id": agent_result.get("section_id", ""),
+                        "_section_id": agent_result.get("_section_id", ""),
+                    }],
+                    "agent_contents": agent_contents,
+                },
+                status=ResearchStatus.COLLECTING,
+            )
+            logger.info("[_execute_batch] agent checkpoint persisted: %s", agent_id)
+        except Exception as exc:
+            logger.warning("[_execute_batch] agent checkpoint failed for %s: %s", agent_id, exc)
+
     async def shutdown(self) -> None:
         """关闭引擎"""
         logger.info("Shutting down ExecutionEngine")
@@ -2736,7 +3265,17 @@ class ExecutionEngine:
         """
         # 优先使用 section_id 属性
         if hasattr(agent, 'section_id') and agent.section_id:
-            return agent.section_id
+            return _canonical_runtime_section_id(agent.section_id)
+
+        section_ids = list(getattr(agent, "section_ids", []) or [])
+        if section_ids:
+            return _canonical_runtime_section_id(section_ids[0])
+
+        config = getattr(agent, "config", {}) or {}
+        if isinstance(config, dict):
+            metadata = config.get("section_metadata") or {}
+            if isinstance(metadata, dict) and metadata.get("section_id"):
+                return _canonical_runtime_section_id(metadata["section_id"])
         
         return ""
     
@@ -2915,7 +3454,7 @@ class ExecutionEngine:
     # M2: Aspect-based data filtering for P1-1 fallback injection
     SYNONYM_MAP = {
         "财务": ["营收", "利润", "毛利率", "净利", "收入", "成本", "费用"],
-        "销量": ["销量", "出货", "交付", "市场份额", "市占率"],
+        "销量": ["销量", "出货", "出货量", "交付", "交付量", "市场份额", "市占率"],
         "竞争": ["竞争对手", "竞争格局", "市场格局", "份额"],
         "研发": ["研发投入", "R&D", "专利", "技术创新"],
         "风险": ["风险", "负债", "现金流", "财务健康"],
@@ -2928,7 +3467,10 @@ class ExecutionEngine:
         if not data_points:
             return []
         if not aspect:
-            return data_points[:200]
+            # Missing chapter identity is unsafe for a recovery path.  Do not
+            # guess by taking a prefix from the global cache.
+            logger.warning("[_filter_data_by_aspect] missing aspect; refusing cache injection")
+            return []
 
         aspect_clean = aspect.replace("section_", "").replace("_", " ")
         aspect_keywords = set(aspect_clean.split())
@@ -2948,7 +3490,16 @@ class ExecutionEngine:
         relevant = [dp for score, dp in scored if score > 0][:500]
         if relevant:
             return relevant
-        return data_points[:200]
+        # Never inject an arbitrary prefix when semantic matching fails.  The
+        # old fallback returned the first 200 records, which could silently
+        # feed an unrelated chapter's evidence into analysis.  An empty set
+        # is safer: the caller can mark the chapter as uncovered and trigger
+        # targeted supplementary search.
+        logger.warning(
+            "[_filter_data_by_aspect] no relevant evidence for aspect=%s; refusing unrelated fallback",
+            aspect,
+        )
+        return []
 
     async def _unified_search(
         self,
@@ -2959,13 +3510,13 @@ class ExecutionEngine:
         from src.core.decomposition.strategies import SectionDataSpec
         from datetime import datetime
 
-        self._search_deduplicator = SearchQueryDeduplicator()
+        self._search_deduplicator = SearchQueryDeduplicator(self.search_gateway)
         deduplicator = self._search_deduplicator
         topic = requirement.get("topic", "")
         current_year = str(datetime.now().year)
 
-        search_skill = self._get_search_skill()
-        if not search_skill:
+        search_skill = None if self.search_gateway is not None else self._get_search_skill()
+        if not search_skill and self.search_gateway is None:
             logger.warning("[_unified_search] no search skill available")
             return {}
 
@@ -2975,7 +3526,7 @@ class ExecutionEngine:
         search_topic = self._extract_keywords(topic)
 
         for agent in agents:
-            section_id = self._get_section_id_from_agent(agent)
+            section_id = _canonical_runtime_section_id(self._get_section_id_from_agent(agent))
             section_spec = section_spec_map.get(section_id)
             if not section_spec:
                 continue
@@ -2996,7 +3547,12 @@ class ExecutionEngine:
                 unique_queries[norm_agg] = (q_agg, [section_id])
 
         async def _search_one(original_query, section_ids, skill):
-            result = await deduplicator.search(original_query, section_ids[0], skill)
+            result = await deduplicator.search(
+                original_query,
+                section_ids[0],
+                skill,
+                scope="execution_engine",
+            )
             return original_query, section_ids, result
 
         search_tasks = [
@@ -3078,8 +3634,26 @@ class ExecutionEngine:
         for need in section_data_needs:
             if len(need) < 2:
                 continue
+            need_variants = {str(need).lower()}
+            # Coverage must use the same synonym vocabulary as result
+            # filtering.  Otherwise an evidence item found through an
+            # expanded query (e.g. 交付量 for 出货量) is counted as missing and
+            # triggers redundant supplementation.
+            for syn_key, syn_vals in self.SYNONYM_MAP.items():
+                normalized_values = [str(value).lower() for value in syn_vals]
+                normalized_key = str(syn_key).lower()
+                if (
+                    str(need).lower() == normalized_key
+                    or str(need).lower() in normalized_values
+                    or any(
+                        str(need).lower() in value or value in str(need).lower()
+                        for value in normalized_values
+                    )
+                ):
+                    need_variants.update([normalized_key, *normalized_values])
             for text in dp_texts:
-                if need in text:
+                text_lower = text.lower()
+                if any(variant in text_lower for variant in need_variants):
                     covered.add(need)
                     break
         return covered
@@ -3100,17 +3674,15 @@ class ExecutionEngine:
         deduplicator = getattr(self, '_search_deduplicator', None)
         if not deduplicator:
             from src.core.search.query_deduplicator import SearchQueryDeduplicator
-            deduplicator = SearchQueryDeduplicator()
+            deduplicator = SearchQueryDeduplicator(self.search_gateway)
             self._search_deduplicator = deduplicator
 
         topic = requirement.get("topic", "")
         current_year = str(datetime.now().year)
         search_topic = self._extract_keywords(topic)
-        search_skill = self._get_search_skill()
-        if not search_skill:
+        search_skill = None if self.search_gateway is not None else self._get_search_skill()
+        if not search_skill and self.search_gateway is None:
             return {}
-
-        deduplicator = SearchQueryDeduplicator()
         all_data_points = []
         for r in batch_results:
             if r.get("success"):
@@ -3151,7 +3723,12 @@ class ExecutionEngine:
             async def _supp_search_one(need, section_id, skill):
                 query = f"{search_topic} {need} {current_year}"
                 try:
-                    result = await deduplicator.search(query, section_id, skill)
+                    result = await deduplicator.search(
+                        query,
+                        section_id,
+                        skill,
+                        scope="execution_engine",
+                    )
                     return need, result
                 except Exception as e:
                     logger.warning(f"[Phase D] supplement search failed for '{need}': {e}")
@@ -3162,6 +3739,21 @@ class ExecutionEngine:
 
             for need, result in results:
                 if result and result.get("results"):
+                    def _evidence_fields(item: Dict[str, Any]) -> Dict[str, Any]:
+                        return {
+                            "evidence_id": item.get("evidence_id", ""),
+                            "provenance_id": item.get("provenance_id", ""),
+                            "evidence_excerpt": item.get("evidence_excerpt", "")
+                            or item.get("excerpt", "")
+                            or item.get("snippet", ""),
+                            "locator": item.get("locator", "")
+                            or item.get("href", "")
+                            or item.get("url", ""),
+                            "task_id": item.get("task_id", ""),
+                            "request_id": item.get("request_id", ""),
+                            "retrieved_at": item.get("retrieved_at"),
+                        }
+
                     supplement_results[need] = {
                         "data_points": [{
                             "title": f"Supplement: {search_topic} {need}",
@@ -3169,11 +3761,13 @@ class ExecutionEngine:
                             "url": item.get("href", "") or item.get("url", ""),
                             "quality_score": item.get("quality_score", 0),
                             "credibility": "supplement_search",
+                            **_evidence_fields(item),
                         } for item in result.get("results", [])],
                         "sources": [{
                             "title": f"Supplement: {search_topic} {need}",
                             "url": item.get("href", "") or item.get("url", ""),
                             "type": "web",
+                            **_evidence_fields(item),
                         } for item in result.get("results", [])],
                     }
                     all_data_points.extend(supplement_results[need]["data_points"])

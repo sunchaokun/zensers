@@ -30,7 +30,7 @@ class TestD3SourceIndexResolved:
         dps = [{"metric": "营收", "value": "2000", "unit": "亿元", "source": "来源49"}]
         sources = [{"title": "来源1"}, {"title": "来源2"}]  # only 2 sources, 49 is OOB
         result = ReportOrchestrator._ground_data_point_sources(dps, sources)
-        assert result[0]["source"] in ("来源1", "来源2")  # any fallback
+        assert result[0]["source"] == ""
 
     def test_source_1_maps_to_first_source(self):
         from src.agents.fixed_agents.report_upgrade.orchestrator import ReportOrchestrator
@@ -47,19 +47,19 @@ class TestD3SourceIndexResolved:
         result = ReportOrchestrator._ground_data_point_sources(dps, sources)
         assert result[0]["source"] == "第二个来源"
 
-    def test_vague_source_fallback_when_no_index_match(self):
+    def test_vague_source_is_not_replaced_without_exact_match(self):
         from src.agents.fixed_agents.report_upgrade.orchestrator import ReportOrchestrator
         dps = [{"metric": "营收", "value": "2000", "unit": "亿元", "source": "行业综合数据"}]
         sources = [{"title": "可用来源", "href": "https://a.com"}]
         result = ReportOrchestrator._ground_data_point_sources(dps, sources)
-        assert result[0]["source"] == "可用来源"
+        assert result[0]["source"] == ""
 
-    def test_empty_source_replaced(self):
+    def test_empty_source_is_not_replaced_without_exact_match(self):
         from src.agents.fixed_agents.report_upgrade.orchestrator import ReportOrchestrator
         dps = [{"metric": "营收", "value": "2000", "unit": "亿元", "source": ""}]
         sources = [{"title": "唯一来源"}]
         result = ReportOrchestrator._ground_data_point_sources(dps, sources)
-        assert result[0]["source"] == "唯一来源"
+        assert result[0]["source"] == ""
 
 
 class TestE2BestScoreStrictComparison:

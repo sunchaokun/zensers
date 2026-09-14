@@ -1,5 +1,6 @@
 import pytest
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from pathlib import Path
 
@@ -92,6 +93,67 @@ class TestDataRepairAgentRepairGap:
             assert result.value == "2000"
             assert result.unit == "\u4ebf\u5143"
             assert result.source == "iimedia.cn"
+
+    @pytest.mark.asyncio
+    async def test_gateway_evidence_identity_survives_gap_repair(
+        self, mock_scraper, mock_prompts
+    ):
+        """A successful search repair must retain the gateway evidence chain."""
+        from src.agents.fixed_agents.report_upgrade.data_repair import DataRepairAgent
+
+        gateway = AsyncMock()
+        gateway.search.return_value = SimpleNamespace(
+            success=True,
+            results=[SimpleNamespace(
+                title="官方市场报告",
+                url="https://example.test/report",
+                snippet="市场规模数据",
+                source="官方机构",
+                evidence_id="ev-1",
+                provenance_id="prov-1",
+                excerpt="2024年市场规模为2000亿元",
+                locator="page=4",
+                task_id="task-1",
+                request_id="req-1",
+                retrieved_at="2026-09-06T00:00:00Z",
+            )],
+        )
+        mock_scraper.execute.return_value = {
+            "success": True,
+            "text": "2024年市场规模为2000亿元",
+            "title": "官方市场报告",
+        }
+        with patch(
+            "src.agents.fixed_agents.report_upgrade.data_repair.call_llm",
+            new_callable=AsyncMock,
+        ) as mock_call:
+            mock_call.return_value = {
+                "success": True,
+                "content": (
+                    '{"found": true, "value": "2000", "unit": "亿元", '
+                    '"source": "官方机构", "source_title": "官方市场报告", '
+                    '"period": "2024年", "geographic_scope": "中国", '
+                    '"population": "新能源汽车市场", "confidence": 0.95}'
+                ),
+            }
+            agent = DataRepairAgent(
+                web_scraper_skill=mock_scraper,
+                prompt_manager=mock_prompts,
+                search_gateway=gateway,
+            )
+
+            result = await agent.repair_gap(make_gap(), "新能源汽车")
+
+        assert result.found is True
+        assert result.source_url == "https://example.test/report"
+        assert result.evidence_id == "ev-1"
+        assert result.provenance_id == "prov-1"
+        assert result.evidence_excerpt == "2024年市场规模为2000亿元"
+        assert result.locator == "page=4"
+        assert result.request_id == "req-1"
+        assert result.period == "2024年"
+        assert result.geographic_scope == "中国"
+        assert result.population == "新能源汽车市场"
 
     @pytest.mark.asyncio
     async def test_search_succeeds_no_scrape_results(self, mock_search, mock_scraper, mock_prompts):

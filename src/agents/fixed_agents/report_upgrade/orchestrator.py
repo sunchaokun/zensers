@@ -1,6 +1,7 @@
 import re
 import json
 import asyncio
+import hashlib
 import logging
 from dataclasses import asdict
 from pathlib import Path
@@ -11,21 +12,45 @@ from .models import (
     ChapterWriteInput, ChapterWriteOutput, ChapterReviewInput, ChapterReviewOutput,
     ReviewInput, ReviewOutput, DataGap, DataConflict, DataPoint, DataConflictResolution,
     DataRepairResult, QualityIssueDiagnosis, ChapterDiagnostic, QualityReport,
-    ChapterIssue, FixSuggestion,
+    ChapterIssue, FixSuggestion, ReportEvidenceContext, ChapterRequirement,
 )
 from .data_registry import DataRegistry
 from .chapter_writer import ChapterWriter, DATAPOINT_FIELDS
 
-_DP_STR_KEYS = {"metric", "value", "unit", "source", "chapter_id"}
+_DP_STR_KEYS = {
+    "metric", "value", "unit", "source", "chapter_id", "sub_section_id", "source_url",
+    "evidence_id", "provenance_id", "geographic_scope", "period", "population",
+    "epistemic_level", "evidence_status",
+}
 from .chapter_reviewer import ChapterReviewAgent
 from .global_reviewer import GlobalReviewAgent, serialize_report_for_review
 from .data_repair import DataRepairAgent, ConflictResolver
 from .structured_data_repair import StructuredDataRepairAgent
+from .coverage_checker import ChapterCoverageChecker
+from .evidence_acquisition import ReportEvidenceAcquirer
+from .report_integrity import ReportIntegrityChecker
+from .defense_audit import ReportDefenseAudit
+from .defense_loop import DefenseLoopController
 from .prompt_manager import PromptManager
 from src.core.quality.checkers import AnalysisQualityChecker
 from src.core.llm_client import call_llm
 
 logger = logging.getLogger(__name__)
+
+
+def _canonical_section_id(value: Any) -> str:
+    """Use the runtime chapter identity when joining legacy routing output."""
+    text = str(value or "").strip()
+    match = re.match(r"^(section|synthesis)_(\d+)(?:_|$)", text)
+    return f"{match.group(1)}_{match.group(2)}" if match else text
+
+
+def _checkpoint_filename(chapter_id: Any) -> str:
+    """Build a portable checkpoint filename without changing the chapter ID."""
+    canonical = str(chapter_id or "").strip() or "unknown"
+    safe_stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", canonical).strip(" .") or "unknown"
+    digest = hashlib.sha1(canonical.encode("utf-8")).hexdigest()[:10]
+    return f"chapter_{safe_stem}_{digest}.json"
 
 _FORBIDDEN_SECTION_PATTERNS = [
     (r'^#+\s*反证(?:与|及|和)?边界条件', 'risk_disclosure'),
@@ -120,6 +145,30 @@ def _is_vague_source(source: str) -> bool:
     return bool(_VAGUE_SOURCE_PATTERNS.match(source.strip()))
 
 
+def _source_url_for(source: str, available_sources: List[Dict[str, Any]]) -> str:
+    """Resolve a source title to its URL without inventing provenance."""
+    if not source or _is_vague_source(source):
+        return ""
+    source_norm = source.strip().lower()
+    exact = []
+    fuzzy = []
+    for item in available_sources or []:
+        title = str(item.get("title", "") or "").strip()
+        url = str(item.get("url", "") or item.get("href", "") or "").strip()
+        if not url:
+            continue
+        title_norm = title.lower()
+        if source_norm == title_norm:
+            exact.append(url)
+        elif source_norm in title_norm or title_norm in source_norm:
+            fuzzy.append(url)
+    if len(set(exact)) == 1:
+        return exact[0]
+    if not exact and len(set(fuzzy)) == 1:
+        return fuzzy[0]
+    return ""
+
+
 class RetryPolicy:
     MAX_CHAPTER_RETRIES = 2
     MAX_REVIEW_RETRIES = 2
@@ -147,15 +196,705 @@ class RetryPolicy:
 
 class ReportOrchestrator:
 
+    @staticmethod
+    def _quality_issue_key(issue: Any, chapters: List[ChapterWriteOutput]) -> str:
+        """Build a stable key for quality-loop findings across LLM re-audits."""
+        location = getattr(issue, "location", "")
+        if isinstance(location, (list, tuple, set)):
+            location_text = "|".join(str(item or "").strip() for item in location)
+        else:
+            location_text = str(location or "").strip()
+        chapter_id = ReportOrchestrator._resolve_location_for_key(location_text, chapters)
+        dimension = str(getattr(issue, "dimension", "") or "").strip()
+        description = re.sub(r"\d+(?:\.\d+)?", "#", str(getattr(issue, "description", "") or ""))
+        description = re.sub(r"\s+", "", description).strip()
+        return "|".join((dimension, chapter_id or location_text, description[:160]))
+
+    @staticmethod
+    def _resolve_location_for_key(location: str, chapters: List[ChapterWriteOutput]) -> str:
+        if not location:
+            return ""
+        for chapter in chapters:
+            if chapter.chapter_id in location or chapter.title in location:
+                return chapter.chapter_id
+        return location
+
+    @staticmethod
+    def _build_defense_search_gaps(audit: Dict[str, Any]) -> List[DataGap]:
+        """Turn evidence and chapter-coverage failures into search gaps.
+
+        Coverage failures are P0: a missing topic/section is never allowed to
+        be treated as a prose rewrite.  Older code only accepted L2/L3
+        issues with a non-empty ``metric`` and silently discarded chapter
+        coverage issues, which is why missing sections escaped L1-L5 repair.
+        """
+        gaps: List[DataGap] = []
+        seen: Set[Tuple[str, str]] = set()
+        for issue in (audit.get("issues", []) if isinstance(audit, dict) else []):
+            if not isinstance(issue, dict):
+                continue
+            layer = str(issue.get("layer", "") or "")
+            code = str(issue.get("code", "") or "")
+            is_coverage = code != "synthesis_content_missing" and (layer == "coverage" or code in {
+                "missing_chapter", "missing_section", "missing_topic",
+                "chapter_content_missing", "placeholder_content",
+            })
+            if not is_coverage and layer not in {"L2", "L3"}:
+                continue
+            if not is_coverage and code not in {
+                "missing_geographic_scope", "missing_period", "missing_population",
+                "missing_source", "missing_source_url", "unverified_evidence",
+            }:
+                continue
+            chapter_id = str(issue.get("chapter_id", "") or "").strip()
+            metric = str(
+                issue.get("metric") or issue.get("topic") or issue.get("section_title")
+                or ("章节内容" if is_coverage else "")
+            ).strip()
+            if not chapter_id or not metric or (chapter_id, metric) in seen:
+                continue
+            seen.add((chapter_id, metric))
+            context = str(issue.get("message", "") or issue.get("code", ""))
+            gaps.append(DataGap(
+                chapter_id=chapter_id,
+                metric=metric,
+                context=context,
+                search_keywords=[metric, str(issue.get("section_title", "") or "").strip()],
+                audit_layer="coverage" if is_coverage else layer,
+            ))
+        return gaps
+
+    def _build_report_coverage_issues(
+        self, chapters: List[ChapterWriteOutput], task_structure: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """Audit required chapters after writing, including placeholder output."""
+        chapter_by_id = {str(chapter.chapter_id): chapter for chapter in chapters}
+        issues: List[Dict[str, Any]] = []
+        placeholder_markers = (
+            "本章节数据不足", "无法生成完整分析", "内容待补充",
+            "摘要生成失败", "章节生成失败",
+        )
+        # Manifest is the frozen report identity contract.  Do not fall back
+        # to the mutable/nested section tree when it is available.
+        report_specs = self._report_chapter_specs(task_structure)
+
+        for spec in report_specs:
+            chapter_id = str(spec.get("section_id", "") or "").strip()
+            title = str(spec.get("name", "") or spec.get("title", "") or chapter_id).strip()
+            chapter = chapter_by_id.get(chapter_id)
+            if chapter is None:
+                issues.append({
+                    "layer": "coverage", "code": "missing_section",
+                    "chapter_id": chapter_id, "section_title": title,
+                    "message": f"缺少必需章节：{title}",
+                })
+                continue
+            content = str(chapter.content or "").strip()
+            is_synthesis = str(spec.get("section_role", "")).lower() == "synthesis"
+            chapter_status = str(getattr(chapter, "status", "ready") or "ready").lower()
+            if (
+                chapter_status not in {"ready", "completed", ""}
+                or not content
+                or any(marker in content for marker in placeholder_markers)
+            ):
+                issues.append({
+                    "layer": "coverage",
+                    "code": "synthesis_content_missing" if is_synthesis else "chapter_content_missing",
+                    "chapter_id": chapter_id, "section_title": title,
+                    "topic": title,
+                    "message": (
+                        f"综合章节未生成有效内容：{title}"
+                        if is_synthesis else f"必需章节没有可交付内容：{title}"
+                    ),
+                })
+                continue
+            requirement = self._build_chapter_requirement(spec)
+            data = {
+                "content": content,
+                "upstream_data_points": [
+                    asdict(point) if hasattr(point, "__dataclass_fields__") else point
+                    for point in (chapter.data_points_used or [])
+                ],
+            }
+            coverage = self._coverage_checker.check(
+                requirement, data, ReportEvidenceContext(),
+            )
+            for topic_name in coverage.missing_topics:
+                issues.append({
+                    "layer": "coverage", "code": "missing_topic",
+                    "chapter_id": chapter_id, "section_title": title,
+                    "topic": topic_name,
+                    "message": f"必需章节缺少主题：{topic_name}",
+                })
+            for metric in coverage.missing_metrics:
+                issues.append({
+                    "layer": "coverage", "code": "missing_metric",
+                    "chapter_id": chapter_id, "section_title": title,
+                    "metric": metric,
+                    "message": f"必需章节缺少指标：{metric}",
+                })
+        return issues
+
+    @staticmethod
+    def _report_chapter_specs(task_structure: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Return the same frozen chapter set for writing, restore and audit."""
+        manifest = [
+            item for item in (task_structure.get("section_manifest", []) or [])
+            if isinstance(item, dict) and str(item.get("section_id") or "").strip()
+        ]
+        if not manifest:
+            return ReportOrchestrator._iter_report_chapter_specs(
+                task_structure.get("sections", [])
+            )
+        specs = []
+        for item in manifest:
+            spec = dict(item)
+            spec.setdefault("name", spec.get("title") or spec["section_id"])
+            spec.setdefault("section_name", spec.get("title") or spec["section_id"])
+            spec.setdefault("section_role", spec.get("role") or "analysis")
+            spec.setdefault("required_metrics", item.get("required_metrics", []))
+            spec.setdefault("required_topics", item.get("required_topics", []))
+            specs.append(spec)
+        return specs
+
+    @staticmethod
+    def _apply_defense_structural_repairs(
+        chapters: List[ChapterWriteOutput], audit: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """Apply only deterministic L1 repairs that cannot change meaning."""
+        planned = ReportOrchestrator._build_defense_structural_actions(chapters, audit)
+        applied: List[Dict[str, Any]] = []
+        chapter_by_id = {chapter.chapter_id: chapter for chapter in chapters}
+        for action in planned:
+            chapter_id = action["chapter_id"]
+            metric = action["metric"]
+            chapter = chapter_by_id.get(chapter_id)
+            if chapter is None:
+                continue
+            for data_point in chapter.data_points_used or []:
+                point_metric = data_point.get("metric") if isinstance(data_point, dict) else data_point.metric
+                point_chapter_id = data_point.get("chapter_id") if isinstance(data_point, dict) else data_point.chapter_id
+                if point_metric != metric or point_chapter_id:
+                    continue
+                if isinstance(data_point, dict):
+                    data_point["chapter_id"] = chapter_id
+                else:
+                    data_point.chapter_id = chapter_id
+                applied.append({
+                    "layer": "L1",
+                    "type": "bind_chapter",
+                    "chapter_id": chapter_id,
+                    "metric": metric,
+                })
+                break
+        return applied
+
+    @staticmethod
+    def _build_defense_structural_actions(
+        chapters: List[ChapterWriteOutput], audit: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """Plan only L1 bindings that have an unambiguous target data point."""
+        actions: List[Dict[str, Any]] = []
+        chapter_by_id = {chapter.chapter_id: chapter for chapter in chapters}
+        for issue in (audit.get("issues", []) if isinstance(audit, dict) else []):
+            if not isinstance(issue, dict):
+                continue
+            if issue.get("layer") != "L1" or issue.get("code") != "missing_chapter_binding":
+                continue
+            chapter_id = str(issue.get("chapter_id", "") or "").strip()
+            metric = str(issue.get("metric", "") or "").strip()
+            chapter = chapter_by_id.get(chapter_id)
+            if not chapter_id or not metric or chapter is None:
+                continue
+            if any(
+                (point.get("metric") if isinstance(point, dict) else point.metric) == metric
+                and not (point.get("chapter_id") if isinstance(point, dict) else point.chapter_id)
+                for point in (chapter.data_points_used or [])
+            ):
+                action = {
+                    "layer": "L1",
+                    "type": "bind_chapter",
+                    "chapter_id": chapter_id,
+                    "metric": metric,
+                }
+                if action not in actions:
+                    actions.append(action)
+        return actions
+
+    @staticmethod
+    def _build_defense_rewrite_actions(
+        audit: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """Create one scoped rewrite request per chapter.
+
+        Several audit rules can flag the same chapter at once.  Sending one
+        LLM patch request per issue caused a repair storm and made a real
+        report spend most of its time repeatedly rewriting the same chapter.
+        Merge the instructions by chapter while retaining every issue code and
+        message for the single chapter-level repair.
+        """
+        actions: List[Dict[str, Any]] = []
+        grouped: Dict[str, Dict[str, Any]] = {}
+        for issue in (audit.get("issues", []) if isinstance(audit, dict) else []):
+            if not isinstance(issue, dict):
+                continue
+            if issue.get("code") not in {
+                "scope_collision", "unlabeled_future_value", "unbound_numeric_claim",
+            }:
+                continue
+            if issue.get("layer") != "L4" and issue.get("code") != "unbound_numeric_claim":
+                continue
+            chapter_id = str(issue.get("chapter_id", "") or "").strip()
+            code = str(issue.get("code", "") or "").strip()
+            if not chapter_id or not code:
+                continue
+            group = grouped.setdefault(chapter_id, {
+                "layer": "L3" if code == "unbound_numeric_claim" and issue.get("layer") == "L3" else "L4",
+                "type": "rewrite_scope",
+                "chapter_id": chapter_id,
+                "codes": [],
+                "instructions": [],
+            })
+            layer = str(issue.get("layer", "L4") or "L4")
+            if layer == "L3" and code == "unbound_numeric_claim":
+                group["layer"] = layer
+            if code not in group["codes"]:
+                group["codes"].append(code)
+            message = str(issue.get("message", "") or code).strip()
+            if message and message not in group["instructions"]:
+                group["instructions"].append(message)
+
+        for group in grouped.values():
+            group["code"] = "+".join(group.pop("codes"))
+            group["instruction"] = "；".join(group.pop("instructions"))
+            actions.append(group)
+        return actions
+
+    @staticmethod
+    def _build_defense_conflict_actions(
+        audit: Dict[str, Any], conflicts: List[DataConflict]
+    ) -> List[Dict[str, Any]]:
+        """Plan L5 resolution only from typed registry conflicts."""
+        has_l5_issue = any(
+            isinstance(issue, dict)
+            and issue.get("layer") == "L5"
+            and issue.get("code") == "unresolved_registry_conflict"
+            for issue in (audit.get("issues", []) if isinstance(audit, dict) else [])
+        )
+        if not has_l5_issue:
+            return []
+        actions = []
+        for conflict in conflicts or []:
+            if not isinstance(conflict, DataConflict) or not conflict.metric:
+                continue
+            actions.append({
+                "layer": "L5",
+                "type": "resolve_conflict",
+                "metric": conflict.metric,
+            })
+        return actions
+
+    @staticmethod
+    def _is_safe_conflict_resolution(resolution: DataConflictResolution) -> bool:
+        """Reject resolver fallbacks that merely select the first entry."""
+        if not isinstance(resolution, DataConflictResolution):
+            return False
+        reason = str(resolution.reason or "").lower()
+        unsafe_markers = (
+            "using first entry",
+            "no search skill",
+            "llm failed",
+            "json parse failed",
+        )
+        return bool(
+            resolution.canonical_value
+            and resolution.canonical_source
+            and not any(marker in reason for marker in unsafe_markers)
+        )
+
+    async def _run_defense_repair_loop(
+        self,
+        chapters: List[ChapterWriteOutput],
+        review: ReviewOutput,
+        framework_config: Dict[str, Any],
+        topic: str,
+        task_structure: Dict[str, Any],
+        original_sources: List[Dict[str, Any]],
+        quality_report: Optional[QualityReport],
+        conflicts_summary: str,
+        max_rounds: int = 3,
+    ) -> Dict[str, Any]:
+        """Run bounded evidence repair and full re-audit for assistant delivery."""
+        controller = DefenseLoopController(max_rounds=max_rounds)
+        current_chapters = chapters
+        exec_summary = await self._generate_exec_summary(
+            current_chapters, task_structure, topic
+        )
+        history: List[Dict[str, Any]] = []
+
+        while True:
+            self._chapters = current_chapters
+            report = self._assemble_final_report(
+                current_chapters,
+                exec_summary,
+                review,
+                topic,
+                self._merge_repair_sources(original_sources, self._repair_results),
+                quality_report=quality_report,
+                conflicts_summary=conflicts_summary,
+                llm_trace=self._llm_trace,
+                task_id=self._task_id,
+            )
+            audit = report.get("defense_audit", {})
+            coverage_issues = self._build_report_coverage_issues(
+                current_chapters, task_structure,
+            )
+            if coverage_issues:
+                audit = dict(audit or {})
+                audit["passed"] = False
+                audit["issues"] = coverage_issues + list(audit.get("issues", []) or [])
+                report["defense_audit"] = audit
+                report["quality_gate_status"] = (
+                    "blocked"
+                    if audit.get("layers", {}).get("L5")
+                    else "degraded"
+                )
+                report["formal_complete"] = False
+            report["evidence_stats"] = {
+                "raw_search_evidence_count": len(self._evidence_context.raw_search_results),
+                "evidence_registry_count": len(self._evidence_context.evidence_registry),
+                "external_search_count": self._evidence_search_count,
+            }
+            gaps = self._build_defense_search_gaps(audit)
+            conflicts = self._data_registry.get_conflicts()
+            # P0 coverage acquisition must precede binding, prose rewrites,
+            # and L5 conflict handling.
+            actions = [
+                {
+                    "layer": gap.audit_layer or "L3",
+                    "type": "search_evidence",
+                    "chapter_id": gap.chapter_id,
+                    "metric": gap.metric,
+                }
+                for gap in gaps
+            ] + self._build_defense_structural_actions(current_chapters, audit) + self._build_defense_rewrite_actions(audit) + self._build_defense_conflict_actions(
+                audit, conflicts
+            )
+            decision = controller.evaluate(audit, actions)
+            logger.info(
+                "DEFENSE_DECISION task_id=%s round=%d status=%s should_repair=%s "
+                "actions=%d termination_reason=%s issue_signature=%s",
+                self._task_id,
+                decision.round_number,
+                decision.status,
+                decision.should_repair,
+                len(decision.actions),
+                decision.termination_reason or "none",
+                decision.issue_signature,
+            )
+            history_record = {
+                "status": decision.status,
+                "round": decision.round_number,
+                "stages": decision.stages,
+                "termination_reason": decision.termination_reason,
+                "issue_signature": decision.issue_signature,
+                "audit_passed": bool(audit.get("passed", False)),
+                "audit_score": audit.get("score"),
+                "issue_count": len(audit.get("issues", []) or []),
+                "issues": [
+                    {
+                        "layer": item.get("layer", ""),
+                        "code": item.get("code", ""),
+                        "chapter_id": item.get("chapter_id", ""),
+                        "metric": item.get("metric", ""),
+                    }
+                    for item in (audit.get("issues", []) or [])
+                    if isinstance(item, dict)
+                ],
+                "planned_actions": [dict(action) for action in decision.actions],
+            }
+            history.append(history_record)
+
+            if not decision.should_repair:
+                report = await self._plan_and_render_charts(report)
+                report["defense_loop"] = {
+                    "status": decision.status,
+                    "rounds": controller.rounds,
+                    "history": history,
+                    "issue_states": dict(sorted(controller.issue_states.items())),
+                }
+                return report
+
+            structural_actions = [
+                action for action in decision.actions if action.get("type") == "bind_chapter"
+            ]
+            applied_structural = (
+                self._apply_defense_structural_repairs(current_chapters, audit)
+                if structural_actions else []
+            )
+            rewrite_actions = [
+                action for action in decision.actions if action.get("type") == "rewrite_scope"
+            ]
+            applied_rewrites = []
+            chapter_positions = {
+                chapter.chapter_id: index
+                for index, chapter in enumerate(current_chapters)
+            }
+            for action in rewrite_actions:
+                chapter_index = chapter_positions.get(action.get("chapter_id", ""))
+                if chapter_index is None:
+                    continue
+                chapter = current_chapters[chapter_index]
+                patched = await self._chapter_writer.patch_data(
+                    chapter=chapter,
+                    patch_instructions=[
+                        f"{action['layer']}审计修复（{action['code']}）：{action['instruction']}。"
+                        "不得改变已有可验证数值；对无据数字只能删除、降级为数据不足，"
+                        "对口径冲突必须拆分并明确范围。"
+                    ],
+                    framework_config=framework_config,
+                )
+                if isinstance(patched, ChapterWriteOutput):
+                    current_chapters[chapter_index] = patched
+                    applied_rewrites.append(action)
+            applied_safety_repairs = self._apply_defense_content_safety_repairs(
+                current_chapters, audit,
+            )
+            conflict_actions = [
+                action for action in decision.actions if action.get("type") == "resolve_conflict"
+            ]
+            conflict_by_metric = {conflict.metric: conflict for conflict in conflicts}
+            conflict_resolutions = []
+            for action in conflict_actions:
+                conflict = conflict_by_metric.get(action.get("metric", ""))
+                if conflict is None:
+                    continue
+                resolution = await self._conflict_resolver.resolve(conflict, topic)
+                if self._is_safe_conflict_resolution(resolution):
+                    conflict_resolutions.append(resolution)
+            # Record attempted actions before the next audit.  Without an
+            # explicit lifecycle mark, an issue can reappear with slightly
+            # different prose and be scheduled again in a later round.
+            controller.mark_actions_processed(decision.actions)
+            repair_results = await self._acquire_evidence_batch(
+                gaps, topic, scope="report_revision",
+            )
+            found_results = [result for result in repair_results if result.found]
+            self._repair_results.extend(found_results)
+            if (
+                not found_results
+                and not applied_structural
+                and not applied_rewrites
+                and not applied_safety_repairs
+                and not conflict_resolutions
+            ):
+                # Re-audit unchanged data once; the controller will convert
+                # the repeated signature into a warning delivery outcome.
+                history_record["repair_result"] = "no_change"
+                continue
+
+            if found_results:
+                current_chapters, _ = await self._apply_data_repairs(
+                    current_chapters,
+                    found_results,
+                    [],
+                    framework_config,
+                )
+            if conflict_resolutions:
+                current_chapters, _ = await self._apply_data_repairs(
+                    current_chapters,
+                    [],
+                    conflict_resolutions,
+                    framework_config,
+                )
+            history_record["repair_result"] = {
+                "found_evidence": len(found_results),
+                "bound_chapters": len(applied_structural),
+                "rewritten_chapters": len(applied_rewrites),
+                "content_safety_repairs": len(applied_safety_repairs),
+                "resolved_conflicts": len(conflict_resolutions),
+            }
+            exec_summary = await self._generate_exec_summary(
+                current_chapters, task_structure, topic
+            )
+
+    @staticmethod
+    def _apply_defense_content_safety_repairs(
+        chapters: List[ChapterWriteOutput], audit: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """Apply conservative repairs without inventing or changing numeric facts."""
+        issues = audit.get("issues", []) if isinstance(audit, dict) else []
+        by_chapter: Dict[str, Set[str]] = {}
+        for issue in issues:
+            if not isinstance(issue, dict):
+                continue
+            code = str(issue.get("code", ""))
+            if code in {"scope_collision", "unbound_numeric_claim"}:
+                by_chapter.setdefault(str(issue.get("chapter_id", "")), set()).add(code)
+
+        quantified = re.compile(
+            r"-?\d+(?:\.\d+)?\s*(?:%|％|百分比|亿元|亿美元|万元|万亿美元|万辆|万台|吨|万人|万人次|人|家|个|件|台)"
+        )
+        repaired: List[Dict[str, Any]] = []
+        for chapter in chapters:
+            codes = by_chapter.get(chapter.chapter_id, set())
+            content = chapter.content or ""
+            if not codes or not content:
+                continue
+
+            if "unbound_numeric_claim" in codes:
+                valid_values = {
+                    (re.sub(r",", "", str(point.value or "")).strip(), str(point.unit or "").strip())
+                    for point in (chapter.data_points_used or [])
+                }
+
+                def _safe_sentence(sentence: str) -> str:
+                    for match in quantified.findall(sentence):
+                        value_match = re.match(r"(-?\d+(?:\.\d+)?)\s*(.*)", match)
+                        if not value_match:
+                            continue
+                        value, unit = value_match.groups()
+                        if not any(
+                            value == known_value
+                            and (unit == known_unit or unit in known_unit or known_unit in unit)
+                            for known_value, known_unit in valid_values
+                        ):
+                            return "当前数据尚缺少可核验的结构化证据，暂不作定量判断。"
+                    return sentence
+
+                content = re.sub(
+                    r"[^。！？.!?\n]*(?:" + quantified.pattern + r")[^。！？.!?\n]*[。！？.!?]?",
+                    lambda match: _safe_sentence(match.group(0)),
+                    content,
+                )
+
+            if "scope_collision" in codes:
+                paragraphs = []
+                for paragraph in content.split("\n\n"):
+                    if (
+                        re.search(r"全球|世界", paragraph)
+                        and re.search(r"国内|中国", paragraph)
+                        and re.search(r"销量|市场|增速|增长|渗透率", paragraph)
+                    ):
+                        sentences = [
+                            part for part in re.split(r"(?<=[。！？.!?])\s*", paragraph)
+                            if part
+                        ]
+                        rebuilt = []
+                        for sentence in sentences:
+                            if re.search(r"全球|世界", sentence) and re.search(r"国内|中国", sentence):
+                                sentence = "全球与中国市场统计口径不同，本文不将两者直接合并比较。"
+                            if rebuilt and re.search(r"国内|中国", sentence) and re.search(r"全球|世界", "".join(rebuilt)):
+                                rebuilt.append("\n")
+                            rebuilt.append(sentence)
+                        paragraph = "".join(rebuilt)
+                    paragraphs.append(paragraph)
+                content = "\n\n".join(paragraphs)
+
+            if content != chapter.content:
+                chapter.content = content
+                repaired.append({"chapter_id": chapter.chapter_id, "codes": sorted(codes)})
+        return repaired
+
+    @staticmethod
+    def _merge_repair_sources(
+        original_sources: Optional[List[Dict[str, Any]]],
+        repair_results: List[DataRepairResult],
+    ) -> List[Dict[str, Any]]:
+        """Merge uniquely identified repair evidence into the source catalog."""
+        merged = [dict(source) for source in (original_sources or [])]
+        for result in repair_results or []:
+            if not result.found or not result.source_url:
+                continue
+            repaired = {
+                "title": result.source_title or result.source or result.source_url,
+                "url": result.source_url,
+                "type": "web",
+                "evidence_id": result.evidence_id,
+                "provenance_id": result.provenance_id,
+                "evidence_excerpt": result.evidence_excerpt,
+                "locator": result.locator,
+            }
+            existing = next(
+                (
+                    source for source in merged
+                    if source.get("url") == repaired["url"]
+                    or (
+                        repaired["evidence_id"]
+                        and source.get("evidence_id") == repaired["evidence_id"]
+                    )
+                ),
+                None,
+            )
+            if existing is None:
+                merged.append(repaired)
+            else:
+                for key, value in repaired.items():
+                    if value not in (None, ""):
+                        existing[key] = value
+        return merged
+
+    @staticmethod
+    def _ensure_source_evidence_identity(
+        sources: Optional[List[Dict[str, Any]]],
+        *,
+        task_id: str = "report",
+    ) -> List[Dict[str, Any]]:
+        """Normalize every persisted source into auditable evidence.
+
+        Sources loaded from pre-gateway checkpoints are valid legacy inputs,
+        but they do not carry gateway identities.  Assign deterministic IDs at
+        the final report boundary so legacy and newly repaired sources follow
+        the same evidence contract.
+        """
+        normalized: List[Dict[str, Any]] = []
+        for raw in sources or []:
+            source = dict(raw)
+            url = str(source.get("url") or source.get("href") or "").strip()
+            title = str(source.get("title") or "").strip()
+            provider = str(source.get("source") or source.get("provider") or "").strip()
+            excerpt = str(
+                source.get("evidence_excerpt")
+                or source.get("excerpt")
+                or source.get("snippet")
+                or ""
+            ).strip()
+            locator = str(source.get("locator") or url).strip()
+            if not (url or title or excerpt):
+                normalized.append(source)
+                continue
+            evidence_id = str(source.get("evidence_id") or "").strip()
+            if not evidence_id:
+                material = "|".join((provider, url, title, excerpt, locator))
+                evidence_id = "ev_" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+            provenance_id = str(source.get("provenance_id") or "").strip()
+            if not provenance_id:
+                material = "|".join((str(task_id or "report"), evidence_id))
+                provenance_id = "prov_" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+            source["url"] = url or source.get("url") or source.get("href", "")
+            source["evidence_id"] = evidence_id
+            source["provenance_id"] = provenance_id
+            if excerpt:
+                source["evidence_excerpt"] = excerpt
+            if locator:
+                source["locator"] = locator
+            normalized.append(source)
+        return normalized
+
     def __init__(
         self,
         chapter_writer: ChapterWriter,
         chapter_reviewer: ChapterReviewAgent,
         global_reviewer: GlobalReviewAgent,
-        data_repair_agent: DataRepairAgent,
-        conflict_resolver: ConflictResolver,
+        data_repair_agent: Optional[DataRepairAgent] = None,
+        conflict_resolver: Optional[ConflictResolver] = None,
         prompt_manager: PromptManager = None,
         skill_registry=None,
+        search_gateway=None,
+        search_skill=None,
+        web_scraper_skill=None,
+        chart_planner=None,
+        chart_generator=None,
     ) -> None:
         self._chapter_writer = chapter_writer
         self._chapter_reviewer = chapter_reviewer
@@ -169,10 +908,100 @@ class ReportOrchestrator:
         self._llm_call_count = 0
         self._total_tokens_used = 0
         self._skill_registry = skill_registry
+        self._search_gateway = search_gateway
+        self._search_skill = search_skill
+        self._web_scraper_skill = web_scraper_skill
+        # Chart planning/rendering is injected by the production orchestrator
+        # so report-upgrade tests remain deterministic and do not call an LLM.
+        self._chart_planner = chart_planner
+        self._chart_generator = chart_generator
         self._structured_data_repair = StructuredDataRepairAgent(skill_registry=skill_registry)
         self._llm_trace: List[Dict[str, Any]] = []
         self._chapters: List[ChapterWriteOutput] = []
         self._framework_config: Dict[str, Any] = {}
+        self._repair_results: List[DataRepairResult] = []
+        self._task_id: str = "report"
+        self._evidence_context = ReportEvidenceContext()
+        self._coverage_checker = ChapterCoverageChecker()
+        self._evidence_acquirer = ReportEvidenceAcquirer(
+            search_gateway=search_gateway, prompt_manager=self._prompts,
+        )
+        self._evidence_search_count = 0
+
+    async def _plan_and_render_charts(self, report: Dict[str, Any]) -> Dict[str, Any]:
+        """Attach semantically planned chart artifacts to the final sections.
+
+        The report-upgrade path used to return ``charts=[]`` unconditionally.
+        That bypassed the existing HTML/DOCX/PPTX chart insertion contract.
+        Planning happens after chapter writing and evidence repair so the LLM
+        sees the final narrative and verified data, while rendering remains a
+        deterministic local operation.
+        """
+        if self._chart_planner is None or self._chart_generator is None:
+            return report
+
+        from src.services.chart_generator import ChartSpec
+
+        for section in report.get("sections", []):
+            if not isinstance(section, dict):
+                continue
+            try:
+                plans = await self._chart_planner.plan(
+                    content=str(section.get("content", "")),
+                    topic=str(report.get("topic", "")),
+                    section_title=str(section.get("title", "")),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Chart planning failed for section '%s': %s",
+                    section.get("title", ""), exc,
+                )
+                section["charts"] = []
+                continue
+
+            charts = []
+            for plan in plans or []:
+                try:
+                    spec = ChartSpec(
+                        chart_type=plan.chart_type,
+                        title=plan.title or section.get("title", ""),
+                        data=plan.data,
+                        question=plan.reason or plan.title or section.get("title", ""),
+                        subtitle=plan.subtitle,
+                        unit=plan.unit,
+                        source=plan.data_source,
+                        xlabel=plan.xlabel,
+                        ylabel=plan.ylabel,
+                        caption=plan.caption,
+                    )
+                    rendered = self._chart_generator.generate(spec)
+                    if not rendered.success or not rendered.image_path:
+                        logger.warning(
+                            "Chart rendering failed for section '%s': %s",
+                            section.get("title", ""), rendered.error,
+                        )
+                        continue
+                    charts.append({
+                        "path": rendered.image_path,
+                        "caption": plan.caption or plan.title,
+                        "title": plan.title,
+                        "subtitle": plan.subtitle,
+                        "source": plan.data_source,
+                        "insertion_anchor": plan.insertion_anchor,
+                        "anchor_type": plan.anchor_type,
+                        "unit": plan.unit,
+                    })
+                except Exception as exc:
+                    logger.warning(
+                        "Chart rendering raised for section '%s': %s",
+                        section.get("title", ""), exc,
+                    )
+            section["charts"] = charts
+            logger.info(
+                "Charts attached section='%s' planned=%d rendered=%d",
+                section.get("title", ""), len(plans or []), len(charts),
+            )
+        return report
 
     async def generate_report(
         self,
@@ -195,11 +1024,21 @@ class ReportOrchestrator:
         task_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         last_error = None
+        self._repair_results = []
+        self._evidence_search_count = 0
+        self._task_id = str(task_id or "report")
 
         for full_attempt in range(RetryPolicy.MAX_FULL_RETRIES + 1):
             try:
                 if task_id:
-                    restored = await self._restore_from_checkpoint(task_id)
+                    requested_section_ids = {
+                        str(section.get("section_id", ""))
+                        for section in self._report_chapter_specs(task_structure)
+                        if section.get("section_id")
+                    }
+                    restored = await self._restore_from_checkpoint(
+                        task_id, allowed_section_ids=requested_section_ids,
+                    )
                     if restored:
                         chapters, registry_snapshot = restored
                         self._data_registry = DataRegistry.from_snapshot(registry_snapshot)
@@ -220,20 +1059,84 @@ class ReportOrchestrator:
                 self._task_structure = task_structure
                 self._aggregated_result = aggregated_result
                 self._framework_config = framework_config
+                self._evidence_context = self._build_evidence_context(
+                    aggregated_result, task_structure, task_id=self._task_id,
+                )
 
                 narrative_context = self._understand_framework(task_structure, framework_config)
 
-                for section_spec in task_structure.get("sections", []):
+                for section_spec in self._report_chapter_specs(task_structure):
                     section_id = section_spec.get("section_id", "")
 
                     if section_id in completed_section_ids:
                         continue
 
                     chapter_data, raw_data_summary = self._extract_chapter_data(
-                        aggregated_result, section_id,
+                        aggregated_result,
+                        section_spec.get("parent_section_id", section_id),
                         section_spec.get("content_dependency", []),
+                        sub_section_id=section_spec.get("sub_section_id", ""),
                         skill_registry=self._skill_registry,
                     )
+                    requirement = self._build_chapter_requirement(section_spec)
+                    coverage = self._coverage_checker.check(
+                        requirement, chapter_data, self._evidence_context,
+                    )
+                    is_synthesis = str(section_spec.get("section_role", "")).lower() == "synthesis"
+                    if not coverage.ready_to_write and not is_synthesis:
+                        logger.warning(
+                            "Chapter %s has uncovered requirements: topics=%s metrics=%s",
+                            section_id, coverage.missing_topics, coverage.missing_metrics,
+                        )
+                        # Topics are first-class coverage requirements too.
+                        # Using only missing_metrics here made an entire
+                        # subsection disappear when it had no numeric metric.
+                        missing_requirements = [
+                            (metric, f"章节覆盖检查缺少指标：{metric}")
+                            for metric in coverage.missing_metrics
+                        ] + [
+                            (topic_name, f"章节覆盖检查缺少主题/章节内容：{topic_name}")
+                            for topic_name in coverage.missing_topics
+                        ]
+                        gaps = [
+                            DataGap(
+                                chapter_id=section_id,
+                                metric=gap_name,
+                                context=gap_context,
+                                search_keywords=[gap_name, section_spec.get("name", "")],
+                                audit_layer="coverage",
+                            )
+                            for gap_name, gap_context in missing_requirements
+                        ]
+                        found = [
+                            item for item in await self._acquire_evidence_batch(
+                                gaps, topic or task_structure.get("topic", ""),
+                                scope="report_generation",
+                            ) if item.found
+                        ]
+                        self._repair_results.extend(found)
+                        for item in found:
+                            chapter_data.setdefault("upstream_data_points", []).append({
+                                "metric": item.gap.metric,
+                                "value": item.value or "",
+                                "unit": item.unit or "",
+                                "source": item.source_title or item.source or "",
+                                "source_url": item.source_url,
+                                "evidence_id": item.evidence_id,
+                                "provenance_id": item.provenance_id,
+                                "evidence_excerpt": item.evidence_excerpt,
+                                "period": item.period,
+                                "geographic_scope": item.geographic_scope,
+                                "population": item.population,
+                                "epistemic_level": item.epistemic_level,
+                            })
+                        if found:
+                            raw_data_summary = self._extract_raw_summary({
+                                "data_points": chapter_data.get("upstream_data_points", []),
+                            })
+                            coverage = self._coverage_checker.check(
+                                requirement, chapter_data, self._evidence_context,
+                            )
 
                     base_content = chapter_data.get("content", "") if isinstance(chapter_data, dict) else ""
                     upstream_data_points = chapter_data.get("upstream_data_points") if isinstance(chapter_data, dict) else None
@@ -254,6 +1157,22 @@ class ReportOrchestrator:
                                     used_metrics_summary=self._data_registry.serialize_used_metrics(),
                                     base_content=base_content,
                                     upstream_data_points=upstream_data_points,
+                                    parent_section_context=section_spec.get("parent_section_context", {}),
+                                    global_evidence_pool=self._evidence_context.raw_search_results,
+                                    raw_search_results=self._evidence_context.raw_search_results,
+                                    raw_data_location=str(
+                                        Path("data", self._task_id, "research_result_cache.json").resolve()
+                                    ),
+                                    sibling_section_summaries=self._evidence_context.section_index.get("siblings", []),
+                                    chapter_requirements={**asdict(requirement), "coverage": asdict(coverage)},
+                                    used_evidence_ids=[
+                                        str(dp.get("evidence_id", ""))
+                                        for dp in (upstream_data_points or [])
+                                        if isinstance(dp, dict) and dp.get("evidence_id")
+                                    ],
+                                    output_format=str(
+                                        task_structure.get("output_format", "docx")
+                                    ),
                                 )
                             )
 
@@ -264,6 +1183,9 @@ class ReportOrchestrator:
                                 self._data_registry.register(
                                     metric=dp.metric, value=dp.value, unit=dp.unit,
                                     chapter_id=chapter.chapter_id, source=dp.source,
+                                    evidence_id=dp.evidence_id, provenance_id=dp.provenance_id,
+                                    source_url=dp.source_url, period=dp.period,
+                                    geographic_scope=dp.geographic_scope, population=dp.population,
                                 )
 
                             best_chapter = chapter
@@ -332,6 +1254,9 @@ class ReportOrchestrator:
                                                 self._data_registry.register(
                                                     metric=dp.metric, value=dp.value, unit=dp.unit,
                                                     chapter_id=chapter.chapter_id, source=dp.source,
+                                                    evidence_id=dp.evidence_id, provenance_id=dp.provenance_id,
+                                                    source_url=dp.source_url, period=dp.period,
+                                                    geographic_scope=dp.geographic_scope, population=dp.population,
                                                 )
                                         if patch_review.score > best_score:
                                             best_chapter = chapter
@@ -385,12 +1310,35 @@ class ReportOrchestrator:
                         logger.error(f"Chapter {section_id} failed after retries")
                         if last_chapter_error and self._is_non_retryable_error(RuntimeError(last_chapter_error)):
                             raise RuntimeError(f"Non-retryable error, aborting: {last_chapter_error}")
-                        continue
+                        # Keep the planned chapter visible in the report.  A
+                        # silent continue makes the actual chapter set look
+                        # complete to downstream consumers and prevents L0
+                        # coverage from distinguishing failure from omission.
+                        failure_title = str(section_spec.get("name") or section_spec.get("title") or section_id)
+                        failure_reason = last_chapter_error or "chapter_write_failed"
+                        chapter = ChapterWriteOutput(
+                            chapter_id=section_id,
+                            title=failure_title,
+                            # Never emit an empty section.  Keep the chapter
+                            # visible with a controlled, auditable status
+                            # sentence; coverage still treats status=failed
+                            # as blocking and the defense loop can repair it.
+                            content=(
+                                f"本章节未生成可验证内容（{failure_reason[:240]}）。"
+                                "系统已记录该章节失败状态，后续修订应补充证据后重新生成。"
+                            ),
+                            sub_section_id=str(section_spec.get("sub_section_id") or ""),
+                            self_check_passed=False,
+                            self_check_issues=[last_chapter_error or "chapter_write_failed"],
+                            status="failed",
+                            error=last_chapter_error or "chapter_write_failed",
+                        )
 
                     chapters.append(chapter)
-                    preceding_summary = self._append_preceding_summary(
-                        preceding_summary, chapter
-                    )
+                    if chapter.status == "ready":
+                        preceding_summary = self._append_preceding_summary(
+                            preceding_summary, chapter
+                        )
 
                     if task_id:
                         await self._checkpoint_chapter(task_id, chapter)
@@ -418,19 +1366,24 @@ class ReportOrchestrator:
                         chapters, review, framework_config, topic, task_structure,
                     )
 
-                exec_summary = await self._generate_exec_summary(chapters, task_structure, topic)
-
-                self._chapters = chapters
-
-                original_sources = getattr(aggregated_result, 'sources', [])
-                return self._assemble_final_report(
-                    chapters, exec_summary, review, topic, original_sources,
+                original_sources = self._merge_repair_sources(
+                    getattr(aggregated_result, 'sources', []),
+                    self._repair_results,
+                )
+                return await self._run_defense_repair_loop(
+                    chapters=chapters,
+                    review=review,
+                    framework_config=framework_config,
+                    topic=topic,
+                    task_structure=task_structure,
+                    original_sources=original_sources,
                     quality_report=quality_report,
-                    llm_trace=self._llm_trace,
+                    conflicts_summary=conflicts_summary,
                 )
 
             except Exception as e:
                 last_error = e
+                logger.exception("Report generation attempt %d failed", full_attempt + 1)
                 if full_attempt < RetryPolicy.MAX_FULL_RETRIES:
                     delay = RetryPolicy.get_delay(full_attempt)
                     logger.warning(f"Full attempt {full_attempt+1} failed: {e}")
@@ -454,6 +1407,13 @@ class ReportOrchestrator:
     def _resolve_chapter_id(self, location: str, chapters: List[ChapterWriteOutput]) -> str:
         if not location:
             return ""
+        if isinstance(location, (list, tuple, set)):
+            for item in location:
+                resolved = self._resolve_chapter_id(str(item or "").strip(), chapters)
+                if resolved:
+                    return resolved
+            return ""
+        location = str(location).strip()
         for ch in chapters:
             if ch.chapter_id == location or ch.title == location:
                 return ch.chapter_id
@@ -482,12 +1442,40 @@ class ReportOrchestrator:
         prev_score = review.overall_score
         best_chapters = list(chapters)
         best_score = prev_score
+        processed_issue_keys: Set[str] = set()
 
         for round_idx in range(RetryPolicy.MAX_CONVERGENCE_ROUNDS):
             logger.info(f"Convergence round {round_idx + 1}/{RetryPolicy.MAX_CONVERGENCE_ROUNDS}, score={prev_score:.1f}")
-            chapters = await self._phase4_fix_and_optimize(
-                chapters, review, framework_config, topic,
+            active_issues = [
+                issue for issue in (review.issues or [])
+                if self._quality_issue_key(issue, chapters) not in processed_issue_keys
+            ]
+            if not active_issues:
+                logger.info("Convergence stopped: no unprocessed quality issues remain")
+                break
+            review_for_repair = ReviewOutput(
+                overall_score=review.overall_score,
+                dimension_scores=review.dimension_scores,
+                issues=active_issues,
+                fix_suggestions=review.fix_suggestions,
             )
+            before_fingerprints = [
+                hashlib.sha256((chapter.content or "").encode("utf-8")).hexdigest()
+                for chapter in chapters
+            ]
+            chapters = await self._phase4_fix_and_optimize(
+                chapters, review_for_repair, framework_config, topic,
+            )
+            processed_issue_keys.update(
+                self._quality_issue_key(issue, chapters) for issue in active_issues
+            )
+            after_fingerprints = [
+                hashlib.sha256((chapter.content or "").encode("utf-8")).hexdigest()
+                for chapter in chapters
+            ]
+            if before_fingerprints == after_fingerprints:
+                logger.info("Convergence stopped: repair produced no content change")
+                break
 
             report_summary = serialize_report_for_review(chapters, self._data_registry)
             conflicts_summary = self._data_registry.serialize_conflicts()
@@ -561,8 +1549,10 @@ class ReportOrchestrator:
             if resolved_id:
                 ch_spec = self._find_section_spec(resolved_id, framework_config)
                 _, raw_summary = self._extract_chapter_data(
-                    self._aggregated_result, resolved_id,
+                    self._aggregated_result,
+                    ch_spec.get("parent_section_id", resolved_id) if ch_spec else resolved_id,
                     ch_spec.get("content_dependency", []) if ch_spec else [],
+                    sub_section_id=ch_spec.get("sub_section_id", "") if ch_spec else "",
                     skill_registry=self._skill_registry,
                 )
 
@@ -616,31 +1606,41 @@ class ReportOrchestrator:
 
         data_conflicts = self._data_registry.get_conflicts()
 
-        repair_task = self._data_repair_agent.repair_batch(data_gaps, topic)
+        repair_task = self._acquire_evidence_batch(
+            data_gaps, topic, scope="report_revision",
+        )
         resolve_tasks = [self._conflict_resolver.resolve(c, topic) for c in data_conflicts]
 
         repair_results, *resolution_results = await asyncio.gather(
             repair_task, *resolve_tasks,
+        )
+        self._repair_results.extend(
+            result for result in repair_results if result.found
         )
 
         chapters, patched_chapter_ids = await self._apply_data_repairs(
             chapters, repair_results, resolution_results, framework_config,
         )
 
+        # A structured repair can produce several metrics for one chapter.
+        # Patch that chapter once so a large audit result cannot turn into one
+        # LLM call per metric.  The individual repairs remain available below
+        # for their evidence and provenance to be registered separately.
         for ch_id, repairs in structured_data_repairs.items():
-            for repair in repairs:
-                patch_instructions = [
-                    f"补充结构化数据（来源：{repair['source']}）：{json.dumps(repair['data'], ensure_ascii=False, indent=2)[:500]}"
-                ]
-                ch_idx = next((i for i, c in enumerate(chapters) if c.chapter_id == ch_id), None)
-                if ch_idx is not None:
-                    patched = await self._chapter_writer.patch_data(
-                        chapter=chapters[ch_idx],
-                        patch_instructions=patch_instructions,
-                        framework_config=framework_config,
-                    )
-                    chapters[ch_idx] = patched
-                    patched_chapter_ids.add(ch_id)
+            patch_instructions = [
+                f"补充结构化数据（来源：{repair['source']}）："
+                f"{json.dumps(repair['data'], ensure_ascii=False, indent=2)[:500]}"
+                for repair in repairs
+            ]
+            ch_idx = next((i for i, c in enumerate(chapters) if c.chapter_id == ch_id), None)
+            if ch_idx is not None and patch_instructions:
+                patched = await self._chapter_writer.patch_data(
+                    chapter=chapters[ch_idx],
+                    patch_instructions=patch_instructions,
+                    framework_config=framework_config,
+                )
+                chapters[ch_idx] = patched
+                patched_chapter_ids.add(ch_id)
 
         rewrite_needed = patched_chapter_ids | rewrite_chapter_ids
         patch_needed = patch_chapter_ids - rewrite_chapter_ids
@@ -651,8 +1651,10 @@ class ReportOrchestrator:
                 continue
             chapter_spec = self._find_section_spec(chapter.chapter_id, framework_config)
             re_chapter_data, re_raw_summary = self._extract_chapter_data(
-                self._aggregated_result, chapter.chapter_id,
+                self._aggregated_result,
+                chapter_spec.get("parent_section_id", chapter.chapter_id) if chapter_spec else chapter.chapter_id,
                 chapter_spec.get("content_dependency", []) if chapter_spec else [],
+                sub_section_id=chapter_spec.get("sub_section_id", "") if chapter_spec else "",
                 skill_registry=self._skill_registry,
             )
 
@@ -696,6 +1698,9 @@ class ReportOrchestrator:
                         self._data_registry.register(
                             metric=dp.metric, value=dp.value, unit=dp.unit,
                             chapter_id=chapters[i].chapter_id, source=dp.source,
+                            evidence_id=dp.evidence_id, provenance_id=dp.provenance_id,
+                            source_url=dp.source_url, period=dp.period,
+                            geographic_scope=dp.geographic_scope, population=dp.population,
                         )
 
             if chapter.chapter_id in rewrite_chapter_ids:
@@ -756,7 +1761,12 @@ class ReportOrchestrator:
                             chapters[i] = rewritten
 
         preceding_summary = self._rebuild_preceding_summary(chapters)
-        self._verify_downstream_consistency(chapters, rewrite_needed)
+        propagation = self._propagate_canonical_updates(chapters, rewrite_needed)
+        consistency = self._verify_downstream_consistency(chapters, rewrite_needed)
+        self._last_downstream_consistency = {
+            "propagation": propagation,
+            "consistency": consistency,
+        }
 
         return chapters
 
@@ -780,6 +1790,9 @@ class ReportOrchestrator:
                 })
 
         for resolution in conflict_resolutions:
+            if not isinstance(resolution, DataConflictResolution):
+                logger.warning("Skipping invalid conflict resolution result: %r", resolution)
+                continue
             for chapter_id in resolution.chapters_to_update:
                 chapter_updates.setdefault(chapter_id, []).append({
                     "type": "conflict_resolved",
@@ -816,6 +1829,35 @@ class ReportOrchestrator:
                 patch_instructions=patch_instructions,
                 framework_config=framework_config,
             )
+            # Preserve the structured evidence chain returned by the repair
+            # agent.  Text instructions alone are insufficient for L3: the
+            # data point itself must carry the URL and provenance identities.
+            for result in repair_results:
+                if not result.found or result.gap.chapter_id != chapter.chapter_id:
+                    continue
+                for data_point in chapters[i].data_points_used or []:
+                    metric = data_point.get("metric") if isinstance(data_point, dict) else data_point.metric
+                    if metric != result.gap.metric:
+                        continue
+                    target = data_point if isinstance(data_point, dict) else vars(data_point)
+                    for field_name in (
+                        "value", "unit", "source", "source_url", "evidence_id",
+                        "provenance_id", "evidence_excerpt", "locator", "task_id",
+                        "request_id", "retrieved_at", "geographic_scope", "period",
+                        "population", "epistemic_level",
+                    ):
+                        value = getattr(result, field_name, None)
+                        if value not in (None, ""):
+                            target[field_name] = value
+                    target["evidence_status"] = (
+                        "verified"
+                        if target.get("source_url")
+                        and target.get("evidence_id")
+                        and target.get("provenance_id")
+                        and (target.get("evidence_excerpt") or target.get("locator"))
+                        else "unverified"
+                    )
+                    break
             patched_chapter_ids.add(chapter.chapter_id)
 
             for update in updates:
@@ -829,9 +1871,261 @@ class ReportOrchestrator:
         return chapters, patched_chapter_ids
 
     @staticmethod
+    def _iter_report_chapter_specs(sections: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Expand configured sub-sections into independently writable chapters."""
+        expanded: List[Dict[str, Any]] = []
+        # Synthesis chapters (摘要/总结/展望) must be written after all
+        # analytical chapters.  Their content is derived from completed
+        # sibling chapters and must never enter the data-collection queue.
+        ordered_sections = sorted(
+            sections or [],
+            key=lambda item: 1 if str(item.get("section_role", "")).lower() == "synthesis" else 0,
+        )
+        for parent in ordered_sections:
+            parent_id = str(parent.get("section_id", "")).strip()
+            sub_sections = parent.get("sub_section_requirements", parent.get("sub_sections", [])) or []
+            if not sub_sections:
+                expanded.append(dict(parent))
+                continue
+            for index, sub in enumerate(sub_sections, 1):
+                if not isinstance(sub, dict):
+                    continue
+                sub_id = str(
+                    sub.get("sub_section_id") or sub.get("id") or f"sub_{index}"
+                ).strip()
+                sub_name = str(sub.get("name") or sub_id).strip()
+                child = dict(parent)
+                child["parent_section_id"] = parent_id
+                child["section_id"] = f"{parent_id}::{sub_id}"
+                child["section_name"] = f"{parent.get('section_name', parent_id)} - {sub_name}"
+                child["sub_section_id"] = sub_id
+                child["sub_sections"] = [dict(sub, sub_section_id=sub_id)]
+                child["sub_section_requirements"] = [dict(sub, sub_section_id=sub_id)]
+                child["config"] = {
+                    **(parent.get("config", {}) or {}),
+                    "description": sub.get("description") or sub_name,
+                }
+                expanded.append(child)
+        return expanded
+
+    @staticmethod
+    def _build_chapter_requirement(section_spec: Dict[str, Any]) -> ChapterRequirement:
+        """Normalize legacy section specs into the coverage contract."""
+        requirements = section_spec.get("requirements", {}) or {}
+        sub_specs = section_spec.get("sub_section_requirements", section_spec.get("sub_sections", [])) or []
+        sub_topics = [str(item.get("name", "")) for item in sub_specs if isinstance(item, dict) and item.get("name")]
+        sub_metrics = [
+            str(metric) for item in sub_specs if isinstance(item, dict)
+            for metric in (item.get("required_metrics", item.get("points", [])) or [])
+            if str(metric).strip()
+        ]
+        required_topics = requirements.get("required_topics", section_spec.get("required_topics", [])) or []
+        required_metrics = requirements.get(
+            "required_metrics", section_spec.get("required_metrics", section_spec.get("data_needs", [])),
+        ) or []
+        return ChapterRequirement(
+            section_id=str(section_spec.get("section_id", "")),
+            sub_section_id=str(section_spec.get("sub_section_id", "")),
+            required_topics=list(dict.fromkeys([*required_topics, *sub_topics])),
+            required_metrics=list(dict.fromkeys([*required_metrics, *sub_metrics])),
+            claim_scope=str(requirements.get("claim_scope", section_spec.get("claim_scope", "")) or ""),
+            exclude_topics=list(
+                requirements.get("exclude_topics", section_spec.get("exclude_topics", [])) or []
+            ),
+            evidence_level=str(
+                requirements.get("evidence_level", section_spec.get("evidence_level", "factual"))
+                or "factual"
+            ),
+        )
+
+    @staticmethod
+    def _read_aggregate_field(aggregated_result: Any, name: str, default: Any = None) -> Any:
+        """Read fields from both current aggregate objects and old dict snapshots."""
+        if isinstance(aggregated_result, dict):
+            return aggregated_result.get(name, default)
+        return getattr(aggregated_result, name, default)
+
+    @staticmethod
+    def _build_evidence_context(
+        aggregated_result: Any, task_structure: Dict[str, Any], task_id: str = "report",
+    ) -> ReportEvidenceContext:
+        """Build a backward-compatible, report-wide evidence view."""
+        raw_results = list(
+            ReportOrchestrator._read_aggregate_field(
+                aggregated_result, "raw_search_results", [],
+            ) or []
+        )
+        sources = list(
+            ReportOrchestrator._read_aggregate_field(aggregated_result, "sources", []) or []
+        )
+        if not raw_results:
+            raw_results = [dict(item) for item in sources if isinstance(item, dict)]
+        catalog = ReportOrchestrator._ensure_source_evidence_identity(
+            raw_results, task_id=task_id,
+        )
+        registry = dict(
+            ReportOrchestrator._read_aggregate_field(
+                aggregated_result, "evidence_registry", {},
+            ) or {}
+        )
+        for item in catalog:
+            evidence_id = str(item.get("evidence_id") or "").strip()
+            if evidence_id:
+                registry.setdefault(evidence_id, item)
+        section_index = {
+            "sections": [
+                {
+                    "section_id": spec.get("section_id", ""),
+                    "section_name": spec.get("section_name", ""),
+                    "sub_section_id": spec.get("sub_section_id", ""),
+                    "sub_sections": spec.get("sub_sections", spec.get("sub_section_requirements", [])),
+                }
+                for spec in task_structure.get("sections", [])
+            ],
+            "siblings": [],
+        }
+        section_index["siblings"] = list(section_index["sections"])
+        return ReportEvidenceContext(
+            structured_data=ReportOrchestrator._read_aggregate_field(
+                aggregated_result, "data", {},
+            ) or {},
+            raw_search_results=catalog,
+            source_catalog=catalog,
+            evidence_registry=registry,
+            section_index=section_index,
+        )
+
+    async def _acquire_evidence_batch(
+        self, gaps: List[DataGap], topic: str, scope: str,
+    ) -> List[DataRepairResult]:
+        """Search and extract evidence under the report workflow's budget."""
+        if not gaps:
+            return []
+        # Compatibility adapter for callers restoring an old orchestrator
+        # with an injected repair agent. Production constructors no longer
+        # inject one; all new searches use the report-owned acquirer below.
+        if self._search_gateway is None and self._data_repair_agent is not None:
+            return await self._data_repair_agent.repair_batch(gaps, topic)
+        results: List[DataRepairResult] = []
+        pending: List[DataGap] = []
+        for gap in gaps:
+            reused = self._reuse_existing_evidence(gap)
+            if reused is not None:
+                results.append(reused)
+            else:
+                pending.append(gap)
+
+        before_searches = self._gateway_scope_searches(scope)
+        if pending:
+            results.extend(await asyncio.gather(*(
+                self._evidence_acquirer.acquire(gap, topic, scope=scope)
+                for gap in pending
+            )))
+        after_searches = self._gateway_scope_searches(scope)
+        if before_searches is not None and after_searches is not None:
+            self._evidence_search_count += max(0, after_searches - before_searches)
+        elif pending:
+            # Test doubles and legacy gateways may not expose statistics. In
+            # that case count attempted gateway requests, not reused evidence.
+            self._evidence_search_count += len(pending)
+
+        for result in results:
+            if not result.found or not result.source_url:
+                continue
+            evidence = {
+                "title": result.source_title or result.source or result.source_url,
+                "url": result.source_url,
+                "evidence_excerpt": result.evidence_excerpt,
+                "evidence_id": result.evidence_id,
+                "provenance_id": result.provenance_id,
+                "locator": result.locator,
+            }
+            if result.evidence_id:
+                self._evidence_context.evidence_registry[result.evidence_id] = evidence
+            if not any(item.get("url") == result.source_url for item in self._evidence_context.raw_search_results):
+                self._evidence_context.raw_search_results.append(evidence)
+        return results
+
+    def _gateway_scope_searches(self, scope: str) -> Optional[int]:
+        """Return actual gateway reservations for a scope when available."""
+        if self._search_gateway is None:
+            return None
+        get_stats = getattr(self._search_gateway, "get_stats", None)
+        if not callable(get_stats):
+            return None
+        stats = get_stats() or {}
+        return int((stats.get("scope_used_searches") or {}).get(scope, 0))
+
+    def _reuse_existing_evidence(self, gap: DataGap) -> Optional[DataRepairResult]:
+        """Reuse an existing report data point and its raw evidence before searching."""
+        chapter = next(
+            (item for item in self._chapters if item.chapter_id == gap.chapter_id), None,
+        )
+        data_points = list(getattr(chapter, "data_points_used", []) or []) if chapter else []
+        data_point = next(
+            (
+                item for item in data_points
+                if (item.get("metric") if isinstance(item, dict) else item.metric) == gap.metric
+            ),
+            None,
+        )
+        if data_point is None:
+            return None
+
+        def value(name: str, default: Any = "") -> Any:
+            return data_point.get(name, default) if isinstance(data_point, dict) else getattr(data_point, name, default)
+
+        existing_url = str(value("source_url") or "").strip()
+        existing_evidence_id = str(value("evidence_id") or "").strip()
+        metric_text = gap.metric.lower()
+        candidates = self._evidence_context.raw_search_results
+        evidence = next(
+            (
+                item for item in candidates
+                if isinstance(item, dict)
+                and (
+                    (existing_evidence_id and item.get("evidence_id") == existing_evidence_id)
+                    or (existing_url and item.get("url") == existing_url)
+                    or metric_text in self._evidence_text(item).lower()
+                )
+            ),
+            None,
+        )
+        if not evidence or not evidence.get("url"):
+            return None
+        return DataRepairResult(
+            gap=gap,
+            found=True,
+            value=value("value"),
+            unit=value("unit"),
+            source=value("source") or evidence.get("source") or evidence.get("title"),
+            source_title=evidence.get("title") or value("source"),
+            confidence=float(value("confidence", 1.0) or 1.0),
+            source_url=evidence.get("url", ""),
+            evidence_id=evidence.get("evidence_id", ""),
+            provenance_id=evidence.get("provenance_id", ""),
+            evidence_excerpt=evidence.get("evidence_excerpt") or evidence.get("excerpt") or evidence.get("snippet", ""),
+            locator=evidence.get("locator") or evidence.get("url", ""),
+            task_id=evidence.get("task_id", ""),
+            request_id=evidence.get("request_id", ""),
+            retrieved_at=evidence.get("retrieved_at"),
+            geographic_scope=value("geographic_scope"),
+            period=value("period"),
+            population=value("population"),
+            epistemic_level=value("epistemic_level") or "factual",
+        )
+
+    @staticmethod
+    def _evidence_text(item: Dict[str, Any]) -> str:
+        return " ".join(
+            str(item.get(key) or "")
+            for key in ("metric", "title", "snippet", "excerpt", "evidence_excerpt", "body", "content")
+        )
+
+    @staticmethod
     def _extract_chapter_data(
         aggregated_result: Any, section_id: str, content_dependencies: List[str],
-        skill_registry=None,
+        sub_section_id: str = "", skill_registry=None,
     ) -> Tuple[Dict[str, Any], str]:
         layered_content = getattr(aggregated_result, 'layered_content', {})
         content_provenance = getattr(aggregated_result, 'content_provenance', {})
@@ -845,7 +2139,7 @@ class ReportOrchestrator:
                 target = provenance.get("section_target", "")
             else:
                 continue
-            if target == section_id:
+            if _canonical_section_id(target) == _canonical_section_id(section_id):
                 for stage_content in layered_content.values():
                     if key in stage_content:
                         raw_value = stage_content[key]
@@ -875,6 +2169,21 @@ class ReportOrchestrator:
             return {}, ""
 
         refined, raw_summary = ReportOrchestrator._split_chapter_data(raw_value, matched_key, layered_content)
+        if sub_section_id and isinstance(refined.get("upstream_data_points"), list):
+            points = refined["upstream_data_points"]
+            scoped_points = [
+                point for point in points
+                if isinstance(point, dict)
+                and str(point.get("sub_section_id", "") or "") == sub_section_id
+            ]
+            # Older analysis outputs do not carry subsection identity. Keep
+            # those points as shared parent evidence instead of silently
+            # dropping all usable data during migration.
+            if scoped_points:
+                refined["upstream_data_points"] = scoped_points
+                raw_summary = ReportOrchestrator._extract_raw_summary(
+                    {"data_points": scoped_points},
+                )
         return refined, raw_summary
 
     @staticmethod
@@ -982,31 +2291,15 @@ class ReportOrchestrator:
 
     @staticmethod
     def _extract_and_validate_data_points(chapter: ChapterWriteOutput) -> List[DataPoint]:
-        validated = list(chapter.data_points_used)
+        """Return only data points explicitly declared by the chapter writer.
 
-        pattern = re.compile(
-            r'(\d[\d,.]*)\s*'
-            r'(亿元|万元|元|%|亿美元|千万|百万|万亿美元'
-            r'|billion|million|trillion|thousand|percent|%\s*)',
-            re.IGNORECASE
-        )
-        for match in pattern.finditer(chapter.content):
-            value = match.group(1)
-            unit = match.group(2)
-            already_reported = any(
-                str(dp.value).replace(",", "") == value.replace(",", "") and dp.unit == unit
-                for dp in validated
-            )
-            if not already_reported:
-                context_start = max(0, match.start() - 30)
-                context = chapter.content[context_start:match.start()].strip()
-                validated.append(DataPoint(
-                    metric=context[-15:] if context else "未命名指标",
-                    value=value, unit=unit, source="",
-                    chapter_id=chapter.chapter_id,
-                ))
-
-        return validated
+        Numeric mentions in prose are intentionally *not* promoted to
+        ``DataPoint`` objects.  A prose number has no reliable metric, scope,
+        period, or evidence binding; promoting it here creates an apparently
+        structured but untraceable fact.  The evidence/quality pipeline is
+        responsible for reporting unbound numeric mentions separately.
+        """
+        return list(chapter.data_points_used)
 
     @staticmethod
     def _diagnose_issue_source(issue: ChapterIssue, raw_data_summary: str) -> QualityIssueDiagnosis:
@@ -1193,7 +2486,15 @@ class ReportOrchestrator:
     @staticmethod
     def _verify_downstream_consistency(
         chapters: List[ChapterWriteOutput], patched_chapter_ids: Set[str],
-    ) -> None:
+    ) -> Dict[str, Any]:
+        """Detect stale downstream chapters and return a blocking result.
+
+        This method deliberately does not rewrite content.  Callers must use
+        the returned dependency information to schedule precise replacement
+        or chapter regeneration before export.
+        """
+        stale_chapter_ids: Set[str] = set()
+        stale_references: List[Dict[str, str]] = []
         for chapter in chapters:
             if chapter.chapter_id in patched_chapter_ids:
                 continue
@@ -1213,9 +2514,68 @@ class ReportOrchestrator:
                                 f"Chapter {chapter.chapter_id} references '{dp.metric}' "
                                 f"with outdated value after patch of chapter {patched_id}"
                             )
+                            stale_chapter_ids.add(chapter.chapter_id)
+                            stale_references.append({
+                                "chapter_id": chapter.chapter_id,
+                                "patched_chapter_id": patched_id,
+                                "metric": dp.metric,
+                                "expected_value": str(dp.value),
+                                "unit": str(dp.unit),
+                            })
+        return {
+            "blocking": bool(stale_chapter_ids),
+            "stale_chapter_ids": sorted(stale_chapter_ids),
+            "stale_references": stale_references,
+        }
+
+    @staticmethod
+    def _propagate_canonical_updates(
+        chapters: List[ChapterWriteOutput], patched_chapter_ids: Set[str],
+    ) -> Dict[str, Any]:
+        """Safely replace downstream metric values when an exact anchor exists."""
+        patched = [c for c in chapters if c.chapter_id in patched_chapter_ids]
+        unresolved: Set[str] = set()
+        applied: List[Dict[str, str]] = []
+        for chapter in chapters:
+            if chapter.chapter_id in patched_chapter_ids:
+                continue
+            for source_chapter in patched:
+                for dp in source_chapter.data_points_used:
+                    if not dp.metric or dp.metric not in chapter.content:
+                        continue
+                    pattern = re.compile(
+                        re.escape(dp.metric)
+                        + r"(?P<between>.{0,60}?)(?P<old>-?\d[\d,.]*)\s*"
+                        + re.escape(str(dp.unit or "")),
+                        re.DOTALL,
+                    )
+                    match = pattern.search(chapter.content)
+                    if not match:
+                        if str(dp.value) + str(dp.unit) not in chapter.content:
+                            unresolved.add(chapter.chapter_id)
+                        continue
+                    old = match.group("old")
+                    new_value = str(dp.value)
+                    chapter.content = (
+                        chapter.content[:match.start("old")]
+                        + new_value
+                        + chapter.content[match.end("old"):]
+                    )
+                    applied.append({
+                        "chapter_id": chapter.chapter_id,
+                        "metric": dp.metric,
+                        "old_value": old,
+                        "new_value": new_value,
+                        "unit": str(dp.unit),
+                    })
+        return {
+            "applied": applied,
+            "unresolved_chapter_ids": sorted(unresolved),
+            "blocking": bool(unresolved),
+        }
 
     def _find_section_spec(self, section_id: str, framework_config: Dict) -> Dict:
-        for sec in self._task_structure.get("sections", []):
+        for sec in self._report_chapter_specs(self._task_structure):
             if sec.get("section_id") == section_id:
                 return sec
         return {"section_id": section_id, "section_name": section_id, "section_role": "analysis"}
@@ -1377,31 +2737,182 @@ class ReportOrchestrator:
     def _ground_data_point_sources(
         data_points: List[Dict[str, Any]],
         available_sources: List[Dict[str, Any]],
+        chapter_id: str = "",
     ) -> List[Dict[str, Any]]:
         if not available_sources:
-            return data_points
+            grounded = []
+            for item in data_points:
+                dp = dict(item)
+                dp["chapter_id"] = dp.get("chapter_id") or chapter_id
+                if not dp.get("source") or _is_vague_source(str(dp.get("source", ""))):
+                    dp["source"] = ""
+                dp["source_url"] = ""
+                dp["evidence_status"] = "unverified"
+                grounded.append(dp)
+            return grounded
         source_names = [s.get("title", s.get("url", s.get("href", ""))) for s in available_sources if s.get("title") or s.get("url") or s.get("href")]
-        fallback_source = source_names[0] if source_names else ""
         grounded = []
         _SOURCE_INDEX_PATTERN = re.compile(r'^来源(\d+)$')
         for dp in data_points:
-            dp_src = dp.get("source", "")
+            dp = dict(dp)
+            dp["chapter_id"] = dp.get("chapter_id") or chapter_id
+            raw_dp_src = dp.get("source", "")
+            if isinstance(raw_dp_src, (list, tuple, set)):
+                dp_src = "；".join(
+                    str(item).strip() for item in raw_dp_src if str(item).strip()
+                )
+                dp["source"] = dp_src
+            else:
+                dp_src = str(raw_dp_src or "").strip()
+                dp["source"] = dp_src
+            source_url = str(dp.get("source_url", "") or "").strip()
+            source_id = str(dp.get("source_id", "") or "").strip()
+            evidence_id = str(dp.get("evidence_id", "") or "").strip()
+            provenance_id = str(dp.get("provenance_id", "") or "").strip()
+            evidence_identity_mismatch = False
+            matched_source = next(
+                (item for item in available_sources
+                 if source_url and str(item.get("url", "") or item.get("href", "")).strip() == source_url),
+                None,
+            )
+            if matched_source is None:
+                matched_source = next(
+                    (item for item in available_sources
+                 if source_id and str(item.get("source_id", "")).strip() == source_id),
+                    None,
+                )
+            if matched_source is None and evidence_id:
+                matched_source = next(
+                    (item for item in available_sources
+                     if str(item.get("evidence_id", "")).strip() == evidence_id),
+                    None,
+                )
+            if matched_source is not None:
+                catalog_evidence_id = str(matched_source.get("evidence_id", "") or "").strip()
+                catalog_provenance_id = str(matched_source.get("provenance_id", "") or "").strip()
+                evidence_identity_mismatch = bool(
+                    (evidence_id and catalog_evidence_id and evidence_id != catalog_evidence_id)
+                    or (provenance_id and catalog_provenance_id and provenance_id != catalog_provenance_id)
+                )
+                dp["source"] = str(
+                    matched_source.get("title") or matched_source.get("url")
+                    or matched_source.get("href") or ""
+                )
+                dp["source_url"] = str(
+                    matched_source.get("url") or matched_source.get("href") or ""
+                ).strip()
+                dp["evidence_id"] = "" if evidence_identity_mismatch else evidence_id or catalog_evidence_id
+                dp["provenance_id"] = "" if evidence_identity_mismatch else provenance_id or catalog_provenance_id
+                dp["evidence_excerpt"] = str(
+                    matched_source.get("evidence_excerpt")
+                    or matched_source.get("excerpt")
+                    or matched_source.get("content")
+                    or matched_source.get("text")
+                    or ""
+                ).strip()
             # D3: check "来源N" pattern first (fuzzy index, not a real source)
-            idx_match = _SOURCE_INDEX_PATTERN.match(dp_src.strip()) if dp_src else None
+            idx_match = (
+                _SOURCE_INDEX_PATTERN.match(dp_src.strip())
+                if dp_src and matched_source is None else None
+            )
             if idx_match:
                 dp = dict(dp)
                 idx = int(idx_match.group(1)) - 1
                 if 0 <= idx < len(source_names):
                     dp["source"] = source_names[idx]
                 else:
-                    dp["source"] = fallback_source
-                grounded.append(dp)
-            elif dp_src and not _is_vague_source(dp_src):
-                grounded.append(dp)
+                    # An out-of-range alias is not a source.  Do not keep it
+                    # as if it were a resolved citation.
+                    dp["source"] = ""
             else:
-                dp = dict(dp)
-                dp["source"] = fallback_source
-                grounded.append(dp)
+                # Never attach an unrelated source as a fallback.  An
+                # unresolved source is a blocking evidence condition.
+                if not dp_src or _is_vague_source(dp_src):
+                    dp["source"] = ""
+            # Resolve a source title only when the catalog has one unique
+            # candidate.  This also transfers the catalog's evidence and
+            # provenance identities to the data point; a URL alone is not a
+            # complete audit trail.
+            if matched_source is None and dp.get("source"):
+                source_norm = str(dp["source"]).strip().lower()
+                candidates = []
+                for item in available_sources:
+                    title_norm = str(item.get("title", "") or "").strip().lower()
+                    url = str(item.get("url", "") or item.get("href", "") or "").strip()
+                    if not url or not title_norm:
+                        continue
+                    if source_norm == title_norm:
+                        candidates.append(item)
+                if len(candidates) == 1:
+                    matched_source = candidates[0]
+                    catalog_evidence_id = str(matched_source.get("evidence_id", "") or "").strip()
+                    catalog_provenance_id = str(matched_source.get("provenance_id", "") or "").strip()
+                    evidence_identity_mismatch = bool(
+                        (evidence_id and catalog_evidence_id and evidence_id != catalog_evidence_id)
+                        or (provenance_id and catalog_provenance_id and provenance_id != catalog_provenance_id)
+                    )
+                    dp["source"] = str(
+                        matched_source.get("title")
+                        or matched_source.get("url")
+                        or matched_source.get("href")
+                        or ""
+                    )
+                    dp["evidence_id"] = "" if evidence_identity_mismatch else str(
+                        dp.get("evidence_id") or catalog_evidence_id or ""
+                    ).strip()
+                    dp["provenance_id"] = "" if evidence_identity_mismatch else str(
+                        dp.get("provenance_id") or catalog_provenance_id or ""
+                    ).strip()
+            catalog_url = _source_url_for(dp.get("source", ""), available_sources)
+            if catalog_url and not dp.get("evidence_excerpt"):
+                catalog_item = next(
+                    (item for item in available_sources
+                     if str(item.get("url", "") or item.get("href", "")).strip() == catalog_url),
+                    None,
+                )
+                if catalog_item:
+                    dp["evidence_excerpt"] = str(
+                        catalog_item.get("evidence_excerpt")
+                        or catalog_item.get("excerpt")
+                        or catalog_item.get("content")
+                        or catalog_item.get("text")
+                        or ""
+                    ).strip()
+            candidate_url = str(dp.get("source_url", "") or "").strip()
+            allowed_urls = {
+                str(item.get("url", "") or item.get("href", "")).strip()
+                for item in available_sources
+                if item.get("url") or item.get("href")
+            }
+            # A model-provided URL is accepted only when it is present in the
+            # task's source catalog.  This prevents fabricated or cross-task
+            # provenance from bypassing L3.
+            # A URL is trusted only when it came from a source-id/evidence-id
+            # match, a catalog title match, or is explicitly present in the
+            # task-local allowlist.  Never let an arbitrary model URL win by
+            # being evaluated before the allowlist.
+            bound_url = str(dp.get("source_url", "") or "").strip()
+            if bound_url not in allowed_urls:
+                bound_url = ""
+            dp["source_url"] = catalog_url or bound_url or (
+                candidate_url if candidate_url in allowed_urls else ""
+            )
+            has_evidence = bool(
+                str(dp.get("evidence_excerpt", "") or "").strip()
+                or str(dp.get("locator", "") or "").strip()
+            )
+            dp["evidence_status"] = (
+                "verified"
+                if dp.get("source_url")
+                and has_evidence
+                and str(dp.get("evidence_id", "") or "").strip()
+                and str(dp.get("provenance_id", "") or "").strip()
+                and not evidence_identity_mismatch
+                else "unverified"
+            )
+            if evidence_identity_mismatch:
+                dp["evidence_binding_error"] = "provided_evidence_identity_mismatch"
+            grounded.append(dp)
         return grounded
 
     @staticmethod
@@ -1412,9 +2923,13 @@ class ReportOrchestrator:
         topic: str,
         original_sources: List[Dict[str, Any]] = None,
         quality_report: QualityReport = None,
+        conflicts_summary: str = "",
         llm_trace: List[Dict[str, Any]] = None,
+        task_id: str = "report",
     ) -> Dict[str, Any]:
-        all_sources = list(original_sources) if original_sources else []
+        all_sources = ReportOrchestrator._ensure_source_evidence_identity(
+            original_sources, task_id=task_id,
+        )
         chapter_sources = [
             {"title": s.get("title", ""), "url": s.get("url", s.get("href", "")), "type": s.get("type", "web")}
             for s in all_sources
@@ -1422,17 +2937,40 @@ class ReportOrchestrator:
 
         sections = []
         for ch in chapters:
+            chapter_status = str(getattr(ch, "status", "ready") or "ready")
+            chapter_content = str(ch.content or "").strip()
+            if not chapter_content:
+                # Final assembly is the last protection boundary.  A failed
+                # writer/recovery path must never serialize an empty chapter,
+                # while the explicit failed status keeps coverage/audit from
+                # mistaking this controlled notice for valid research.
+                chapter_status = "failed"
+                chapter_content = (
+                    "本章节未生成可验证内容。系统已记录该章节失败状态，"
+                    "请在补充证据后重新生成。"
+                )
             raw_dp = [asdict(dp) for dp in ch.data_points_used]
-            grounded_dp = ReportOrchestrator._ground_data_point_sources(raw_dp, all_sources)
+            grounded_dp = ReportOrchestrator._ground_data_point_sources(
+                raw_dp, all_sources, chapter_id=ch.chapter_id,
+            )
             sections.append({
                 "id": ch.chapter_id,
+                # Keep both report-native ``id`` and the legacy result-store
+                # field.  Replanning, preview adapters and older checkpoints
+                # join chapters through ``section_id``.
+                "section_id": ch.chapter_id,
                 "title": ch.title,
-                "content": ch.content,
+                "content": chapter_content,
+                "sub_section_id": ch.sub_section_id,
                 "subsections": [],
                 "charts": [],
                 "data_points": grounded_dp,
+                # Keep the full source catalog for compatibility, but data
+                # points now carry their own URL and verification status.
                 "sources": chapter_sources,
                 "key_conclusions": ch.key_conclusions,
+                "status": chapter_status,
+                "error": getattr(ch, "error", ""),
             })
 
         result = {
@@ -1443,7 +2981,39 @@ class ReportOrchestrator:
             "sources": all_sources,
             "key_findings": ReportOrchestrator._clean_key_findings(exec_summary),
         }
+        defense_audit = ReportDefenseAudit().audit(
+            result,
+            registry_conflicts=conflicts_summary,
+        )
+        integrity = ReportIntegrityChecker().check(result)
+        result["claims"] = integrity["claims"]
+        if integrity["issues"]:
+            defense_audit["issues"].extend(integrity["issues"])
+            defense_audit["layers"]["L4"] = True
+            defense_audit["passed"] = False
+            defense_audit["score"] = max(
+                0.0, float(defense_audit.get("score", 100.0)) - len(integrity["issues"]) * 5.0,
+            )
+        # The report-upgrade registry is the authoritative conflict input.  A
+        # failed audit must remain visible in the artifact and cannot be
+        # mistaken for a successful final report.
+        result["defense_audit"] = defense_audit
+        result["quality_gate_status"] = (
+            "passed"
+            if defense_audit.get("passed", False)
+            else (
+                "blocked"
+                if defense_audit.get("layers", {}).get("L5")
+                else "degraded"
+            )
+        )
+        result["formal_complete"] = bool(defense_audit.get("passed", False))
         if quality_report is not None:
+            quality_report.converged = bool(quality_report.converged and defense_audit["passed"])
+            quality_report.overall_score = min(
+                float(quality_report.overall_score or 0),
+                float(defense_audit["score"]),
+            )
             result["quality_report"] = {
                 "overall_score": quality_report.overall_score,
                 "target_score": quality_report.target_score,
@@ -1459,6 +3029,7 @@ class ReportOrchestrator:
                     }
                     for cd in quality_report.chapter_diagnostics
                 ],
+                "defense_audit": defense_audit,
             }
         if llm_trace:
             result["llm_trace"] = llm_trace
@@ -1475,11 +3046,12 @@ class ReportOrchestrator:
             "key_conclusions": chapter.key_conclusions,
             "self_check_passed": chapter.self_check_passed,
             "self_check_issues": chapter.self_check_issues,
+            "sub_section_id": chapter.sub_section_id,
             "data_registry_snapshot": self._data_registry.to_snapshot(),
             "timestamp": datetime.now().isoformat(),
         }
 
-        checkpoint_path = checkpoint_dir / f"chapter_{chapter.chapter_id}.json"
+        checkpoint_path = checkpoint_dir / _checkpoint_filename(chapter.chapter_id)
 
         def _write_checkpoint():
             checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -1490,7 +3062,9 @@ class ReportOrchestrator:
         await asyncio.to_thread(_write_checkpoint)
 
     @staticmethod
-    async def _restore_from_checkpoint(task_id: str):
+    async def _restore_from_checkpoint(
+        task_id: str, allowed_section_ids: Optional[Set[str]] = None,
+    ):
         checkpoint_dir = Path("data") / task_id / "checkpoints"
         if not checkpoint_dir.exists():
             return None
@@ -1500,6 +3074,12 @@ class ReportOrchestrator:
             for path in sorted(checkpoint_dir.glob("chapter_*.json")):
                 try:
                     data = json.loads(path.read_text(encoding="utf-8"))
+                    chapter_id = str(data.get("chapter_id", ""))
+                    if allowed_section_ids is not None and chapter_id not in allowed_section_ids:
+                        logger.info(
+                            "Ignoring checkpoint for unrequested section %s", chapter_id,
+                        )
+                        continue
                     results.append(data)
                 except (json.JSONDecodeError, KeyError) as e:
                     logger.warning(f"Failed to restore checkpoint {path}: {e}")
@@ -1514,6 +3094,7 @@ class ReportOrchestrator:
                 chapter_id=data["chapter_id"],
                 title=data["title"],
                 content=data["content"],
+                sub_section_id=str(data.get("sub_section_id", "") or ""),
                 data_points_used=[
                     DataPoint(**{k: str(v) if k in _DP_STR_KEYS else v
                                  for k, v in dp.items() if k in DATAPOINT_FIELDS})
@@ -1681,7 +3262,13 @@ class ReportOrchestrator:
                 if hasattr(fs, 'fix_instruction')
             )
         for issue in issues[:5]:
-            chapter_id = issue.location.split(":")[-1] if ":" in issue.location else ""
+            raw_location = issue.location
+            if isinstance(raw_location, (list, tuple, set)):
+                locations = [str(item or "").strip() for item in raw_location if str(item or "").strip()]
+                location_text = locations[0] if locations else ""
+            else:
+                location_text = str(raw_location or "")
+            chapter_id = location_text.split(":")[-1] if ":" in location_text else location_text
             target_chapter = next(
                 (c for c in self._chapters if c.chapter_id == chapter_id), None
             )

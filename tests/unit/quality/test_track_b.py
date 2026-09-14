@@ -209,6 +209,61 @@ class TestLayer3ResponseParsing:
         result = scorer._parse_response(response, dims)
         assert result["洞察力"] == 100
 
+    def test_parse_ascii_score_keys_with_reasoning_prose(self):
+        scorer = Layer3DepthScorer()
+        response = '分析过程：先判断。```json {"score_1": 80, "score_2": 75, "score_3": 60, "score_4": 50, "score_5": 70, "issues": []} ```'
+        result = scorer._parse_response(response, _DEFAULT_DIMENSIONS)
+        assert result is not None
+        assert result["洞察力"] == 80
+        assert result["可验证性"] == 70
+
+    def test_parse_explicit_score_markers_without_final_json(self):
+        scorer = Layer3DepthScorer()
+        response = (
+            "1. Insight (score_1): 80 points. 2. Logic (score_2): 75 points. "
+            "3. Data (score_3): 60 points. 4. Forward (score_4): 50 points. "
+            "5. Verification (score_5): 70 points."
+        )
+        result = scorer._parse_response(response, _DEFAULT_DIMENSIONS)
+        assert result is not None
+        assert result["洞察力"] == 80
+        assert result["可验证性"] == 70
+
+    def test_parse_prefers_last_complete_json_candidate(self):
+        scorer = Layer3DepthScorer()
+        response = (
+            '示例：{"score_1": 0, "score_2": 0, "score_3": 0, "score_4": 0, "score_5": 0}\n'
+            '最终：{"score_1": 80, "score_2": 75, "score_3": 60, "score_4": 50, "score_5": 70, "issues": []}'
+        )
+        result = scorer._parse_response(response, _DEFAULT_DIMENSIONS)
+        assert result["洞察力"] == 80
+        assert result["可验证性"] == 70
+
+    def test_call_llm_uses_reasoning_content_only_when_content_empty(self, monkeypatch):
+        scorer = Layer3DepthScorer()
+        response = json.dumps({
+            "洞察力": 80, "逻辑链完整性": 75, "数据批判性": 60,
+            "前瞻性": 50, "可验证性": 70, "issues": []
+        })
+
+        monkeypatch.setattr(
+            "src.core.llm_client.call_llm_sync",
+            lambda **_: {"success": True, "content": "", "reasoning_content": response},
+        )
+        assert scorer._call_llm("judge") == response
+
+    def test_call_llm_prefers_content_over_reasoning_content(self, monkeypatch):
+        scorer = Layer3DepthScorer()
+        monkeypatch.setattr(
+            "src.core.llm_client.call_llm_sync",
+            lambda **_: {
+                "success": True,
+                "content": '{"洞察力": 80}',
+                "reasoning_content": '{"洞察力": 10}',
+            },
+        )
+        assert scorer._call_llm("judge") == '{"洞察力": 80}'
+
 
 class TestLayer3EmptyAndEdgeCases:
     def test_empty_content_returns_zero(self):

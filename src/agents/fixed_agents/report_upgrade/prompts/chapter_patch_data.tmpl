@@ -24,6 +24,7 @@ ${patch_instructions}
 2. **禁止引入新数据** — 不得添加修补指令中未提及的新数值或新事实
 3. **禁止删除无关内容** — 只删除被指出有问题的内容，其余保留
 4. **禁止改动结构** — 不调整段落顺序、不增删段落
+5. **不得猜测证据元数据** — source_url、geographic_scope、period、population 必须来自给定数据或修补指令；无法确认时保留缺失，交由 L1-L5 审计阻断
 
 ### 修补精度
 - 修改范围：最小化，只改涉及问题的句子
@@ -35,7 +36,7 @@ ${patch_instructions}
 {
   "title": "章节标题",
   "content": "Markdown格式的修补后完整章节正文",
-  "data_points_used": [{"metric": "指标名", "value": "数值", "unit": "单位", "source": "来源"}],
+  "data_points_used": [{"metric": "指标名", "value": "数值", "unit": "单位", "source": "来源", "source_url": "原始来源URL", "geographic_scope": "中国/全球/其他", "period": "2025年或2025年Q1", "population": "统计对象", "epistemic_level": "factual/inferential/speculative"}],
   "key_conclusions": ["结论1", "结论2"],
   "self_check_passed": true,
   "self_check_issues": []

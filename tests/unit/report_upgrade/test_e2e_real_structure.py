@@ -241,16 +241,14 @@ class TestFullPipelineWithRealStructure:
 
 
 class TestDataPointExtractionFromRealContent:
-    def test_extracts_chinese_data_from_real_content(self, orchestrator):
+    def test_does_not_invent_data_points_from_real_content(self, orchestrator):
         content = "2026年全球软件测试市场规模达到约2000亿元人民币，同比增长15%。"
         ch = ChapterWriteOutput(chapter_id="ch1", title="市场规模", content=content)
         dps = orchestrator._extract_and_validate_data_points(ch)
-        values = [dp.value for dp in dps]
-        assert "2000" in values
-        assert "15" in values
+        assert dps == []
 
-    def test_extracts_percentage(self, orchestrator):
+    def test_does_not_invent_percentage_data_point(self, orchestrator):
         content = "头部测试工具厂商集中度持续提升，Top5厂商市场份额超过60%。"
         ch = ChapterWriteOutput(chapter_id="ch1", title="竞争格局", content=content)
         dps = orchestrator._extract_and_validate_data_points(ch)
-        assert any(dp.value == "60" and "%" in dp.unit for dp in dps)
+        assert dps == []

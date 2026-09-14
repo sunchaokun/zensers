@@ -124,7 +124,9 @@ class TestRealDataIntegration:
         result = orchestrator._assemble_final_report(
             [chapter], "摘要", review, "测试主题", agg.sources
         )
-        assert result["sources"] == agg.sources
+        assert result["sources"] != agg.sources
+        assert all(source.get("evidence_id") for source in result["sources"])
+        assert all(source.get("provenance_id") for source in result["sources"])
         assert len(result["sources"]) == len(real_cache_data.get("sources", []))
 
     def test_real_cache_section_ids_match_provenance(self, real_cache_data):

@@ -72,7 +72,7 @@ class BackgroundTask:
 class BackgroundExecutorConfig:
     """后台执行器配置"""
     max_concurrent_tasks: int = 10       # 最大并发任务数
-    default_timeout: float = 300.0       # 默认超时时间
+    default_timeout: Optional[float] = None  # 不设置隐式后台任务超时
     cleanup_interval: float = 60.0       # 清理间隔
     task_ttl: float = 3600.0             # 已完成任务保留时间
 
@@ -179,7 +179,7 @@ class BackgroundExecutor:
             id=task_id,
             execute_func=execute_func,
             parent_session_id=parent_session_id,
-            timeout=timeout or self.config.default_timeout,
+            timeout=self.config.default_timeout if timeout is None else timeout,
         )
         
         # 注册任务

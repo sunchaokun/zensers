@@ -466,6 +466,11 @@ class AnalysisQualityChecker(BaseQualityChecker):
                 score = min(len(matches) / 3.0, 1.0) * weight * 100
                 max_score = max(max_score, score)
         return min(max_score, 100.0)
+
+    # Compatibility name used by older quality audit scripts.  Keep one
+    # implementation so risk/counter-evidence scoring cannot drift.
+    def _check_counter_evidence(self, content: str) -> float:
+        return self._check_risk_disclosure(content)
     
     def _check_quantified_decomposition(self, content: str) -> float:
         """Gradient scoring for quantified causal decomposition."""

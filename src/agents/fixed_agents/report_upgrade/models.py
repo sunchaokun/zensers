@@ -3,13 +3,57 @@ from typing import List, Optional, Dict, Any
 
 
 @dataclass
+class ChapterRequirement:
+    section_id: str
+    sub_section_id: str = ""
+    required_topics: List[str] = field(default_factory=list)
+    required_metrics: List[str] = field(default_factory=list)
+    claim_scope: str = ""
+    exclude_topics: List[str] = field(default_factory=list)
+    evidence_level: str = "factual"
+
+
+@dataclass
+class ReportEvidenceContext:
+    structured_data: Dict[str, Any] = field(default_factory=dict)
+    raw_search_results: List[Dict[str, Any]] = field(default_factory=list)
+    source_catalog: List[Dict[str, Any]] = field(default_factory=list)
+    evidence_registry: Dict[str, Any] = field(default_factory=dict)
+    section_index: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ChapterCoverage:
+    ready_to_write: bool
+    missing_topics: List[str] = field(default_factory=list)
+    missing_metrics: List[str] = field(default_factory=list)
+    available_in_structured: List[str] = field(default_factory=list)
+    available_in_raw_search: List[str] = field(default_factory=list)
+    external_search_required: bool = False
+
+
+@dataclass
 class DataPoint:
     metric: str
     value: str
     unit: str
     source: str
     chapter_id: str = ""
+    sub_section_id: str = ""
     confidence: float = 1.0
+    # Evidence contract fields.  These must survive the writer -> registry ->
+    # final report path; otherwise a source name without its scope is not
+    # sufficient to audit a claim.
+    source_url: str = ""
+    evidence_id: str = ""
+    provenance_id: str = ""
+    evidence_excerpt: str = ""
+    locator: str = ""
+    geographic_scope: str = ""
+    period: str = ""
+    population: str = ""
+    epistemic_level: str = "factual"
+    evidence_status: str = "unverified"
 
 
 @dataclass
@@ -20,6 +64,12 @@ class MetricEntry:
     canonical_chapter: str
     source: str
     conflicts: List[Dict[str, Any]] = field(default_factory=list)
+    evidence_id: str = ""
+    provenance_id: str = ""
+    source_url: str = ""
+    period: str = ""
+    geographic_scope: str = ""
+    population: str = ""
 
 
 @dataclass
@@ -33,6 +83,19 @@ class ChapterWriteInput:
     used_metrics_summary: str = ""
     base_content: str = ""
     upstream_data_points: List[Dict[str, Any]] = None
+    parent_section_context: Dict[str, Any] = field(default_factory=dict)
+    global_evidence_pool: List[Dict[str, Any]] = field(default_factory=list)
+    raw_search_results: List[Dict[str, Any]] = field(default_factory=list)
+    # Pointer to the complete task evidence snapshot; it is not a filtered
+    # replacement for the raw evidence available to the report agent.
+    raw_data_location: str = ""
+    sibling_section_summaries: List[Dict[str, Any]] = field(default_factory=list)
+    chapter_requirements: Dict[str, Any] = field(default_factory=dict)
+    used_claims: List[str] = field(default_factory=list)
+    used_evidence_ids: List[str] = field(default_factory=list)
+    # The writer must know the delivery format.  Word and PPT require
+    # different editorial contracts; keep this optional for legacy callers.
+    output_format: str = "docx"
 
 
 @dataclass
@@ -40,10 +103,15 @@ class ChapterWriteOutput:
     chapter_id: str
     title: str
     content: str
+    sub_section_id: str = ""
     data_points_used: List[DataPoint] = field(default_factory=list)
     key_conclusions: List[str] = field(default_factory=list)
     self_check_passed: bool = True
     self_check_issues: List[str] = field(default_factory=list)
+    # Explicit lifecycle state prevents a failed chapter from disappearing
+    # from the assembled report and being mistaken for successful coverage.
+    status: str = "ready"
+    error: str = ""
 
 
 @dataclass
@@ -113,6 +181,7 @@ class DataGap:
     metric: str
     context: str
     search_keywords: List[str] = field(default_factory=list)
+    audit_layer: str = ""
 
 
 @dataclass
@@ -124,6 +193,18 @@ class DataRepairResult:
     source: Optional[str] = None
     source_title: Optional[str] = None
     confidence: float = 0.0
+    source_url: str = ""
+    evidence_id: str = ""
+    provenance_id: str = ""
+    evidence_excerpt: str = ""
+    locator: str = ""
+    task_id: str = ""
+    request_id: str = ""
+    retrieved_at: Optional[str] = None
+    geographic_scope: str = ""
+    period: str = ""
+    population: str = ""
+    epistemic_level: str = ""
 
 
 @dataclass

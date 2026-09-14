@@ -16,6 +16,12 @@ class PromptManager:
 
     def get(self, name: str, **kwargs: Any) -> str:
         template = self._load_template(name)
+        # New report-evidence fields are optional for legacy callers and old
+        # checkpoint-driven tests.  Writers always provide them explicitly.
+        kwargs.setdefault("global_evidence_pool_json", "无可用原始搜索证据")
+        kwargs.setdefault("chapter_requirements_json", "无明确章节需求")
+        kwargs.setdefault("used_evidence_ids_json", "[]")
+        kwargs.setdefault("raw_data_location", "未提供（请使用当前任务上下文中的原始数据）")
         try:
             return template.substitute(**kwargs)
         except KeyError as e:

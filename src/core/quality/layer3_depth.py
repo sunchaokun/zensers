@@ -17,6 +17,7 @@ __all__ = ["Layer3DepthScorer", "Layer3Result"]
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -55,6 +56,7 @@ _JUDGE_PROMPT_TEMPLATE = """\
 _FALLBACK_SCORE = 35.0
 _MAX_RETRIES = 2
 _MAX_CONTENT_CHARS = 8000
+_JUDGE_MAX_TOKENS = 1600
 
 
 @dataclass
@@ -196,14 +198,18 @@ class Layer3DepthScorer:
             f"- {d['name']} (权重{d['weight']:.0%}): {d.get('description', '')}"
             for d in dimensions
         )
+        # ASCII keys avoid encoding corruption from some compatible gateways.
         score_template = ", ".join(
-            f'"{d["name"]}": <0-100>' for d in dimensions
+            f'"score_{i}": <0-100>' for i, _ in enumerate(dimensions, 1)
+        )
+        key_mapping = "\n".join(
+            f'- score_{i} = {d["name"]}' for i, d in enumerate(dimensions, 1)
         )
         return _JUDGE_PROMPT_TEMPLATE.format(
             dimensions_text=dims_text,
             content=content[:_MAX_CONTENT_CHARS],
-            score_json_template=score_template + ', "issues": ["<问题>"]',
-        )
+            score_json_template=score_template + ', "issues": ["<issue>"]',
+        ) + f"\n键名映射（必须使用 ASCII 键名）:\n{key_mapping}"
 
     def _call_llm(self, prompt: str) -> str:
         """同步 LLM 调用 — 通过统一 call_llm_sync"""
@@ -213,12 +219,25 @@ class Layer3DepthScorer:
         result = call_llm_sync(
             prompt=prompt,
             system_prompt="你是严格的分析质量评审专家。仅输出JSON。",
-            max_tokens=800,
+            # Reasoning-compatible models may spend most of the budget on
+            # hidden/visible reasoning before emitting the score object.
+            # 800 tokens truncated the final score block in real E2E runs.
+            max_tokens=_JUDGE_MAX_TOKENS,
             temperature=0.2,
             routing_hint=RoutingHint(action="quality_judge"),
         )
         if result.get("success"):
-            return result.get("content", "")
+            content = result.get("content") or ""
+            if content.strip():
+                return content
+            # A few OpenAI-compatible reasoning models put the structured
+            # answer in reasoning_content and leave content empty.  Use this
+            # only as an explicit last resort for the JSON judge response.
+            fallback = result.get("reasoning_content") or ""
+            if fallback.strip():
+                logger.info("Layer 3 using reasoning_content because content was empty")
+                return fallback
+            return ""
         logger.warning(f"Layer3 LLM call failed: {result.get('message', 'unknown')}")
         return ""
 
@@ -229,18 +248,54 @@ class Layer3DepthScorer:
         if not response:
             return None
         try:
-            s = response.find("{")
-            e = response.rfind("}") + 1
-            if s < 0 or e <= s:
-                return None
-            parsed = json.loads(response[s:e])
+            # Reasoning models may surround the answer with prose or emit
+            # multiple JSON snippets. Try each balanced JSON object rather
+            # than treating the first opening and last closing brace as one
+            # object.
+            parsed = None
+            complete_candidate = None
+            decoder = json.JSONDecoder()
+            for offset, char in enumerate(response):
+                if char != "{":
+                    continue
+                try:
+                    candidate, _ = decoder.raw_decode(response[offset:])
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(candidate, dict):
+                    parsed = candidate
+                    if all(f"score_{i}" in candidate for i in range(1, len(dimensions) + 1)):
+                        # Keep scanning: reasoning may repeat the prompt
+                        # example before presenting the final assessment.
+                        complete_candidate = candidate
+                    elif any(k in candidate for k in ("issues", *[d["name"] for d in dimensions])):
+                        parsed = candidate
+            if complete_candidate is not None:
+                parsed = complete_candidate
+            if parsed is None:
+                # Some reasoning models never emit the final JSON, but do
+                # include explicit ``score_i`` markers in their evaluation.
+                # Accept that form only when every dimension is present.
+                extracted = {}
+                for index in range(1, len(dimensions) + 1):
+                    matches = re.findall(
+                        rf"score_{index}\D{{0,120}}(\d{{1,3}})(?!\d)",
+                        response,
+                        flags=re.IGNORECASE,
+                    )
+                    if not matches:
+                        return None
+                    extracted[f"score_{index}"] = float(matches[-1])
+                parsed = extracted
             if not isinstance(parsed, dict):
                 return None
 
             result = {}
-            for d in dimensions:
+            for index, d in enumerate(dimensions, 1):
                 name = d["name"]
                 val = parsed.get(name)
+                if val is None:
+                    val = parsed.get(f"score_{index}")
                 if val is not None:
                     try:
                         result[name] = max(0, min(100, float(val)))
