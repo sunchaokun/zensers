@@ -20,9 +20,12 @@ class EvidenceScope:
 
     def _key(self, item: Dict[str, Any]) -> str:
         for field_name in ("evidence_id", "provenance_id", "data_id"):
-            value = str(item.get(field_name) or "").strip()
-            if value:
-                return f"id:{value}"
+            stable_id = str(item.get(field_name) or "").strip()
+            if stable_id:
+                # Once issued, the evidence identity remains stable while
+                # later passes enrich value/scope/source fields.
+                payload = f"{field_name}:{stable_id}"
+                return "identity:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
         payload = json.dumps(
             [item.get("url"), item.get("source_url"), item.get("title"),
              item.get("metric"), item.get("content"), item.get("data"), item.get("value")],

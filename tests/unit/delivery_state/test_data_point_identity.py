@@ -28,7 +28,7 @@ def test_data_points_from_same_url_keep_distinct_metric_scope_identity(tmp_path)
     assert len(result["data_points"]) == 2
 
 
-def test_evidence_identity_includes_scope_and_period():
+def test_stable_evidence_identity_survives_late_enrichment():
     base = {
         "evidence_id": "ev-1",
         "metric": "出货量",
@@ -38,10 +38,11 @@ def test_evidence_identity_includes_scope_and_period():
         "is_canonical": True,
     }
     q1_cn = {**base, "period": "2026Q1", "geographic_scope": "中国"}
-    q2_global = {**base, "period": "2026Q2", "geographic_scope": "全球"}
+    q2_global = {**base, "value": "120", "period": "2026Q2", "geographic_scope": "全球",
+                 "source_url": "https://example.test/enriched"}
 
-    assert _evidence_record_key(q1_cn, "data_point") != _evidence_record_key(q2_global, "data_point")
+    assert _evidence_record_key(q1_cn, "data_point") == _evidence_record_key(q2_global, "data_point")
     scope = EvidenceScope(section_id="section_0")
     selected, audit = scope.select([q1_cn, q2_global])
-    assert len(selected) == 2
-    assert audit["excluded_duplicate"] == 0
+    assert len(selected) == 1
+    assert audit["excluded_duplicate"] == 1

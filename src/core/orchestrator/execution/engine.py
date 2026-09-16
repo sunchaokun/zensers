@@ -77,9 +77,12 @@ def _evidence_record_key(record: Any, kind: str) -> str:
     if not isinstance(record, dict):
         return f"{kind}:value:{str(record)}"
     for field in ("evidence_id", "provenance_id", "data_id"):
-        value = str(record.get(field) or "").strip()
-        if value:
-            return f"{kind}:{field}:{value}"
+        stable_id = str(record.get(field) or "").strip()
+        if stable_id:
+            # Stable evidence identity must survive later enrichment of value,
+            # scope, or source URL across collection batches.
+            payload = f"{field}:{stable_id}"
+            return f"{kind}:identity:{hashlib.sha256(payload.encode('utf-8')).hexdigest()}"
     url = str(record.get("url") or record.get("source_url") or "").strip()
     title = str(record.get("title") or record.get("name") or "").strip()
     content = record.get("content", record.get("data", ""))
@@ -1622,11 +1625,26 @@ class ExecutionEngine:
                                         caliber=_ent.get("caliber",""),
                                         year=str(_ent.get("year","")), source=_ent.get("source",""),
                                         confidence=_ent.get("confidence", 0.5),
+                                        period=str(_ent.get("period", "") or ""),
+                                        geographic_scope=str(_ent.get("geographic_scope", "") or ""),
+                                        population=str(_ent.get("population", "") or _ent.get("statistical_object", "") or ""),
+                                        statistical_object=str(_ent.get("statistical_object", "") or ""),
+                                        source_url=str(_ent.get("source_url", "") or _ent.get("url", "") or ""),
+                                        evidence_id=str(_ent.get("evidence_id", "") or ""),
+                                        provenance_id=str(_ent.get("provenance_id", "") or ""),
                                     )
                                     await self._canonical_registry.register(_ce)
                         self._active_canonical_data = {
-                            k: {"value": v.value, "unit": v.unit, "caliber": v.caliber,
-                                "source": v.source, "year": v.year}
+                            k: {
+                                "value": v.value, "unit": v.unit, "caliber": v.caliber,
+                                "source": v.source, "year": v.year,
+                                "period": v.period,
+                                "geographic_scope": v.geographic_scope,
+                                "population": v.population or v.statistical_object,
+                                "source_url": v.source_url,
+                                "evidence_id": v.evidence_id,
+                                "provenance_id": v.provenance_id,
+                            }
                             for k, v in self._canonical_registry.get_all().items()
                         }
                         # Broadcast to SharedMemory for real-time agent access
