@@ -77,8 +77,22 @@ class ReportEvidenceAcquirer:
             return DataRepairResult(gap=gap, found=False)
         title = str(data.get("source_title") or "").strip()
         url = str(data.get("source_url") or "").strip()
-        selected = next((item for item in evidence if (url and item["url"] == url) or (title and item["title"] == title)), None)
+        selected = next(
+            (
+                item for item in evidence
+                if (url and item["url"] == url)
+                or (not url and title and item["title"] == title)
+            ),
+            None,
+        )
+        # The LLM may only select from the search candidates. Never allow an
+        # untrusted URL to become self-authorized evidence or inherit the
+        # identity of an unrelated candidate.
+        if url and selected is None:
+            return DataRepairResult(gap=gap, found=False)
         selected = selected or (evidence[0] if len(evidence) == 1 else {})
+        if not selected:
+            return DataRepairResult(gap=gap, found=False)
         return DataRepairResult(
             gap=gap, found=True, value=data.get("value"), unit=data.get("unit"),
             source=data.get("source") or selected.get("source"), source_title=title or selected.get("title"),

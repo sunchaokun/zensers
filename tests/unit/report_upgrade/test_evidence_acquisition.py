@@ -39,3 +39,22 @@ async def test_report_acquirer_search_failure_is_insufficient_evidence():
         DataGap("market", "growth", "growth rate"), "industry",
     )
     assert result.found is False
+
+
+def test_report_acquirer_rejects_url_outside_search_candidates():
+    evidence = [{
+        "title": "Official source",
+        "url": "https://example.test/official",
+        "source": "official",
+        "evidence_id": "ev-official",
+        "provenance_id": "prov-official",
+    }]
+
+    result = ReportEvidenceAcquirer._parse(
+        '{"found": true, "value": "12", '
+        '"source_url": "https://untrusted.example/answer"}',
+        DataGap("market", "growth", "growth rate"),
+        evidence,
+    )
+
+    assert result.found is False
