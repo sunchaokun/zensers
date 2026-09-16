@@ -101,7 +101,8 @@ class ReportDefenseAudit:
                 if (re.search(r"全球|世界", paragraph) and
                         re.search(r"国内|中国", paragraph) and
                         re.search(r"销量|市场|增速|增长|渗透率", paragraph)
-                        and not _SCOPE_DISCLAIMER.search(paragraph)):
+                        and not _SCOPE_DISCLAIMER.search(paragraph)
+                        and not _SCOPE_COMPARISON.search(paragraph)):
                     issues.append({
                         "layer": "L4", "code": "scope_collision",
                         "chapter_id": chapter_id,
@@ -137,6 +138,11 @@ class ReportDefenseAudit:
             "score": round(score, 1),
             "issues": blocking,
             "layers": {f"L{i}": any(x.get("layer") == f"L{i}" for x in blocking) for i in range(1, 6)},
+            # These are presentation-level statuses, not delivery blockers.
+            # A warning report may still be rendered, but it must not be
+            # mistaken for a formally complete report.
+            "formal_status": "passed" if not blocking else "failed",
+            "diagnostic_status": "clean" if not issues else "warning",
         }
 
     @staticmethod

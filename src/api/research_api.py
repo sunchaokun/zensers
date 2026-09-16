@@ -35,7 +35,7 @@ import shutil
 from datetime import datetime
 from src.core.orchestrator.execution.task_utils import safe_create_task
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 from src.core.adjustment.cascade_update_analyzer import CascadeUpdateAnalyzer
 from src.core.adjustment.enhanced_section_locator import EnhancedSectionLocator
 from src.core.adjustment.revision_intent_mapper import RevisionIntentMapper
@@ -3128,7 +3128,10 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
         from src.core.intelligent_routing_adapter import IntelligentRoutingAdapter
         topic = context.get('topic', '')
         try:
-            adapter = IntelligentRoutingAdapter(use_llm=True, fallback_to_keyword=True)
+            # Recovery must not synchronously re-run the full LLM routing
+            # pipeline.  The checkpoint already contains the validated plan;
+            # use the deterministic fallback only to rebuild missing pieces.
+            adapter = IntelligentRoutingAdapter(use_llm=False, fallback_to_keyword=True)
             routing_result = adapter.analyze_incremental(
                 user_request=f"Resume research for pending sections",
                 requirement={'topic': topic, 'aspects': pending_sections},
@@ -3200,6 +3203,43 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
         """
         from src.core.progress_streamer import update_progress, complete_task, fail_task
         update_progress(session_id, 0.0)
+
+        def _result_for_artifact(path, *, metadata=None, status=None):
+            """Build a truthful session result while keeping artifact delivery non-blocking."""
+            report = dict(research_result_data) if isinstance(research_result_data, dict) else {}
+            metadata = metadata if isinstance(metadata, dict) else {}
+            if metadata:
+                report["html_finalizer"] = dict(metadata)
+            if metadata.get("formal_complete") is False or metadata.get("issues") or metadata.get("explicit_nonformal"):
+                report["formal_complete"] = False
+                report["quality_gate_status"] = metadata.get("quality_gate_status") or "degraded"
+            artifact_ready = bool(path and Path(path).is_file())
+            formal_complete = bool(report.get("formal_complete")) and str(
+                report.get("quality_gate_status", "")
+            ).lower() not in {"degraded", "blocked"} and artifact_ready
+            report["artifact_status"] = "ready" if artifact_ready else "missing"
+            report["formal_complete"] = formal_complete
+            report["delivery_class"] = (
+                "formal_ready" if formal_complete
+                else "available_with_warnings" if artifact_ready else "missing"
+            )
+            return {
+                "status": status or ("completed" if formal_complete else "completed_with_warnings"),
+                "report": report,
+                "document_path": str(path or ""),
+                "output_path": str(path or ""),
+            }
+
+        def _finalizer_metadata(result):
+            """Read the canonical document metadata with legacy compatibility."""
+            if not isinstance(result, dict):
+                return None
+            metadata = result.get("metadata")
+            if isinstance(metadata, dict):
+                return metadata
+            legacy = result.get("finalizer_metadata")
+            return legacy if isinstance(legacy, dict) else None
+
         try:
             output_format = session.get('output_format', 'docx')
             html_layout = output_format if output_format in ('pptx', 'docx') else 'docx'
@@ -3214,7 +3254,9 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
                 raise ValueError(f"Preview generation failed: {preview_result}")
 
             if output_format == 'html':
-                result = {'status': 'completed', 'report': research_result_data, 'document_path': preview_path}
+                result = _result_for_artifact(
+                    preview_path, metadata=_finalizer_metadata(preview_result),
+                )
                 session['research_result'] = result
                 session['mode'] = 'chat'
                 session['current_step'] = 0
@@ -3234,11 +3276,11 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
                     session_id, research_result_data, None, session,
                     html_path=preview_path,
                 )
-                result = {
-                    'status': 'previewing', 'report': research_result_data,
-                    'document_path': preview_path,
-                    'export_status': 'HTML_DRAFT',
-                }
+                result = _result_for_artifact(
+                    preview_path, metadata=_finalizer_metadata(preview_result),
+                    status="previewing",
+                )
+                result['export_status'] = 'HTML_DRAFT'
                 session['research_result'] = result
                 session['mode'] = 'chat'
                 session['current_step'] = 0
@@ -3251,7 +3293,9 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
             doc_result = await self._orchestrator._document_agent.execute(doc_input)
             doc_path = doc_result.get('document_path', '') if isinstance(doc_result, dict) else ''
             final_doc_path = doc_path or preview_path
-            result = {'status': 'completed', 'report': research_result_data, 'document_path': final_doc_path}
+            result = _result_for_artifact(
+                final_doc_path, metadata=_finalizer_metadata(doc_result),
+            )
             session['research_result'] = result
             if output_format == 'pptx' and (doc_path or preview_path):
                 self._persist_ppt_revision_context(
@@ -3271,7 +3315,7 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
             self._refresh_report_context(session_id, session, phase='failed')
         except Exception as e:
             logger.error(f"Cache-based doc generation failed: {e}", exc_info=True)
-            session['research_result'] = {'status': 'completed', 'report': research_result_data, 'document_path': ''}
+            session['research_result'] = _result_for_artifact(None)
             session['mode'] = 'chat'
             self._refresh_report_context(session_id, session, phase='failed')
             fail_task(session_id, str(e))
@@ -3489,15 +3533,46 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
         )
         report["defense_audit"] = audit
         research_result["defense_audit"] = audit
-        if audit.get("passed", False):
+        html_finalizer = research_result.get("html_finalizer")
+        html_contract_failed = isinstance(html_finalizer, dict) and bool(
+            html_finalizer.get("issues")
+            or html_finalizer.get("formal_complete") is False
+            or html_finalizer.get("explicit_nonformal")
+        )
+        if audit.get("passed", False) and not html_contract_failed:
             research_result["quality_gate_status"] = "passed"
         else:
             # A report may still be delivered in degraded form, but it must
             # never retain the formal completed state after a failed audit.
             research_result["status"] = "completed_with_warnings"
-            research_result["quality_gate_status"] = (
-                "blocked" if audit.get("layers", {}).get("L5") else "degraded"
-            )
+            if not audit.get("passed", False):
+                research_result["quality_gate_status"] = (
+                    "blocked" if audit.get("layers", {}).get("L5") else "degraded"
+                )
+            else:
+                research_result["quality_gate_status"] = (
+                    str(html_finalizer.get("quality_gate_status") or "degraded")
+                    if isinstance(html_finalizer, dict) else "degraded"
+                )
+        document_path = research_result.get("document_path") or research_result.get("output_path")
+        artifact_ready = bool(
+            research_result.get("artifact_status") == "ready"
+            or (document_path and Path(document_path).is_file())
+        )
+        # Rechecks update truthfulness but never turn a previously non-formal
+        # report into a formal one merely because the audit passed.
+        formal_complete = (
+            bool(research_result.get("formal_complete"))
+            and bool(audit.get("passed", False))
+            and artifact_ready
+        )
+        research_result["formal_complete"] = formal_complete
+        research_result["artifact_status"] = "ready" if artifact_ready else "missing"
+        research_result["delivery_class"] = (
+            "formal_ready" if formal_complete
+            else "available_with_warnings" if artifact_ready else "missing"
+        )
+        research_result["status"] = "completed" if formal_complete else "completed_with_warnings"
         session["research_result"] = research_result
         recheck_record = {
             "status": "passed" if audit.get("passed", False) else "failed",
@@ -4033,7 +4108,6 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
                     quality_state_data["phase"] = "revising"
                 session["quality_state"] = quality_state_data
 
-                version_id = f"v{int(time.time())}"
                 html_path = str(PreviewStorage.path(session_id))
                 md_path = str(Path('data') / session_id / 'report.md')
                 report_content = session.get("research_result", {}).get("report", {})
@@ -4042,13 +4116,27 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
                     session["quality_state"] = quality_state_data
                     return self._chat_response(session_id)
 
+                from src.core.quality.quality_snapshot_manager import QualitySnapshotManager
+                snapshot_manager = QualitySnapshotManager()
+                version_id = await snapshot_manager.create_snapshot(
+                    session_id,
+                    html_path,
+                    md_path,
+                    quality_state_data,
+                    report=report_content,
+                    artifacts={
+                        key: session.get("research_result", {}).get(key)
+                        for key in ("document_path", "output_path", "artifacts", "artifact_manifest")
+                        if session.get("research_result", {}).get(key) is not None
+                    },
+                )
                 version_n = len(quality_state_data.get("version_stack", []))
                 snapshot_copy = copy.deepcopy({k: v for k, v in quality_state_data.items() if k != "version_stack"})
                 quality_state_data.setdefault("version_stack", []).append({
                     "id": version_id,
                     "created_at": datetime.now().isoformat(),
-                    "html_path": f"data/snapshots/{session_id}/{version_id}.html",
-                    "md_path": f"data/snapshots/{session_id}/{version_id}.md",
+                    "html_path": str(Path("data/snapshots") / session_id / f"{version_id}.html"),
+                    "md_path": str(Path("data/snapshots") / session_id / f"{version_id}.md"),
                     "quality_state_snapshot": snapshot_copy,
                     "overall_score": quality_state_data.get("overall_score", 0),
                     "label": f"修订前快照 v{version_n}",
@@ -4172,7 +4260,7 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
         # Re-run the deterministic evidence defense on the revised report
         # before persisting/publishing it.  The legacy quality recheck below
         # is complementary and must not replace this L1-L5 gate.
-        self._recheck_report_defense_audit(session)
+        recheck_audit = self._recheck_report_defense_audit(session)
 
         # Persist revised sections and artifact pointers before publishing the
         # completed report context. This keeps legacy top-level ``sections``
@@ -4182,15 +4270,26 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
         if quality_state_data:
             await self._post_revision_recheck(session)
 
+        revision_status = str(
+            (session.get('research_result') or {}).get('status') or
+            ('completed' if recheck_audit.get('passed', False) else 'completed_with_warnings')
+        )
+        if revision_status not in {'completed', 'completed_with_warnings'}:
+            revision_status = 'completed_with_warnings'
         self._refresh_report_context(
             session_id, session, phase='completed', report_version_increment=True,
-            last_revision={'status': 'completed', 'request': adjustment, 'affected_sections': aspects,
+            last_revision={'status': revision_status, 'request': adjustment, 'affected_sections': aspects,
                            'revision_type': conv_result.get('revision_type', 'section')},
         )
 
-        response = self._chat_response(session_id, '报告修订已完成。')
+        response_message = (
+            '报告修订已完成。'
+            if revision_status == 'completed'
+            else '报告修订已完成，但仍有质量告警；产物已保留，可继续修订。'
+        )
+        response = self._chat_response(session_id, response_message)
         response.update({
-            'status': 'completed',
+            'status': revision_status,
             'task_id': session_id,
             'report_version': (session.get('report_context') or {}).get('report_version'),
             'affected_sections': aspects,
@@ -4203,6 +4302,7 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
         session = session_manager.get(session_id)
         if not session:
             return self._chat_response(session_id)
+        session.setdefault("_session_id", session_id)
         quality_lock = self._get_quality_lock(session_id)
         async with quality_lock:
             pending = session.pop('_pending_v2_revision', None)
@@ -4498,6 +4598,33 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
         from src.api.research_api_helpers import apply_revision_to_session
         return apply_revision_to_session(session, result, chapters, data_registry)
 
+    @staticmethod
+    def _record_html_finalizer_state(session: dict, metadata: dict) -> None:
+        """Attach HTML contract evidence without turning delivery into a blocker."""
+        if not isinstance(metadata, dict):
+            return
+        research_result = session.setdefault("research_result", {})
+        research_result["html_finalizer"] = dict(metadata)
+        report = research_result.get("report")
+        if isinstance(report, dict):
+            report["html_finalizer"] = dict(metadata)
+        contract_failed = bool(
+            metadata.get("issues")
+            or metadata.get("formal_complete") is False
+            or metadata.get("explicit_nonformal")
+        )
+        if not contract_failed:
+            return
+        research_result["formal_complete"] = False
+        research_result["quality_gate_status"] = (
+            str(metadata.get("quality_gate_status") or "degraded")
+        )
+        document_path = research_result.get("document_path") or research_result.get("output_path")
+        if document_path and Path(str(document_path)).is_file():
+            research_result["artifact_status"] = "ready"
+            research_result["delivery_class"] = "available_with_warnings"
+        research_result["status"] = "completed_with_warnings"
+
     async def _regenerate_from_revision(self, session_id, session, chapters):
         research_result_data = self._convert_session_to_cache_format(
             session.get("research_result", {})
@@ -4516,6 +4643,14 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
                 '_html_layout': html_layout,
             }
             preview_result = await self._orchestrator._document_agent.execute(preview_input)
+            preview_metadata = (
+                preview_result.get("metadata")
+                if isinstance(preview_result, dict)
+                else None
+            )
+            if not isinstance(preview_metadata, dict) and isinstance(preview_result, dict):
+                preview_metadata = preview_result.get("finalizer_metadata")
+            self._record_html_finalizer_state(session, preview_metadata or {})
             preview_path = None
             if isinstance(preview_result, dict) and preview_result.get('document_path'):
                 preview_path = preview_result['document_path']
@@ -4547,6 +4682,14 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
                     '_preview_html_path': preview_path,
                 }
                 doc_result = await self._orchestrator._document_agent.execute(doc_input)
+                doc_metadata = (
+                    doc_result.get("metadata")
+                    if isinstance(doc_result, dict)
+                    else None
+                )
+                if not isinstance(doc_metadata, dict) and isinstance(doc_result, dict):
+                    doc_metadata = doc_result.get("finalizer_metadata")
+                self._record_html_finalizer_state(session, doc_metadata or {})
                 doc_path = doc_result.get('document_path', '') if isinstance(doc_result, dict) else ''
                 final_doc_path = doc_path or preview_path or ''
                 if final_doc_path:
@@ -4717,6 +4860,12 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
             SessionStreamer.push_quality_result(session_id, quality_data)
 
     async def _post_revision_recheck(self, session):
+        """Run the post-revision quality recheck under the session lock."""
+        session_id = session.get("_session_id", "")
+        async with self._get_quality_lock(session_id):
+            return await self._post_revision_recheck_locked(session)
+
+    async def _post_revision_recheck_locked(self, session):
         """修订完成后重新质检，合并新旧issue状态"""
         from src.core.quality.quality_state import merge_issues_on_recheck, QualityIssue, SectionScore
         from src.core.session_streamer import SessionStreamer
@@ -4733,7 +4882,17 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
         try:
             recheck_result = await self._recheck_quality(session, sections, push_preview=False)
             if not recheck_result:
-                return
+                quality_data = session.get("quality_state")
+                if isinstance(quality_data, dict):
+                    quality_data["phase"] = "reviewing"
+                    session["quality_state"] = quality_data
+                    research_result = session.setdefault("research_result", {})
+                    research_result["formal_complete"] = False
+                    research_result["quality_gate_status"] = "blocked"
+                    research_result["delivery_class"] = "available_with_warnings"
+                    research_result["status"] = "completed_with_warnings"
+                    session_manager.force_save(session_id)
+                return {"success": False, "error_code": "QUALITY_RECHECK_FAILED"}
 
             existing_sections = {}
             for sec_name, sec_data in quality_data.get("section_scores", {}).items():
@@ -4778,13 +4937,34 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
             session["quality_state"] = quality_data
 
             SessionStreamer.push_quality_result(session_id, quality_data)
+            return {"success": True, "quality_state": quality_data}
         except Exception as e:
             logger.warning(f"Post-revision recheck failed: {e}")
+            quality_data = session.get("quality_state")
+            if isinstance(quality_data, dict):
+                quality_data["phase"] = "reviewing"
+                quality_data["last_recheck"] = {
+                    "passed": False, "status": "failed",
+                    "error_code": "QUALITY_RECHECK_FAILED", "error": str(e),
+                }
+                session["quality_state"] = quality_data
+                research_result = session.setdefault("research_result", {})
+                research_result["formal_complete"] = False
+                research_result["quality_gate_status"] = "blocked"
+                research_result["delivery_class"] = "available_with_warnings"
+                research_result["status"] = "completed_with_warnings"
+                session_manager.force_save(session_id)
+            return {"success": False, "error_code": "QUALITY_RECHECK_FAILED"}
 
     async def _recheck_quality(self, session, sections, push_preview=False):
         """对指定sections重新执行质检，返回质检结果dict"""
         from src.agents.fixed_agents.quality_check_agent import QualityCheckAgent
         from src.core.session_streamer import SessionStreamer
+        from src.core.quality.quality_state import (
+            QualityIssue,
+            SectionScore,
+            merge_issues_on_recheck,
+        )
 
         session_id = session.get("_session_id", "")
         try:
@@ -4799,6 +4979,14 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
             result = await checker.execute(check_input)
             if not result.get("success"):
                 logger.warning(f"Recheck quality failed: {result.get('error', 'unknown')}")
+                quality_data = session.get("quality_state")
+                if isinstance(quality_data, dict):
+                    quality_data["last_recheck"] = {
+                        "passed": False,
+                        "status": "failed",
+                        "error_code": "QUALITY_RECHECK_FAILED",
+                        "error": result.get("error", "unknown"),
+                    }
                 return None
 
             # A recheck is part of the persisted quality lifecycle, not only
@@ -4821,7 +5009,51 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
                     ) if isinstance(result.get("check_details"), dict) else {}
                 )
                 if isinstance(section_results, dict) and section_results:
-                    quality_data["section_scores"] = section_results
+                    existing_sections = {}
+                    for section_name, section_data in quality_data.get(
+                        "section_scores", {}
+                    ).items():
+                        if not isinstance(section_data, dict):
+                            continue
+                        issues = []
+                        for raw_issue in section_data.get("issues", []):
+                            if isinstance(raw_issue, QualityIssue):
+                                issues.append(raw_issue)
+                            elif isinstance(raw_issue, dict):
+                                try:
+                                    issues.append(QualityIssue(
+                                        id=raw_issue.get("id", ""),
+                                        type=raw_issue.get("type", "completeness"),
+                                        severity=raw_issue.get("severity", "medium"),
+                                        message=raw_issue.get("message", ""),
+                                        section=raw_issue.get("section", section_name),
+                                        state=raw_issue.get("state", "open"),
+                                        revision_count=raw_issue.get("revision_count", 0),
+                                    ))
+                                except Exception:
+                                    continue
+                        try:
+                            existing_sections[section_name] = SectionScore(
+                                score=section_data.get("score", 0.0),
+                                status=section_data.get("status", "warning"),
+                                issues=issues,
+                            )
+                        except Exception:
+                            continue
+                    merged_sections = merge_issues_on_recheck(
+                        existing_sections, section_results
+                    )
+                    quality_data["section_scores"] = {
+                        section_name: {
+                            "score": section_score.score,
+                            "status": section_score.status,
+                            "issues": [
+                                issue.model_dump()
+                                for issue in section_score.issues
+                            ],
+                        }
+                        for section_name, section_score in merged_sections.items()
+                    }
                 quality_data["last_recheck"] = {
                     "quality_score": result.get("quality_score", 0),
                     "passed": bool(result.get("passed", False)),
@@ -4835,6 +5067,14 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
             return result
         except Exception as e:
             logger.warning(f"Recheck quality exception: {e}")
+            quality_data = session.get("quality_state")
+            if isinstance(quality_data, dict):
+                quality_data["last_recheck"] = {
+                    "passed": False,
+                    "status": "failed",
+                    "error_code": "QUALITY_RECHECK_FAILED",
+                    "error": str(e),
+                }
             return None
 
     def _expire_stale_revising_issues(self, session):
@@ -4890,58 +5130,262 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
         return quality_state
 
     async def handle_quality_action(self, request) -> dict:
-        """Handle quality review action"""
+        """Dispatch a quality-panel action to its concrete state transition."""
         session_id = getattr(request, 'session_id', None)
         action = getattr(request, 'action', None)
         if not session_id:
             return {"error": "Missing session_id", "error_code": "MISSING_SESSION_ID"}
-        
-        lock = self._get_quality_lock(session_id)
-        
-        async with lock:
+
+        async with self._get_quality_lock(session_id):
             session = session_manager.get(session_id)
             if not session:
                 return {"error": "Session not found", "error_code": "SESSION_NOT_FOUND"}
-        
+            # Older/template-created sessions may not persist this field;
+            # quality actions still need the request identity for snapshots
+            # and SSE events.
+            session.setdefault("_session_id", session_id)
+
             self._expire_stale_revising_issues(session)
-        
-            quality_lock = self._get_quality_lock(session_id)
-            async with quality_lock:
-                quality_data = session.get("quality_state", {})
-                if not quality_data:
-                    return {"error": "No quality state", "error_code": "NO_QUALITY_STATE"}
-                
-                sections = session.get("research_result", {}).get("report", {}).get("sections", [])
-                if not sections:
-                    return {"error": "No sections in report", "error_code": "NO_SECTIONS"}
-                
-                await self._recheck_quality(session, sections, push_preview=True)
-                
-                quality_data = session.get("quality_state", {})
-                quality_data["phase"] = "reviewing"
-                session["quality_state"] = quality_data
-                
-                from src.core.session_streamer import SessionStreamer
-                SessionStreamer.push_quality_result(session_id, quality_data)
-                
-                from src.core.quality.preview_health import check_preview_health
-                html_path = str(PreviewStorage.path(session_id))
-                old_html_length = 0
-                if quality_data.get("version_stack"):
-                    last_version = quality_data["version_stack"][-1]
-                    old_snap_html = Path(last_version.get("html_path", ""))
-                    if old_snap_html.exists():
-                        old_html_length = len(old_snap_html.read_text(encoding="utf-8"))
-                
-                health = check_preview_health(html_path, old_html_length)
-                if not health["healthy"]:
+            data = getattr(request, "data", {}) or {}
+            if action in {"quality_recheck", "recheck", "review"}:
+                return await self._handle_quality_recheck(
+                    session, getattr(request, "section_name", None),
+                    push_preview=True, action=action,
+                )
+            if action in {"quality_dismiss", "dismiss"}:
+                return await self._handle_quality_dismiss(session, getattr(request, "issue_id", None))
+            if action in {"quality_reopen", "reopen"}:
+                return await self._handle_quality_reopen(session, getattr(request, "issue_id", None))
+            if action in {"quality_rollback", "rollback"}:
+                return await self._handle_quality_rollback(session, getattr(request, "version_id", None))
+            if action in {"quality_confirm", "confirm", "accept"}:
+                requested_force = getattr(request, "force", None)
+                raw_force = data.get("force", False) if requested_force is None else requested_force
+                if isinstance(raw_force, bool):
+                    force = raw_force
+                else:
+                    return {"error": "force must be a boolean", "error_code": "INVALID_FORCE"}
+                return await self._handle_quality_confirm(
+                    session, force=force,
+                )
+            return {
+                "error": f"Unknown action: {action}",
+                "error_code": "UNKNOWN_ACTION",
+            }
+
+    async def _handle_quality_dismiss(self, session, issue_id: Optional[str]) -> dict:
+        import copy
+        quality_data = copy.deepcopy(session.get("quality_state", {}))
+        if not quality_data:
+            return {"error": "No quality state", "error_code": "NO_QUALITY_STATE"}
+        if not issue_id:
+            return {"error": "Missing issue_id", "error_code": "MISSING_ISSUE_ID"}
+        for section_data in quality_data.get("section_scores", {}).values():
+            for issue in section_data.get("issues", []):
+                if issue.get("id") == issue_id:
+                    issue["state"] = "dismissed"
+                    session["quality_state"] = quality_data
                     from src.core.session_streamer import SessionStreamer
-                    SessionStreamer.push_agent_message(session_id, {
-                        "agent_id": "system",
-                        "agent_name": "系统",
-                        "action": "warning",
-                        "content": f"修订完成但预览可能存在排版问题: {', '.join(i['message'] for i in health['issues'])}。可在质量面板中使用版本回滚恢复。",
+                    SessionStreamer.push_quality_result(
+                        session.get("_session_id", ""), quality_data
+                    )
+                    return {"success": True, "issue_id": issue_id, "state": "dismissed"}
+        return {"error": f"Issue {issue_id} not found", "error_code": "ISSUE_NOT_FOUND"}
+
+    async def _handle_quality_reopen(self, session, issue_id: Optional[str]) -> dict:
+        import copy
+        quality_data = copy.deepcopy(session.get("quality_state", {}))
+        if not quality_data:
+            return {"error": "No quality state", "error_code": "NO_QUALITY_STATE"}
+        if not issue_id:
+            return {"error": "Missing issue_id", "error_code": "MISSING_ISSUE_ID"}
+        for section_data in quality_data.get("section_scores", {}).values():
+            for issue in section_data.get("issues", []):
+                if issue.get("id") == issue_id and issue.get("state") == "dismissed":
+                    issue["state"] = "open"
+                    session["quality_state"] = quality_data
+                    from src.core.session_streamer import SessionStreamer
+                    SessionStreamer.push_quality_result(
+                        session.get("_session_id", ""), quality_data
+                    )
+                    return {"success": True, "issue_id": issue_id, "state": "open"}
+        return {"error": f"Issue {issue_id} not found or not dismissed", "error_code": "ISSUE_NOT_FOUND"}
+
+    async def _handle_quality_recheck(
+        self, session, section_name: Optional[str] = None, push_preview: bool = True,
+        action: str = "quality_recheck",
+    ) -> dict:
+        quality_data = session.get("quality_state", {})
+        if not quality_data:
+            return {"error": "No quality state", "error_code": "NO_QUALITY_STATE"}
+        report = session.get("research_result", {}).get("report", {})
+        sections = report.get("sections", []) if isinstance(report, dict) else []
+        if not sections:
+            return {"error": "No sections in report", "error_code": "NO_SECTIONS"}
+        if section_name:
+            sections = [
+                section for section in sections
+                if isinstance(section, dict)
+                and section_name in {
+                    str(section.get("name") or ""),
+                    str(section.get("title") or ""),
+                    str(section.get("id") or ""),
+                    str(section.get("section_id") or ""),
+                }
+            ]
+            if not sections:
+                return {"error": f"Section {section_name} not found", "error_code": "SECTION_NOT_FOUND"}
+        result = await self._recheck_quality(session, sections, push_preview=push_preview)
+        if not result:
+            quality_data = session.get("quality_state", {})
+            if isinstance(quality_data, dict):
+                quality_data["phase"] = "reviewing"
+                quality_data["last_recheck"] = {
+                    "passed": False,
+                    "status": "failed",
+                    "error_code": "QUALITY_RECHECK_FAILED",
+                }
+                session["quality_state"] = quality_data
+            return {
+                "success": False,
+                "status": "reviewing",
+                "action": action,
+                "error": "Quality recheck failed",
+                "error_code": "QUALITY_RECHECK_FAILED",
+                "quality_state": session.get("quality_state", {}),
+            }
+        quality_data = session.get("quality_state", {})
+        quality_data["phase"] = "reviewing"
+        session["quality_state"] = quality_data
+        return {
+            "success": True,
+            "status": "reviewing",
+            "action": action,
+            "quality_state": quality_data,
+            "result": result,
+        }
+
+    async def _handle_quality_rollback(self, session, version_id: Optional[str]) -> dict:
+        quality_data = session.get("quality_state", {})
+        if not quality_data:
+            return {"error": "No quality state", "error_code": "NO_QUALITY_STATE"}
+        if not version_id:
+            return {"error": "Missing version_id", "error_code": "MISSING_VERSION_ID"}
+        target = next(
+            (item for item in quality_data.get("version_stack", [])
+             if isinstance(item, dict) and item.get("id") == version_id),
+            None,
+        )
+        if not target:
+            return {"error": f"Version {version_id} not found", "error_code": "VERSION_NOT_FOUND"}
+
+        from src.core.quality.quality_snapshot_manager import QualitySnapshotManager
+        snapshot = await QualitySnapshotManager().restore_snapshot(
+            session.get("_session_id", ""), version_id,
+        )
+        if not snapshot:
+            return {"error": "Snapshot restore failed", "error_code": "SNAPSHOT_RESTORE_FAILED"}
+        restored_quality = snapshot.get("quality_state")
+        if not isinstance(restored_quality, dict):
+            return {"error": "Snapshot quality state invalid", "error_code": "SNAPSHOT_INVALID"}
+        snapshot_report = snapshot.get("report")
+        if isinstance(snapshot_report, dict):
+            session.setdefault("research_result", {})["report"] = snapshot_report
+        snapshot_artifacts = snapshot.get("artifacts")
+        if isinstance(snapshot_artifacts, dict):
+            research_result = session.setdefault("research_result", {})
+            for key in ("document_path", "output_path", "artifacts", "artifact_manifest"):
+                if key in snapshot_artifacts:
+                    research_result[key] = snapshot_artifacts[key]
+        html_path = snapshot.get("html_path")
+        if html_path and Path(str(html_path)).is_file():
+            PreviewStorage.ensure_dirs()
+            shutil.copy2(str(html_path), str(PreviewStorage.path(session.get("_session_id", ""))))
+        md_path = snapshot.get("md_path")
+        if md_path and Path(str(md_path)).is_file():
+            report_dir = Path("data") / session.get("_session_id", "")
+            report_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(md_path), str(report_dir / "report.md"))
+        restored_quality["current_version"] = version_id
+        restored_quality["phase"] = "reviewing"
+        session["quality_state"] = restored_quality
+        self._refresh_report_context(
+            session.get("_session_id", ""), session,
+            phase="awaiting_user_decision", document_version=version_id,
+            report_version_increment=True,
+            pending_decision={"type": "preview_confirmation", "options": ["confirm", "revise", "cancel"]},
+        )
+        session_manager.force_save(session.get("_session_id", ""))
+        from src.core.session_streamer import SessionStreamer
+        SessionStreamer.push_preview_refresh(
+            session.get("_session_id", ""), PreviewStorage.url(session.get("_session_id", "")), version_id,
+        )
+        SessionStreamer.push_quality_result(session.get("_session_id", ""), restored_quality)
+        return {"success": True, "version_id": version_id, "quality_state": restored_quality}
+
+    async def _handle_quality_confirm(self, session, force: bool = False) -> dict:
+        import copy
+        quality_data = copy.deepcopy(session.get("quality_state", {}))
+        if not quality_data:
+            return {"error": "No quality state", "error_code": "NO_QUALITY_STATE"}
+        open_issues = []
+        for section_name, section_data in quality_data.get("section_scores", {}).items():
+            for issue in section_data.get("issues", []):
+                if issue.get("state") in {"open", "max_retries_reached"}:
+                    open_issues.append({
+                        "id": issue.get("id"), "section": section_name,
+                        "message": issue.get("message"), "severity": issue.get("severity"),
+                        "state": issue.get("state"),
                     })
+        recheck = quality_data.get("last_recheck")
+        recheck_missing = not isinstance(recheck, dict)
+        recheck_failed = isinstance(recheck, dict) and (
+            recheck.get("passed") is False and recheck.get("status") == "failed"
+        )
+        if open_issues and not force:
+            return {
+                "status": "pending_issues",
+                "open_issues": open_issues,
+                "message": "仍有未解决的问题，请确认是否仍要交付",
+            }
+        recheck_not_passed = recheck_missing or recheck_failed or recheck.get("passed") is not True
+        if recheck_not_passed and not force:
+            return {
+                "status": "recheck_required" if recheck_missing else "recheck_failed",
+                "error": "A successful quality recheck is required before confirmation",
+                "error_code": "QUALITY_RECHECK_FAILED",
+            }
+        dismissed_issues = any(
+            issue.get("state") == "dismissed"
+            for section_data in quality_data.get("section_scores", {}).values()
+            for issue in section_data.get("issues", [])
+        )
+        for section_data in quality_data.get("section_scores", {}).values():
+            for issue in section_data.get("issues", []):
+                if issue.get("state") in {"open", "dismissed", "max_retries_reached"}:
+                    issue["state"] = "accepted"
+        degraded = bool(force or recheck_not_passed or open_issues or dismissed_issues)
+        quality_data["phase"] = "confirmed"
+        quality_data["delivery_class"] = "available_with_warnings" if degraded else "formal_ready"
+        quality_data["formal_complete"] = not degraded
+        quality_data["quality_gate_status"] = "degraded" if degraded else "passed"
+        session["quality_state"] = quality_data
+        session_id = session.get("_session_id", "")
+        research_result = session.setdefault("research_result", {})
+        research_result["formal_complete"] = not degraded
+        research_result["quality_gate_status"] = "degraded" if degraded else "passed"
+        research_result["delivery_class"] = "available_with_warnings" if degraded else "formal_ready"
+        research_result["status"] = "completed_with_warnings" if degraded else "completed"
+        session_manager.force_save(session_id)
+        from src.core.session_streamer import SessionStreamer
+        SessionStreamer.push_quality_confirmed(session_id, PreviewStorage.url(session_id))
+        return {
+            "status": "confirmed",
+            "delivery_class": quality_data["delivery_class"],
+            "formal_complete": quality_data["formal_complete"],
+            "quality_gate_status": quality_data["quality_gate_status"],
+            "quality_state": quality_data,
+        }
 
 
 
@@ -4957,6 +5401,9 @@ class QualityActionRequest:
         self.session_id = kwargs.get('session_id')
         self.action = kwargs.get('action')
         self.data = kwargs.get('data', {})
+        # Accept both the historical nested shape and the public top-level
+        # field used by API clients.
+        self.force = kwargs.get('force')
         self.issue_id = kwargs.get('issue_id')
         self.version_id = kwargs.get('version_id')
         self.section_name = kwargs.get('section_name')

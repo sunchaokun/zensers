@@ -456,6 +456,10 @@ class AnalysisQualityChecker(BaseQualityChecker):
         risk_indicators = [
             (r'(?:风险提示)[^。？！；…\n]{5,}', 1.2),
             (r'(?:风险|不确定性|数据缺口|假设前提)[^。？！；…\n]{10,}', 0.9),
+            # "反证条件" is the fifth-segment equivalent used by the
+            # analysis rubric; it must contribute to risk disclosure instead
+            # of being treated as an unscored heading.
+            (r'(?:反证|边界条件|反面)[^。？！；…\n]{5,}', 0.9),
             (r'(?:然而|不过|但是|但需注意|需要注意的是)[^。？！；…\n]{10,}', 0.7),
             (r'(?:如果|若|当)[^。？！；…\n]{15,}(?:则|那么|可能|将|会)', 0.5),
         ]
@@ -465,6 +469,10 @@ class AnalysisQualityChecker(BaseQualityChecker):
             if matches:
                 score = min(len(matches) / 3.0, 1.0) * weight * 100
                 max_score = max(max_score, score)
+        # A dedicated, substantive counter-evidence/boundary paragraph is a
+        # complete risk-disclosure segment even when it appears only once.
+        if re.search(r'(?:反证条件|边界条件)[^。？！；…\n]{10,}', content):
+            max_score = max(max_score, 100.0)
         return min(max_score, 100.0)
 
     # Compatibility name used by older quality audit scripts.  Keep one
@@ -670,6 +678,15 @@ class ReportQualityChecker(BaseQualityChecker):
         (["加速", "扩大", "扩张"], ["减速", "缩小", "收缩"]),
     ]
 
+    # Direction words are only comparable when they refer to the same
+    # subject.  Without anchors, a chapter about stronger profitability and
+    # another about lower costs are incorrectly treated as contradictory.
+    _DIRECTIONAL_CONTEXT_ANCHORS = frozenset({
+        "市场", "价格", "需求", "供给", "销量", "销售", "营收", "收入",
+        "利润", "盈利", "毛利", "成本", "产能", "库存", "份额", "出口",
+        "现金流", "负债", "估值", "增长", "行业", "竞争", "风险",
+    })
+
     def _check_cross_chapter_consistency(self, sections: List[Any]) -> float:
         """
         Q-FIX-2: Full-text numeric + directional contradiction detection across chapters.
@@ -760,21 +777,40 @@ class ReportQualityChecker(BaseQualityChecker):
         
         directional_contradictions = 0
         if len(section_texts) >= 2:
-            all_words = []
+            directional_profiles = []
             for sid, text in section_texts:
-                for pos_group, neg_group in self._DIRECTIONAL_CONTRADICTION_PAIRS:
-                    pos_found = [w for w in pos_group if w in text]
-                    neg_found = [w for w in neg_group if w in text]
-                    all_words.append((sid, pos_found, neg_found))
-            for i in range(len(all_words)):
-                for j in range(i + 1, len(all_words)):
-                    sid_a, pos_a, neg_a = all_words[i]
-                    sid_b, pos_b, neg_b = all_words[j]
-                    if pos_a and neg_b or neg_a and pos_b:
+                # Keep the subject scope local to a sentence.  A whole
+                # chapter often contains both opportunities and risks, which
+                # is not itself a contradiction.
+                sentences = [
+                    sentence.strip()
+                    for sentence in re.split(r"[。！？；\n]+", text)
+                    if sentence.strip()
+                ]
+                for sentence in sentences:
+                    anchors = {
+                        anchor for anchor in self._DIRECTIONAL_CONTEXT_ANCHORS
+                        if anchor in sentence
+                    }
+                    for pos_group, neg_group in self._DIRECTIONAL_CONTRADICTION_PAIRS:
+                        pos_found = [w for w in pos_group if w in sentence]
+                        neg_found = [w for w in neg_group if w in sentence]
+                        directional_profiles.append(
+                            (sid, anchors, pos_found, neg_found)
+                        )
+            for i in range(len(directional_profiles)):
+                for j in range(i + 1, len(directional_profiles)):
+                    sid_a, anchors_a, pos_a, neg_a = directional_profiles[i]
+                    sid_b, anchors_b, pos_b, neg_b = directional_profiles[j]
+                    if sid_a == sid_b:
+                        continue
+                    shared_anchors = anchors_a & anchors_b
+                    if shared_anchors and ((pos_a and neg_b) or (neg_a and pos_b)):
                         directional_contradictions += 1
                         logger.warning(
                             f"Cross-chapter directional contradiction: "
-                            f"{sid_a}({pos_a+neg_a}) vs {sid_b}({pos_b+neg_b})"
+                            f"{sid_a}({pos_a+neg_a}, anchors={sorted(shared_anchors)}) vs "
+                            f"{sid_b}({pos_b+neg_b}, anchors={sorted(shared_anchors)})"
                         )
 
         if total == 0 and directional_contradictions == 0:

@@ -193,6 +193,26 @@ class DynamicPhaseOrchestrator:
             # proceed.
             existing_id_list = [str(item["section_id"]).strip() for item in existing_manifest]
             existing_ids = set(existing_id_list)
+            current_section_ids = {
+                str(getattr(section, "section_id", "") or "").strip()
+                for section in task_structure.sections
+                if str(getattr(section, "section_id", "") or "").strip()
+            }
+            subsection_parent_ids = {
+                str(
+                    (candidate.get("section_id") if isinstance(candidate, dict)
+                     else getattr(candidate, "section_id", "")) or ""
+                ).strip()
+                for candidate in raw_specs
+                if (
+                    (candidate.get("sub_sections") if isinstance(candidate, dict)
+                     else getattr(candidate, "sub_sections", None))
+                    and str(
+                        (candidate.get("section_id") if isinstance(candidate, dict)
+                         else getattr(candidate, "section_id", "")) or ""
+                    ).strip()
+                )
+            }
             duplicate_existing_ids = {
                 section_id for section_id in existing_id_list
                 if existing_id_list.count(section_id) > 1
@@ -201,6 +221,21 @@ class DynamicPhaseOrchestrator:
                 raise ValueError(
                     f"Manifest validation failed: duplicate section IDs {sorted(duplicate_existing_ids)}"
                 )
+            # Planning can be retried after a DAG order repair.  The first
+            # plan expands task_structure.sections in place and freezes the
+            # matching manifest; a second plan must reuse that canonical leaf
+            # state instead of trying to bind raw parent specs to section_N::sub
+            # IDs again.
+            if (
+                current_section_ids
+                and existing_ids == current_section_ids
+                and (
+                    not subsection_parent_ids
+                    or any("::" in section_id for section_id in current_section_ids)
+                )
+                and not (current_section_ids & subsection_parent_ids)
+            ):
+                return
             expected_leaf_ids = set()
             for section in task_structure.sections:
                 raw = section if isinstance(section, dict) else section

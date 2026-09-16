@@ -955,6 +955,7 @@ class IndustryResearchStrategy(TaskDecompositionStrategy):
                     ),
                 },
                 "evidence_ids": [],
+                "execution_order": len(section_manifest),
             })
         for synthesis_index, (i, aspect) in enumerate(dependent_aspects):
             aspect_lower = str(aspect or "").lower()
@@ -980,6 +981,7 @@ class IndustryResearchStrategy(TaskDecompositionStrategy):
                     ),
                 },
                 "evidence_ids": [],
+                "execution_order": len(section_manifest),
             })
         
         # === Phase 5: Report Generation ===

@@ -12,6 +12,11 @@ ${patch_instructions}
 
 ## 修补规则（严格遵守）
 
+### 数据缺口处理（高优先级）
+- 缺少数据时只能补充已有证据支持的内容、改写为明确的定性判断，或删除无据断言。
+- 不得输出“无可用数据”“数据来源待补充”“未提供（请使用……）”等提示词/系统内部占位语，也不得输出工具调用或修补过程说明。
+- 数据缺口应通过自然的读者表述或删除相关断言处理，不得把内部状态写入章节正文。
+
 ### 修补方式（根据问题类型选择）
 1. **无据断言** → 删除该断言，或替换为"当前数据尚不充分，无法做出可靠判断"
 2. **编造数据** → 删除该数值，如需保留论点则标注数据缺口
@@ -34,7 +39,7 @@ ${patch_instructions}
 ## 输出格式（严格JSON，包裹在 ```json ``` 中）
 ```json
 {
-  "title": "章节标题",
+  "title": "${section_name}",
   "content": "Markdown格式的修补后完整章节正文",
   "data_points_used": [{"metric": "指标名", "value": "数值", "unit": "单位", "source": "来源", "source_url": "原始来源URL", "geographic_scope": "中国/全球/其他", "period": "2025年或2025年Q1", "population": "统计对象", "epistemic_level": "factual/inferential/speculative"}],
   "key_conclusions": ["结论1", "结论2"],

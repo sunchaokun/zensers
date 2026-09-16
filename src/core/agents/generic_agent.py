@@ -4169,7 +4169,7 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
             "## 检查维度\n"
             "1. 结构完整性：是否包含核心结论、论证分析、"
             "数据支撑、风险提示四个要素？\n"
-            "2. 风险提示覆盖：是否讨论了不确定性、假设前提、数据缺口？\n\n"
+            "2. 反证覆盖：是否讨论了不确定性、假设前提、数据缺口，以及可能推翻当前结论的替代情景？\n\n"
             "## 内容\n"
             f"{summary}\n\n"
             "## 输出格式\n"

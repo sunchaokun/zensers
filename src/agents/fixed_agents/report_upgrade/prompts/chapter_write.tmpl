@@ -51,6 +51,11 @@ ${used_evidence_ids_json}
 
 ## ⚠️ 核心原则：只做提升，绝不降级
 
+### 数据缺口处理（高优先级）
+- 缺少数据时只能采取以下一种方式：基于已有证据补充；改写为明确的定性判断；或删除无据论点。
+- 不得在正文、标题、结论或 JSON 字段中输出提示词/系统内部占位语，例如“无可用数据”“无原始数据摘要”“数据来源待补充”“未提供（请使用……）”或工具调用说明。
+- 数据不足时使用自然、面向读者的定性表述，或直接删除相关断言；不要把缺口处理过程写成报告内容。
+
 分析研究员的初稿已经过质量控制循环（撰写→审查→修正），是专业且可靠的。你的职责是：
 
 1. **统一数据** — 确保同一指标在不同章节中的数值、来源一致
@@ -131,7 +136,7 @@ ${upstream_data_points_json}
 ## 输出格式（严格JSON，包裹在 ```json ``` 中）
 ```json
 {
-  "title": "章节标题",
+  "title": "${section_name}",
   "content": "Markdown格式的章节正文",
   "data_points_used": [{"metric": "指标名", "value": "数值", "unit": "单位", "source": "来源", "source_url": "原始来源URL", "geographic_scope": "中国/全球/其他", "period": "2025年或2025年Q1", "population": "统计对象", "epistemic_level": "factual/inferential/speculative"}],
   "key_conclusions": ["结论1", "结论2"],

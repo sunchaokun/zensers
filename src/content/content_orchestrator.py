@@ -123,6 +123,8 @@ class ContentOrchestrator:
         self._max_slide_content = MAX_SLIDE_CONTENT
         self._template_engine = TemplateEngine()
         self._current_template_html: Optional[str] = None
+        self._last_render_diagnostics: List[Dict[str, Any]] = []
+        self._last_render_validation: Dict[str, Any] = {"passed": True, "issues": []}
         from .content_condenser import ContentCondenser
         # PPT uses a stricter editorial contract than Word.  The condenser
         # still exposes a larger default for standalone callers, but the
@@ -144,6 +146,14 @@ class ContentOrchestrator:
         if template_name:
             return self._template_engine.load_template(template_name)
         return self._current_template_html
+
+    def get_render_diagnostics(self) -> Dict[str, Any]:
+        """Expose render diagnostics without changing the core task state model."""
+        return {
+            "status": "warning" if self._last_render_diagnostics else "ok",
+            "issues": [dict(issue) for issue in self._last_render_diagnostics],
+            "post_render_validation": dict(self._last_render_validation),
+        }
     
     def transform_to_html(
         self,
@@ -164,6 +174,8 @@ class ContentOrchestrator:
             Structured HTML string
         """
         # Type validation
+        self._last_render_diagnostics = []
+        self._last_render_validation = {"passed": True, "issues": []}
         if not isinstance(research_result, dict):
             logger.warning("research_result is not a dict, using empty dict")
             research_result = {}
@@ -217,7 +229,9 @@ class ContentOrchestrator:
             logger.info(f"Using template: {template_name}")
             # Save template HTML for later style extraction
             self._current_template_html = template
-            return self._template_engine.render_template(template, variables)
+            rendered = self._template_engine.render_template(template, variables)
+            self._last_render_validation = self._template_engine.get_last_render_validation()
+            return rendered
         else:
             # Fallback: Use built-in HTML generation
             logger.warning(f"Template '{template_name}' not found, using fallback generation")
@@ -271,7 +285,7 @@ class ContentOrchestrator:
             if i < len(raw_sections):
                 raw_section = raw_sections[i] if isinstance(raw_sections[i], dict) else {}
                 # Check if the converted content already has a <table>
-                content_html_preview = self._content_to_html(section.content) if section.content else ""
+                content_html_preview = self._content_to_html(section.content, diagnostics=self._last_render_diagnostics) if section.content else ""
                 content_has_table = "<table" in content_html_preview
                 if not content_has_table:
                     # Prefer section's own tables
@@ -330,14 +344,14 @@ class ContentOrchestrator:
                     li_items = [f'<li>{ContentOrchestrator._inline_markdown(item)}</li>' for item in items]
                     bullet_html_parts.append(f'<ul>{chr(10).join(li_items)}</ul>')
                 else:
-                    bullet_html_parts.append(self._content_to_html(section.content))
+                    bullet_html_parts.append(self._content_to_html(section.content, diagnostics=self._last_render_diagnostics))
                 
                 section_dict["content"] = chr(10).join(bullet_html_parts)
                 section_dict["items"] = items
                 section_dict["kpi_data"] = kpi_data
                 section_dict["chart_suggestions"] = chart_suggestions
             else:
-                section_dict["content"] = self._content_to_html(section.content) if section.content else ""
+                section_dict["content"] = self._content_to_html(section.content, diagnostics=self._last_render_diagnostics) if section.content else ""
             
             # Process charts: read from raw_section, distribute top-level charts
             charts_data = []
@@ -430,7 +444,7 @@ class ContentOrchestrator:
                     subsec_dict = {
                         "id": subsec.id,
                         "title": subsec.title,
-                        "content": self._content_to_html(subsec.content) if subsec.content else "",
+                        "content": self._content_to_html(subsec.content, diagnostics=self._last_render_diagnostics) if subsec.content else "",
                         "index": f"{i+1}.{j+1}",
                         "points": subsec.points or [],
                     }
@@ -440,7 +454,7 @@ class ContentOrchestrator:
                             pt_content = ContentOrchestrator._extract_point_content(subsec.content, pt)
                             subsec_dict["point_sections"].append({
                                 "title": pt,
-                                "content": self._content_to_html(pt_content) if pt_content else "",
+                                "content": self._content_to_html(pt_content, diagnostics=self._last_render_diagnostics) if pt_content else "",
                                 "index": f"{i+1}.{j+1}.{k+1}",
                             })
                     subsections_data.append(subsec_dict)
@@ -1163,7 +1177,11 @@ class ContentOrchestrator:
         return '\n'.join(captured).strip()
 
     @staticmethod
-    def _content_to_html(content: str, section_title: Optional[str] = None) -> str:
+    def _content_to_html(
+        content: str,
+        section_title: Optional[str] = None,
+        diagnostics: Optional[List[Dict[str, Any]]] = None,
+    ) -> str:
         """Convert raw text content to HTML (handle Markdown markers)
         
         **Phase 2 Simplification**: Remove title skip logic
@@ -1318,8 +1336,21 @@ class ContentOrchestrator:
                 if html_table:
                     result.append(html_table)
                 else:
-                    for tl in table_lines:
-                        result.append(f'<p class="para">{tl}</p>')
+                    issue = {
+                        "code": "MARKDOWN_TABLE_RENDER_FAILED",
+                        "severity": "warning",
+                        "message": "Markdown table could not be rendered; source was not downgraded to paragraphs.",
+                        "lines": list(table_lines),
+                    }
+                    if diagnostics is not None:
+                        diagnostics.append(issue)
+                    logger.warning("Markdown table render failed (%d lines)", len(table_lines))
+                    result.append(
+                        '<div class="render-diagnostic render-diagnostic-warning" '
+                        'data-diagnostic-code="MARKDOWN_TABLE_RENDER_FAILED">'
+                        '<strong>表格渲染诊断：</strong>Markdown 表格无法转换，请检查表头、分隔行和列数。'
+                        '</div>'
+                    )
                 continue
             
             # HTML table block detection: <table>...</table>
@@ -1399,15 +1430,10 @@ class ContentOrchestrator:
             return ""
         
         col_count = len(rows[0])
-        
-        for idx in range(len(rows)):
-            while len(rows[idx]) < col_count:
-                rows[idx].append("")
-            if len(rows[idx]) > col_count:
-                rows[idx] = rows[idx][:col_count]
-        
+        if not col_count or any(len(row) != col_count for row in rows):
+            return ""
         if len(alignments) != col_count:
-            alignments = ['left'] * col_count
+            return ""
         
         parts = ['<table class="data-table">']
         

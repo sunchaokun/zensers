@@ -131,6 +131,7 @@ def _validate_report_generation_output(report: Dict[str, Any]) -> Dict[str, Any]
 
 _REPORT_PLACEHOLDER_MARKERS = (
     "本章节数据不足，无法生成完整分析",
+    "本章节未生成可验证内容",
     "数据不足，无法生成",
     "数据不足，本章节待补充",
     "本章节待补充",
@@ -236,6 +237,39 @@ def _collect_report_coverage_warnings(
     return warnings
 
 
+def _derive_delivery_state(
+    quality_passed: bool,
+    structural_passed: bool,
+    artifact_path: Optional[Union[str, Path]],
+    fallback_kind: str = "",
+) -> Dict[str, Any]:
+    """Separate artifact availability from formal-quality eligibility.
+
+    Quality and coverage findings are delivery metadata, not an output
+    circuit breaker.  The caller must still publish any successfully written
+    artifact, while ``formal_complete`` truthfully reflects whether the
+    artifact passed both quality and structural checks.
+    """
+    artifact_ready = bool(artifact_path and Path(artifact_path).is_file())
+    effective_passed = bool(quality_passed and structural_passed)
+    formal_complete = bool(
+        effective_passed
+        and artifact_ready
+        and fallback_kind not in {"fallback_markdown", "diagnostic"}
+    )
+    return {
+        "quality_gate_status": "passed" if effective_passed else "degraded",
+        "formal_complete": formal_complete,
+        "delivery_class": (
+            "formal_ready"
+            if formal_complete
+            else "available_with_warnings" if artifact_ready else "missing"
+        ),
+        "artifact_status": "ready" if artifact_ready else "missing",
+        "effective_quality_passed": effective_passed,
+    }
+
+
 def _audit_report_manifest_contract(
     requirement: Any,
     task_structure: Optional[Dict[str, Any]],
@@ -255,12 +289,40 @@ def _audit_report_manifest_contract(
     manifest = structure.get("section_manifest") or []
     if not manifest:
         return {"status": "skipped", "reason": "no_manifest"}
+    manifest_body_ids = {
+        str(item.get("section_id") or "").strip()
+        for item in manifest
+        if isinstance(item, dict)
+        and str(item.get("output_slot") or "body").strip().lower() == "body"
+        and str(item.get("section_id") or "").strip()
+    }
+    runtime_sections = structure.get("sections") or []
+    runtime_section_ids = {
+        str(item.get("section_id") or item.get("id") or "").strip()
+        for item in runtime_sections
+        if isinstance(item, dict)
+        and str(item.get("section_id") or item.get("id") or "").strip()
+    }
     framework_tree = (
         structure.get("framework_tree")
         or structure.get("section_data_specs")
         or getattr(requirement, "section_details", None)
         or structure.get("sections")
     )
+    # The runtime sections are the authoritative identity space after
+    # subsection expansion.  If raw framework specs still carry display IDs,
+    # use the runtime tree only when it exactly covers every report body
+    # entry; otherwise preserve the strict framework/spec contract below.
+    if manifest_body_ids and manifest_body_ids.issubset(runtime_section_ids):
+        framework_tree = [
+            {
+                **item,
+                "node_id": str(item.get("section_id") or item.get("id") or "").strip(),
+                "title": item.get("title") or item.get("name") or item.get("section_name") or item.get("section_id"),
+            }
+            for item in runtime_sections
+            if isinstance(item, dict)
+        ]
     normalized_results = []
     values = execution_results.values() if isinstance(execution_results, dict) else (execution_results or [])
     for index, raw in enumerate(values):
@@ -458,6 +520,16 @@ def _update_research_result_terminal_state(
                 })
             terminal_result["manifest_hash"] = manifest_hash
             terminal_result["report_content_hash"] = report_content_hash
+            formal_complete = bool(terminal_result.get("formal_complete"))
+            quality_gate_status = str(terminal_result.get("quality_gate_status") or "")
+            delivery_class = (
+                "formal_ready"
+                if formal_complete and quality_gate_status not in {"blocked", "degraded"}
+                else "available_with_warnings"
+            ) if content_hash else "missing"
+            terminal_result["delivery_class"] = delivery_class
+            terminal_result["artifact_status"] = "ready" if content_hash else "missing"
+            terminal_result["artifact_delivery_class"] = delivery_class
             artifact = {
                 "artifact_id": f"{task_id}:{artifact_path.suffix.lstrip('.') if artifact_path else 'unknown'}",
                 "version": str(terminal_result.get("report_version") or "latest"),
@@ -468,7 +540,12 @@ def _update_research_result_terminal_state(
                 "manifest_hash": manifest_hash,
                 "report_content_hash": report_content_hash,
                 "parent_version": terminal_result.get("parent_version"),
+                # File availability is intentionally separate from formal
+                # quality.  A warning artifact can be ready to download while
+                # remaining ineligible for formal/clean delivery.
                 "status": "ready" if content_hash else "missing",
+                "delivery_class": delivery_class,
+                "formal_complete": formal_complete,
             }
             enriched_artifacts = []
             for existing_artifact in artifacts:
@@ -674,16 +751,14 @@ class ResearchOrchestrator:
         artifact_kind: str = "formal",
         structural_passed: bool = True,
     ) -> bool:
-        """Gate formal export on structure, while preserving low-score delivery.
+        """Keep artifact generation non-blocking while preserving status.
 
-        ``quality_passed`` is a user-facing quality signal.  A low score may
-        still be a useful auxiliary report.  Missing/empty/placeholder
-        chapters are a separate structural gate and are the only reason this
-        helper blocks a formal artifact (apart from diagnostic policy).
+        ``quality_passed`` and ``structural_passed`` are recorded by the
+        caller and determine whether the result is formally complete.  They
+        must never prevent a usable HTML/document artifact from being
+        generated: the product contract is "deliver with warnings".
         """
-        if artifact_kind == "diagnostic":
-            return True
-        return bool(structural_passed)
+        return True
 
     @staticmethod
     def _survey_result_to_research_result(
@@ -856,6 +931,9 @@ class ResearchOrchestrator:
         self._storage_manager = storage_manager or StorageManager(
             StorageConfig(base_path=self._storage_path)
         )
+        # Compatibility alias retained for callers of the pre-migration
+        # orchestrator. New code should use _storage_manager.
+        self._result_store = self._storage_manager
 
         # Document generation agent (default creation)
         self._document_agent = document_generation_agent or DocumentGenerationAgent(
@@ -1278,41 +1356,7 @@ class ResearchOrchestrator:
 
             # [P0-3] Annual report pre-parsing and SharedMemory injection
             # Must happen before decompose() so dynamic_fields are available
-            logger.info(f"[{task_id}] dynamic_fields check: analysis_mode={requirement.dynamic_fields.get('analysis_mode')}, file_ids={'yes' if requirement.dynamic_fields.get('file_ids') else 'no'}, all_keys={list(requirement.dynamic_fields.keys())}")
-            if requirement.dynamic_fields.get("analysis_mode") == "annual_report":
-                file_ids = requirement.dynamic_fields.get("file_ids", [])
-                if file_ids:
-                    try:
-                        from src.skills.analysis.annual_report_parser import AnnualReportParserSkill
-                        parser = AnnualReportParserSkill()
-                        file_paths = [f["path"] for f in file_ids if isinstance(f, dict) and "path" in f]
-                        parse_result = await parser.execute(
-                            action="parse",
-                            file_paths=file_paths,
-                            extract_tables=True,
-                            extract_sections=True,
-                        )
-                        if parse_result.get("success"):
-                            parse_data = parse_result.get("data", {})
-                            await self._shared_memory.write("annual_report_data", parse_data)
-                            await self._shared_memory.write(
-                                "financial_tables",
-                                parse_data.get("financial_tables", {}),
-                            )
-                            requirement.dynamic_fields["annual_report_data"] = parse_data
-                            requirement.dynamic_fields["preloaded_data"] = True
-                            table_validation = parse_data.get("table_validation", {})
-                            if table_validation.get("needs_manual_review"):
-                                requirement.dynamic_fields["supplement_with_api"] = True
-                            logger.info(
-                                f"[{task_id}] Annual report parsed: "
-                                f"{len(parse_data.get('sections', []))} sections, "
-                                f"{sum(len(v) for v in parse_data.get('financial_tables', {}).values() if isinstance(v, list))} financial tables"
-                            )
-                        else:
-                            logger.warning(f"[{task_id}] Annual report parsing failed: {parse_result.get('error')}")
-                    except Exception as e:
-                        logger.error(f"[{task_id}] Annual report pre-parse error: {e}", exc_info=True)
+            await self._preparse_annual_report(requirement, task_id)
 
             # 4.2 Decompose task first, then create Agents (B-1 fix: ensure agents created per decomposition plan)
             decomposition_plan = None
@@ -1663,6 +1707,7 @@ class ResearchOrchestrator:
                     web_scraper_skill=_web_scraper_skill,
                     chart_planner=ChartPlannerAgent(search_gateway=_task_gateway),
                     chart_generator=ChartGenerator(),
+                    checkpoint_dir=output_dir_path,
                 )
 
                 _output_type_value = requirement.output_type.value if hasattr(
@@ -1719,8 +1764,51 @@ class ResearchOrchestrator:
                     logger.warning(f"[{task_id}] Failed to save registry/config snapshot: {_snapshot_err}")
                 logger.info(f"[{task_id}] Report upgrade (non-routing): framework-driven generation complete")
             except Exception as _report_upgrade_err:
-                logger.warning(f"[{task_id}] Report upgrade failed, falling back to to_dict(): {_report_upgrade_err}")
-                research_result_data = aggregated.to_dict()
+                logger.warning(f"[{task_id}] Report upgrade failed, recovering report-agent output: {_report_upgrade_err}")
+                # Recovery must preserve the report agent's durable output.
+                # Falling back directly to aggregated.to_dict() discards
+                # chapters already written before a late review/repair
+                # failure and replaces them with the collection skeleton.
+                _report_agent = locals().get("_ro")
+                _aggregated_payload = aggregated.to_dict()
+                _partial_chapters = list(getattr(_report_agent, "_chapters", []) or [])
+                if not _partial_chapters:
+                    try:
+                        from src.agents.fixed_agents.report_upgrade.models import ChapterWriteOutput
+                        _checkpoint_dir = output_dir_path / "checkpoints"
+                        for _checkpoint_path in sorted(_checkpoint_dir.glob("chapter_*.json")):
+                            _checkpoint = json.loads(_checkpoint_path.read_text(encoding="utf-8"))
+                            if (
+                                isinstance(_checkpoint, dict)
+                                and str(_checkpoint.get("status") or "ready").lower() == "ready"
+                                and str(_checkpoint.get("content") or "").strip()
+                            ):
+                                _partial_chapters.append(ChapterWriteOutput(
+                                    chapter_id=str(_checkpoint.get("chapter_id") or ""),
+                                    title=str(_checkpoint.get("title") or _checkpoint.get("chapter_id") or ""),
+                                    content=str(_checkpoint.get("content") or ""),
+                                    sub_section_id=str(_checkpoint.get("sub_section_id") or ""),
+                                    key_conclusions=list(_checkpoint.get("key_conclusions") or []),
+                                    status="ready",
+                                ))
+                    except Exception as _checkpoint_recovery_error:
+                        logger.warning(
+                            f"[{task_id}] Report-agent checkpoint recovery failed: {_checkpoint_recovery_error}"
+                        )
+                if _partial_chapters and _report_agent is not None:
+                    from src.agents.fixed_agents.report_upgrade.models import ReviewOutput
+                    research_result_data = _report_agent._assemble_final_report(
+                        _partial_chapters,
+                        "",
+                        ReviewOutput(overall_score=0.0),
+                        requirement.topic,
+                        _aggregated_payload.get("sources", []),
+                        task_id=task_id,
+                    )
+                    research_result_data["fallback_reason"] = "report_upgrade_failed_after_partial_chapters"
+                else:
+                    research_result_data = _aggregated_payload
+                    research_result_data["fallback_reason"] = "report_upgrade_failed_before_chapter_write"
                 if "title" not in research_result_data:
                     research_result_data["title"] = requirement.topic
 
@@ -1737,6 +1825,7 @@ class ResearchOrchestrator:
             })
 
             preview_path = preview_result.get("preview_path")
+            preview_contract = preview_result.get("metadata", {}) if isinstance(preview_result, dict) else {}
             if preview_result.get("success") and preview_path:
                 logger.info(f"[{task_id}] HTML preview generated: {preview_path}")
                 output_path = preview_path  # Use preview path as output initially
@@ -1811,7 +1900,9 @@ class ResearchOrchestrator:
             quality_passed = False
             issues = []
             quality_score = 0.0
-            
+
+            fallback_kind = ""
+
             for _retry in range(2):  # initial + 1 retry max
                 try:
                     check_input = {"report": research_result_data, "standards": None}
@@ -1828,6 +1919,17 @@ class ResearchOrchestrator:
                         quality_passed = quality_result.get("passed", False)
                         issues = quality_result.get("issues", [])
                         suggestions = quality_result.get("suggestions", [])
+                        render_contract_issues = list(preview_contract.get("issues") or []) if isinstance(preview_contract, dict) else []
+                        if render_contract_issues:
+                            quality_passed = False
+                            quality_score = min(float(quality_score), 0.0)
+                            issues.append({
+                                "type": "render_contract",
+                                "severity": "high",
+                                "blocking": True,
+                                "message": "HTML finalizer 检测到成品渲染或标题契约问题",
+                                "details": render_contract_issues,
+                            })
 
                         # Final-report L1-L5 defense is a hard gate.  The
                         # legacy checker may pass a structurally complete
@@ -1893,6 +1995,7 @@ class ResearchOrchestrator:
                                 if new_path and Path(new_path).exists():
                                     output_path = new_path
                                     preview_path = self._latest_preview_path(preview_path, new_result)
+                                    preview_contract = new_result.get("metadata", {}) if isinstance(new_result, dict) else {}
                                     logger.info(f"[{task_id}] Auto-repair: regenerated with {len(adjustments)} fixes")
                                     # Copy repaired preview to serving directory
                                     try:
@@ -2153,17 +2256,32 @@ class ResearchOrchestrator:
                         logger.warning(
                             f"[{task_id}] Final document generation failed: {doc_result.get('error')}, using preview version")
 
+            delivery_state = _derive_delivery_state(
+                quality_passed=quality_passed,
+                structural_passed=structural_passed,
+                artifact_path=output_path,
+                fallback_kind=fallback_kind,
+            )
+            effective_quality_passed = delivery_state["effective_quality_passed"]
+            research_result_data.update(delivery_state)
+
             if not quality_passed:
                 logger.error(
-                    f"[{task_id}] Formal export blocked by quality gate; "
-                    "diagnostic/preview artifact remains available"
+                    f"[{task_id}] Quality gate not passed; "
+                    "artifact remains available with warnings"
+                )
+            elif not structural_passed:
+                logger.warning(
+                    f"[{task_id}] Coverage/structure warnings detected; "
+                    "artifact remains available but is not formally complete"
                 )
 
             # 9. Store results (output layer)
             self._storage_manager.save(
                 task_id=task_id,
                 topic=requirement.topic,
-                result=aggregated.to_dict(),
+                result=research_result_data,
+                metadata=delivery_state,
             )
             logger.info(f"[{task_id}] Results stored")
 
@@ -2177,7 +2295,10 @@ class ResearchOrchestrator:
             # 9.5 Save quality metadata (new)
             try:
                 quality_metadata = self._build_quality_metadata(
-                    exec_result, quality_result, task_id
+                    exec_result, quality_result, task_id,
+                    effective_passed=effective_quality_passed,
+                    formal_complete=delivery_state["formal_complete"],
+                    quality_gate_status=delivery_state["quality_gate_status"],
                 )
                 quality_metadata_path = self._storage_path / \
                     "reports" / task_id / "quality_metadata.json"
@@ -2207,7 +2328,7 @@ class ResearchOrchestrator:
                 )
 
             # Build result
-            legacy_result_status = "completed" if quality_passed else "completed_with_warnings"
+            legacy_result_status = "completed" if effective_quality_passed else "completed_with_warnings"
             result = ResearchResult(
                 task_id=task_id,
                 status=legacy_result_status,
@@ -2227,7 +2348,10 @@ class ResearchOrchestrator:
                 revision_count=revision_count,
                 interaction_enabled=interaction_mode,
                 # P1-4 fix: populate report and document_path fields
-                report={**aggregated.to_dict(), "title": requirement.topic},  # Structured report data
+                # The report-agent payload is the final editorial source of
+                # truth.  Persisting the collection aggregate here silently
+                # discards repaired chapters and reintroduces placeholders.
+                report={**research_result_data, "title": requirement.topic},
                 document_path=output_path if output_path and Path(
                     output_path).exists() else None,
             )
@@ -2236,11 +2360,11 @@ class ResearchOrchestrator:
             try:
                 self._task_persistence.update_task_state(
                     task_id,
-                    TaskState.COMPLETED if quality_passed else TaskState.COMPLETED_WITH_WARNINGS,
+                    TaskState.COMPLETED if effective_quality_passed else TaskState.COMPLETED_WITH_WARNINGS,
                     progress=1.0,
                     message=(
                         f"Research complete, {len(results_for_aggregation)} stages"
-                        if quality_passed
+                        if effective_quality_passed
                         else f"Research complete with quality warnings, {len(results_for_aggregation)} stages"
                     ),
                 )
@@ -2250,9 +2374,16 @@ class ResearchOrchestrator:
                 task_id,
                 self._storage_path,
                 ResearchStatus.COMPLETED
-                if quality_passed else ResearchStatus.COMPLETED_WITH_WARNINGS,
+                if effective_quality_passed else ResearchStatus.COMPLETED_WITH_WARNINGS,
                 output_format=str(output_format or ""),
                 document_path=str(output_path or ""),
+                final_result={
+                    **(research_result_data if isinstance(research_result_data, dict) else {}),
+                    "title": requirement.topic,
+                    "output_path": str(output_path or ""),
+                    "document_path": str(output_path or ""),
+                    **delivery_state,
+                },
             )
 
             self._task_history.append({
@@ -2300,6 +2431,75 @@ class ResearchOrchestrator:
             )
 
     # === Intelligent routing execution method ===
+
+    async def _preparse_annual_report(self, requirement: Any, task_id: str) -> bool:
+        """Parse an annual-report attachment before task decomposition.
+
+        This is shared by the regular and intelligent-routing entry points so
+        both paths publish the same preloaded data and degradation signal.
+        """
+        dynamic_fields = getattr(requirement, "dynamic_fields", {}) or {}
+        if dynamic_fields.get("analysis_mode") != "annual_report":
+            return False
+
+        file_ids = dynamic_fields.get("file_ids", [])
+        file_paths = [
+            item["path"]
+            for item in file_ids
+            if isinstance(item, dict) and item.get("path")
+        ]
+        if not file_paths:
+            return False
+
+        try:
+            from src.skills.analysis.annual_report_parser import AnnualReportParserSkill
+
+            parse_result = await AnnualReportParserSkill().execute(
+                action="parse",
+                file_paths=file_paths,
+                extract_tables=True,
+                extract_sections=True,
+            )
+            if not parse_result.get("success"):
+                logger.warning(
+                    "[%s] Annual report parsing failed: %s",
+                    task_id,
+                    parse_result.get("error"),
+                )
+                return False
+
+            parse_data = parse_result.get("data", {}) or {}
+            await self._shared_memory.write("annual_report_data", parse_data)
+            await self._shared_memory.write(
+                "financial_tables", parse_data.get("financial_tables", {})
+            )
+            dynamic_fields["annual_report_data"] = parse_data
+            dynamic_fields["preloaded_data"] = True
+            table_validation = parse_data.get("table_validation", {}) or {}
+            if (
+                table_validation.get("needs_manual_review")
+                or table_validation.get("warnings")
+            ):
+                dynamic_fields["supplement_with_api"] = True
+            logger.info(
+                "[%s] Annual report parsed: %s sections, %s financial tables",
+                task_id,
+                len(parse_data.get("sections", [])),
+                sum(
+                    len(value)
+                    for value in parse_data.get("financial_tables", {}).values()
+                    if isinstance(value, list)
+                ),
+            )
+            return True
+        except Exception as exc:
+            logger.error(
+                "[%s] Annual report pre-parse error: %s",
+                task_id,
+                exc,
+                exc_info=True,
+            )
+            return False
 
     async def _research_with_routing(
         self,
@@ -2428,41 +2628,7 @@ class ResearchOrchestrator:
 
             # [P0-3] Annual report pre-parsing and SharedMemory injection (routing path)
             # Must happen before decompose() so dynamic_fields are available
-            logger.info(f"[{task_id}] dynamic_fields check: analysis_mode={requirement.dynamic_fields.get('analysis_mode')}, file_ids={'yes' if requirement.dynamic_fields.get('file_ids') else 'no'}, all_keys={list(requirement.dynamic_fields.keys())}")
-            if requirement.dynamic_fields.get("analysis_mode") == "annual_report":
-                file_ids = requirement.dynamic_fields.get("file_ids", [])
-                if file_ids:
-                    try:
-                        from src.skills.analysis.annual_report_parser import AnnualReportParserSkill
-                        parser = AnnualReportParserSkill()
-                        file_paths = [f["path"] for f in file_ids if isinstance(f, dict) and "path" in f]
-                        parse_result = await parser.execute(
-                            action="parse",
-                            file_paths=file_paths,
-                            extract_tables=True,
-                            extract_sections=True,
-                        )
-                        if parse_result.get("success"):
-                            parse_data = parse_result.get("data", {})
-                            await self._shared_memory.write("annual_report_data", parse_data)
-                            await self._shared_memory.write(
-                                "financial_tables",
-                                parse_data.get("financial_tables", {}),
-                            )
-                            requirement.dynamic_fields["annual_report_data"] = parse_data
-                            requirement.dynamic_fields["preloaded_data"] = True
-                            table_validation = parse_data.get("table_validation", {})
-                            if table_validation.get("needs_manual_review"):
-                                requirement.dynamic_fields["supplement_with_api"] = True
-                            logger.info(
-                                f"[{task_id}] Annual report parsed (routing path): "
-                                f"{len(parse_data.get('sections', []))} sections, "
-                                f"{sum(len(v) for v in parse_data.get('financial_tables', {}).values() if isinstance(v, list))} financial tables"
-                            )
-                        else:
-                            logger.warning(f"[{task_id}] Annual report parsing failed: {parse_result.get('error')}")
-                    except Exception as e:
-                        logger.error(f"[{task_id}] Annual report pre-parse error: {e}", exc_info=True)
+            await self._preparse_annual_report(requirement, task_id)
 
             # ★ Forward session_id from user_input to requirement for cancel/pause checkpoints
             if isinstance(user_input, dict):
@@ -2494,9 +2660,30 @@ class ResearchOrchestrator:
             # === Phase 2: Intelligent routing analysis ===
             logger.info(f"[{task_id}] Executing intelligent routing analysis...")
 
+            # Preserve the confirmed framework at the routing boundary.  The
+            # adapter uses section_details/sections_tree to carry subsection
+            # contracts into TaskStructure; dropping them here makes routing
+            # fall back to flat aspects and leaves the report audit comparing
+            # Chinese display IDs with canonical section_N IDs.
+            requirement_dynamic_fields = dict(
+                getattr(requirement, "dynamic_fields", {}) or {}
+            )
+            input_sections_tree = (
+                user_input.get("sections_tree")
+                if isinstance(user_input, dict)
+                else None
+            )
+            if input_sections_tree and "sections_tree" not in requirement_dynamic_fields:
+                requirement_dynamic_fields["sections_tree"] = input_sections_tree
+
             requirement_dict = {
                 "topic": requirement.topic,
                 "aspects": requirement.aspects,
+                "section_details": list(
+                    getattr(requirement, "section_details", []) or []
+                ),
+                "sections_tree": input_sections_tree,
+                "dynamic_fields": requirement_dynamic_fields,
                 "output_type": requirement.output_type.value if hasattr(requirement.output_type, 'value') else str(requirement.output_type),
                 "include_survey": getattr(requirement, "include_survey", False),
                 "enable_questionnaire": getattr(requirement, "enable_questionnaire", False),
@@ -3044,6 +3231,7 @@ class ResearchOrchestrator:
                     web_scraper_skill=web_scraper_skill,
                     chart_planner=ChartPlannerAgent(search_gateway=task_gateway),
                     chart_generator=ChartGenerator(),
+                    checkpoint_dir=output_dir_path,
                 )
 
                 if hasattr(routing_result, 'task_structure') and routing_result.task_structure:
@@ -3187,21 +3375,45 @@ class ResearchOrchestrator:
             research_result_data = _validate_report_generation_output(
                 _normalize_report_section_ids(research_result_data)
             )
-            # Structural contract failures are hard failures.  They must not
-            # be downgraded to ordinary quality warnings or completed status.
-            research_result_data["manifest_contract"] = _audit_report_manifest_contract(
-                requirement,
-                task_structure_dict,
-                agents,
-                results_for_aggregation,
-                research_result_data,
-                research_result_data.get("artifact_manifest"),
-            )
+            # Structural contract failures are hard quality findings.  They
+            # must prevent formal completion, but must not prevent the report
+            # artifact from being generated and delivered with a warning.
+            try:
+                research_result_data["manifest_contract"] = _audit_report_manifest_contract(
+                    requirement,
+                    task_structure_dict,
+                    agents,
+                    results_for_aggregation,
+                    research_result_data,
+                    research_result_data.get("artifact_manifest"),
+                )
+            except ManifestContractError as contract_error:
+                # A contract failure is diagnostic metadata at this boundary;
+                # the document layer still needs to render the best available
+                # report so the user can inspect and revise it.
+                research_result_data["manifest_contract"] = {
+                    "status": "failed",
+                    "code": contract_error.code,
+                    "details": contract_error.details,
+                }
             # Audit both the LLM path and the mechanical fallback path. A
             # report with unavailable data is still deliverable, but it must
             # carry an explicit warning and cannot be marked fully complete.
             coverage_warnings = _collect_report_coverage_warnings(
                 research_result_data, task_structure_dict
+            )
+            manifest_contract = research_result_data.get("manifest_contract") or {}
+            if isinstance(manifest_contract, dict) and manifest_contract.get("status") == "failed":
+                coverage_warnings.append({
+                    "type": "manifest_contract",
+                    "severity": "high",
+                    "message": "报告结构契约未通过，仍生成产物并标记为告警交付",
+                    "code": manifest_contract.get("code", "manifest_contract_failed"),
+                })
+            structural_passed = not any(
+                str(item.get("severity", "")).lower() in {"high", "critical"}
+                for item in coverage_warnings
+                if isinstance(item, dict)
             )
             if coverage_warnings:
                 research_result_data["coverage_warnings"] = coverage_warnings
@@ -3255,9 +3467,11 @@ class ResearchOrchestrator:
             preview_result = await self._document_agent.execute(preview_task_input)
 
             preview_path = ""
+            preview_contract = {}
             if isinstance(preview_result, dict):
                 preview_path = preview_result.get(
                     "document_path") or preview_result.get("output_path", "")
+                preview_contract = preview_result.get("metadata", {}) or {}
 
             # Initialize quality state before the preview branch.  If preview
             # generation fails, the fallback document path must still produce
@@ -3267,6 +3481,7 @@ class ResearchOrchestrator:
             quality_passed = False
             issues = []
             quality_score = 0.0
+            fallback_kind = ""
             
             # Copy preview to serving directory so frontend can load it
             if preview_path and os.path.exists(preview_path):
@@ -3278,6 +3493,7 @@ class ResearchOrchestrator:
 
             if not preview_path:
                 logger.warning(f"[{task_id}] HTML preview generation failed, skipping confirmation")
+                fallback_kind = "fallback_markdown"
                 # Fallback: generate final document directly
                 doc_task_input = {
                     "action": "produce_document",
@@ -3309,6 +3525,17 @@ class ResearchOrchestrator:
                             quality_score = quality_result.get("quality_score", 0)
                             quality_passed = quality_result.get("passed", False)
                             issues = quality_result.get("issues", [])
+                            render_contract_issues = list(preview_contract.get("issues") or []) if isinstance(preview_contract, dict) else []
+                            if render_contract_issues:
+                                quality_passed = False
+                                quality_score = min(float(quality_score), 59.0)
+                                issues.append({
+                                    "type": "render_contract",
+                                    "severity": "high",
+                                    "blocking": True,
+                                    "message": "HTML finalizer 检测到成品渲染或标题契约问题",
+                                    "details": render_contract_issues,
+                                })
                             if coverage_warnings:
                                 issues.extend(coverage_warnings)
                                 quality_passed = False
@@ -3363,6 +3590,7 @@ class ResearchOrchestrator:
                                     new_path = new_result.get("document_path") or new_result.get("output_path", "")
                                     if new_path and Path(new_path).exists():
                                         output_path = new_path
+                                        preview_contract = new_result.get("metadata", {}) if isinstance(new_result, dict) else {}
                                         logger.info(f"[{task_id}] Auto-repair: regenerated with {len(adjustments)} fixes")
                                         # Copy repaired preview to serving directory
                                         try:
@@ -3405,20 +3633,6 @@ class ResearchOrchestrator:
                 quality_issues_list = quality_result.get("issues", [])[:10]
             if coverage_warnings:
                 quality_issues_list = (quality_issues_list + coverage_warnings)[:20]
-
-            # C3: Save quality metadata (same as research() path)
-            if quality_result:
-                try:
-                    quality_metadata = self._build_quality_metadata(
-                        exec_result, quality_result, task_id
-                    )
-                    quality_metadata_path = self._storage_path / "reports" / task_id / "quality_metadata.json"
-                    quality_metadata_path.parent.mkdir(parents=True, exist_ok=True)
-                    with open(quality_metadata_path, 'w', encoding='utf-8') as f:
-                        json.dump(quality_metadata, f, ensure_ascii=False, indent=2)
-                    logger.info(f"[{task_id}] Quality metadata saved: {quality_metadata_path}")
-                except Exception as e:
-                    logger.warning(f"[{task_id}] Failed to save quality metadata: {e}")
 
             # C4: Record experience (same as research() path)
             if self.enable_dual_track:
@@ -3530,10 +3744,64 @@ class ResearchOrchestrator:
             if not final_document_generated:
                 output_path = output_path or preview_path
 
+            delivery_state = _derive_delivery_state(
+                quality_passed=quality_passed,
+                structural_passed=structural_passed,
+                artifact_path=output_path,
+                fallback_kind=fallback_kind,
+            )
+            effective_quality_passed = delivery_state["effective_quality_passed"]
+            research_result_data.update(delivery_state)
+            # Rewrite the recovery cache after the final artifact and quality
+            # contract are known.  The earlier cache write intentionally
+            # protects against preview failures, but must not remain the
+            # authoritative copy after a preview/final-document decision.
+            # Quality findings remain non-blocking: a ready artifact is still
+            # cached and can be delivered with completed_with_warnings.
+            research_result_data["status"] = (
+                "completed" if delivery_state["formal_complete"]
+                else "completed_with_warnings"
+            )
+            if isinstance(preview_contract, dict):
+                research_result_data["html_finalizer"] = dict(preview_contract)
+            research_result_data["document_path"] = str(output_path or "")
+            research_result_data["output_path"] = str(output_path or "")
+            try:
+                cache_path = output_dir_path / "research_result_cache.json"
+                with open(cache_path, "w", encoding="utf-8") as f:
+                    json.dump(research_result_data, f, ensure_ascii=False, indent=2)
+                logger.info(f"[{task_id}] Final report state cached at {cache_path}")
+            except Exception as cache_err:
+                logger.warning(f"[{task_id}] Failed to cache final report state: {cache_err}")
+            if result_status != "cancelled":
+                result_status = (
+                    "completed"
+                    if effective_quality_passed
+                    else "completed_with_warnings"
+                )
+
+            # C3: Save quality metadata after final artifact selection so its
+            # formal/delivery fields describe the artifact users actually get.
+            if quality_result:
+                try:
+                    quality_metadata = self._build_quality_metadata(
+                        exec_result, quality_result, task_id,
+                        effective_passed=effective_quality_passed,
+                        formal_complete=delivery_state["formal_complete"],
+                        quality_gate_status=delivery_state["quality_gate_status"],
+                    )
+                    quality_metadata_path = self._storage_path / "reports" / task_id / "quality_metadata.json"
+                    quality_metadata_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(quality_metadata_path, 'w', encoding='utf-8') as f:
+                        json.dump(quality_metadata, f, ensure_ascii=False, indent=2)
+                    logger.info(f"[{task_id}] Quality metadata saved: {quality_metadata_path}")
+                except Exception as e:
+                    logger.warning(f"[{task_id}] Failed to save quality metadata: {e}")
+
             # Update task state
             self._task_persistence.update_task_state(
                 task_id,
-                TaskState.COMPLETED if result_status == "completed" else TaskState.COMPLETED_WITH_WARNINGS,
+                TaskState.COMPLETED if effective_quality_passed else TaskState.COMPLETED_WITH_WARNINGS,
                 progress=1.0,
                 message=(
                     "Research complete"
@@ -3544,12 +3812,14 @@ class ResearchOrchestrator:
             _update_research_result_terminal_state(
                 task_id,
                 self._storage_path,
-                ResearchStatus.COMPLETED_WITH_WARNINGS
-                if result_status == "completed_with_warnings"
-                else ResearchStatus.COMPLETED,
+                ResearchStatus.COMPLETED
+                if effective_quality_passed else ResearchStatus.COMPLETED_WITH_WARNINGS,
                 output_format=str(output_format or ""),
                 document_path=str(output_path or ""),
-                final_result=research_result_data,
+                final_result={
+                    **(research_result_data if isinstance(research_result_data, dict) else {}),
+                    **delivery_state,
+                },
             )
             if _sid:
                 try:
@@ -4939,6 +5209,7 @@ class ResearchOrchestrator:
                         "required_metrics": child.get("required_metrics", []),
                         "status": "pending",
                         "evidence_ids": [],
+                        "execution_order": len(section_manifest),
                     })
             else:
                 slot = "body"
@@ -4958,6 +5229,7 @@ class ResearchOrchestrator:
                     "required_metrics": [],
                     "status": "pending",
                     "evidence_ids": [],
+                    "execution_order": len(section_manifest),
                 })
 
         analysis_ids = [s["section_id"] for s in sections if s["section_role"] == "analysis"]
@@ -6461,6 +6733,9 @@ class ResearchOrchestrator:
         exec_result: Any,
         quality_result: Optional[Dict[str, Any]],
         task_id: str,
+        effective_passed: Optional[bool] = None,
+        formal_complete: Optional[bool] = None,
+        quality_gate_status: str = "",
     ) -> Dict[str, Any]:
         """
         构建质量元数据
@@ -6482,6 +6757,16 @@ class ResearchOrchestrator:
             "overall_passed": False,
             "quality_summary": {},
         }
+        if effective_passed is not None:
+            metadata["overall_passed"] = bool(effective_passed)
+        if formal_complete is not None:
+            metadata["formal_complete"] = bool(formal_complete)
+        if quality_gate_status:
+            metadata["quality_gate_status"] = quality_gate_status
+        metadata["delivery_class"] = (
+            "formal_ready" if bool(formal_complete) and bool(effective_passed)
+            else "available_with_warnings"
+        )
 
         # 从执行结果提取各阶段质量信息
         if exec_result and hasattr(exec_result, 'stage_results'):
@@ -6518,7 +6803,14 @@ class ResearchOrchestrator:
                 "issues_count": len(quality_result.get("issues", [])),
                 "suggestions_count": len(quality_result.get("suggestions", [])),
             }
-            metadata["overall_passed"] = quality_result.get("passed", False)
+            metadata["quality_check_passed"] = quality_result.get("passed", False)
+            if effective_passed is None:
+                metadata["overall_passed"] = quality_result.get("passed", False)
+                metadata["formal_complete"] = quality_result.get("passed", False)
+                metadata["delivery_class"] = (
+                    "formal_ready" if quality_result.get("passed", False)
+                    else "available_with_warnings"
+                )
 
         # 计算综合质量分数
         if metadata["stages"]:
@@ -7097,9 +7389,22 @@ class ResearchOrchestrator:
         
         logger.info(f"[{task_id}] Report regeneration complete: {output_path}")
         
+        # This lightweight path does not rerun the quality gate or the full
+        # report finalizer.  It still returns the generated artifact, but it
+        # must not advertise it as a formal-ready report.
+        report_payload = dict(existing_results) if isinstance(existing_results, dict) else {}
+        report_payload["sections"] = sections
+        report_payload["artifact_status"] = "ready" if output_path and Path(output_path).is_file() else "missing"
+        report_payload["formal_complete"] = False
+        report_payload["delivery_class"] = (
+            "available_with_warnings" if report_payload["artifact_status"] == "ready" else "missing"
+        )
+        report_payload["quality_gate_status"] = "not_run"
+        report_payload["regeneration_only"] = True
+
         return ResearchResult(
             task_id=task_id,
-            status="completed",
+            status="completed_with_warnings",
             topic=topic,
             agents_used=["report_generator"],
             stages_completed=4,
@@ -7107,7 +7412,7 @@ class ResearchOrchestrator:
             output_path=output_path,
             created_at=start_time,
             completed_at=datetime.now(),
-            report={"sections": sections},
+            report=report_payload,
         )
 
     # ========== P2: Knowledge system optimization methods ==========

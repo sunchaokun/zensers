@@ -1,3 +1,5 @@
+import asyncio
+import os
 import re
 import json
 import logging
@@ -7,7 +9,7 @@ from urllib.parse import urlparse
 
 from .models import ChapterWriteInput, ChapterWriteOutput, DataPoint
 from .prompt_manager import PromptManager
-from src.core.llm_client import call_llm, call_llm_with_tools
+from src.core.llm_client import call_llm, call_llm_stream, call_llm_with_tools
 from src.skills.file_skill import FileSkill
 
 DATAPOINT_FIELDS = {
@@ -22,9 +24,10 @@ logger = logging.getLogger(__name__)
 
 class ChapterWriter:
 
-    def __init__(self, prompt_manager: PromptManager = None) -> None:
+    def __init__(self, prompt_manager: PromptManager = None, use_streaming: bool = True) -> None:
         self._prompts = prompt_manager
         self._raw_data_location = ""
+        self._use_streaming = bool(use_streaming)
 
     async def write(self, input_data: ChapterWriteInput) -> ChapterWriteOutput:
         self._raw_data_location = input_data.raw_data_location or ""
@@ -169,6 +172,56 @@ class ChapterWriter:
         return merged
 
     async def _call_llm(self, prompt: str, raw_data_location: str = "") -> str:
+        if self._use_streaming:
+            # A provider timeout is retried before compatibility fallback. The
+            # stream itself is an inactivity-timed transport, so a report that
+            # continues to emit chunks is not subject to a hidden 120s total
+            # deadline. Never replay a partially emitted response: doing so
+            # would duplicate content and is less safe than surfacing the
+            # failure to the report orchestrator.
+            try:
+                stream_retries = max(0, int(os.environ.get("LLM_STREAM_RETRIES", "2")))
+            except (TypeError, ValueError):
+                stream_retries = 2
+            try:
+                retry_delay = max(0.0, float(os.environ.get("LLM_STREAM_RETRY_DELAY_SECONDS", "1")))
+            except (TypeError, ValueError):
+                retry_delay = 1.0
+            last_stream_error = None
+            for attempt in range(stream_retries + 1):
+                chunks = []
+                try:
+                    async for chunk in call_llm_stream(
+                        prompt=prompt, max_tokens=8192, temperature=0.7,
+                    ):
+                        if chunk:
+                            chunks.append(str(chunk))
+                    streamed_content = "".join(chunks).strip()
+                    if streamed_content:
+                        return streamed_content
+                    raise RuntimeError("streaming LLM returned empty content")
+                except Exception as stream_error:
+                    last_stream_error = stream_error
+                    if chunks:
+                        raise RuntimeError(
+                            "streaming LLM failed after partial output; refusing to replay it"
+                        ) from stream_error
+                    if attempt >= stream_retries:
+                        break
+                    logger.warning(
+                        "ChapterWriter streaming call failed; retrying (%s/%s): %s",
+                        attempt + 1, stream_retries, stream_error,
+                    )
+                    if retry_delay:
+                        await asyncio.sleep(retry_delay * (2 ** attempt))
+            # Streaming is the primary path. Tool-capable legacy calls remain
+            # a compatibility fallback only after all configured stream
+            # attempts have failed without producing content.
+            logger.warning(
+                "ChapterWriter streaming retries exhausted; using compatibility path: %s",
+                last_stream_error,
+            )
+
         # Preserve the legacy path for callers/tests that do not provide a
         # task-scoped raw-data file.  Tool use is enabled only when the report
         # has an explicit, validated file location.
@@ -232,12 +285,16 @@ class ChapterWriter:
     }
 
     def _coerce_data_point(self, dp_dict: Dict[str, Any]) -> DataPoint:
+        if not isinstance(dp_dict, dict):
+            raise TypeError("data_points_used 的每个元素必须是对象")
         coerced = {}
         for k, v in dp_dict.items():
             if k in self.DATAPOINT_STR_FIELDS and not isinstance(v, str):
                 coerced[k] = str(v)
             else:
                 coerced[k] = v
+        for required_field in ("metric", "value", "unit", "source"):
+            coerced.setdefault(required_field, "")
         return DataPoint(**{k: v for k, v in coerced.items() if k in DATAPOINT_FIELDS})
 
     def _parse_output(self, raw: str, chapter_spec: Dict) -> ChapterWriteOutput:
@@ -263,26 +320,25 @@ class ChapterWriter:
                     json_str = re.sub(r'[\x00-\x1f\x7f-\x9f]', ' ', brace_match.group(0))
             if json_str:
                 data = json.loads(json_str)
-                # The manifest owns the reader-facing chapter identity.  A
-                # model-generated title is allowed to drift into a sentence
-                # (or a nested heading), which later makes the report look as
-                # if a paragraph were a chapter.  Keep the model title only
-                # as a legacy fallback when no manifest title is available.
+                if not isinstance(data, dict):
+                    raise ValueError("章节输出必须是 JSON 对象")
+                content = self._sanitize_report_content(data.get("content"))
+                if not content:
+                    raise ValueError("章节输出缺少非空 content")
+                if "data_points_used" in data and not isinstance(data["data_points_used"], list):
+                    raise ValueError("data_points_used 必须是数组")
+                if "key_conclusions" in data and not isinstance(data["key_conclusions"], list):
+                    raise ValueError("key_conclusions 必须是数组")
+                if "self_check_issues" in data and not isinstance(data["self_check_issues"], list):
+                    raise ValueError("self_check_issues 必须是数组")
+                # The manifest owns the reader-facing chapter identity.  Do
+                # not allow the model to rename a chapter or promote an
+                # internal paragraph heading to chapter level.
                 manifest_title = str(chapter_spec.get("section_name", "") or "").strip()
-                model_title = str(data.get("title", "") or "").strip()
-                # Preserve concise legacy titles for compatibility, but reject
-                # paragraph-shaped titles that are clearly content leakage.
-                model_title_is_paragraph = (
-                    len(model_title) > 60
-                    or bool(re.search(r"[。！？；]", model_title))
-                )
-                title = manifest_title if (manifest_title and model_title_is_paragraph) else (model_title or manifest_title)
-                if title in _SKIP_TITLES or any(p in title for p in _GENERIC_PATTERNS):
-                    title = manifest_title
                 return ChapterWriteOutput(
                     chapter_id=chapter_spec.get("section_id", ""),
-                    title=title,
-                    content=self._sanitize_report_content(data.get("content", "")),
+                    title=manifest_title,
+                    content=content,
                     sub_section_id=str(chapter_spec.get("sub_section_id", "") or ""),
                     data_points_used=[
                         self._coerce_data_point(dp)
@@ -292,18 +348,26 @@ class ChapterWriter:
                     self_check_passed=data.get("self_check_passed", True),
                     self_check_issues=[str(i) for i in data.get("self_check_issues", [])],
                 )
-        except (json.JSONDecodeError, KeyError, TypeError) as e:
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
             logger.warning(f"Failed to parse structured output: {e}")
 
+        # A malformed model response is a quality/diagnostic failure, not
+        # report content.  Returning the raw response here used to leak JSON
+        # fragments, tool traces, and model instructions into HTML.  Keep the
+        # chapter object so assembly can remain non-blocking, while making the
+        # failed state explicit for formal and diagnostic consumers.
+        parse_issue = "JSON解析失败，输出格式不规范"
         return ChapterWriteOutput(
             chapter_id=chapter_spec.get("section_id", ""),
             title=chapter_spec.get("section_name", ""),
-            content=self._sanitize_report_content(raw),
+            content="",
             sub_section_id=str(chapter_spec.get("sub_section_id", "") or ""),
             data_points_used=[],
-            key_conclusions=self._extract_conclusions(raw),
+            key_conclusions=[],
             self_check_passed=False,
-            self_check_issues=["JSON解析失败，输出格式不规范"],
+            self_check_issues=[parse_issue],
+            status="failed",
+            error=parse_issue,
         )
 
     @staticmethod
@@ -317,6 +381,25 @@ class ChapterWriter:
         discard trailing instructions addressed to the user.
         """
         text = str(content or "").strip()
+        if not text:
+            return text
+
+        # These are prompt/input sentinels, not reader-facing prose.  Remove
+        # only complete lines so legitimate qualitative discussion of a data
+        # gap remains available to the report.
+        internal_placeholders = (
+            "无可用数据",
+            "无原始数据摘要",
+            "无可用原始搜索证据",
+            "无明确章节需求",
+            "无分析初稿，请基于数据从头撰写",
+            "未提供（请使用当前任务",
+            "数据来源待补充",
+        )
+        text = "\n".join(
+            line for line in text.splitlines()
+            if not any(placeholder in line for placeholder in internal_placeholders)
+        ).strip()
         if not text:
             return text
 

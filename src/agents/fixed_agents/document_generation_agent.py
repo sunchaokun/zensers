@@ -385,6 +385,7 @@ class DocumentGenerationAgent(FixedAgent):
                 # Chart planning is an LLM stage: it must understand the
                 # section argument before selecting data and a visual form.
                 research_result = await self._generate_charts_for_html(research_result)
+                research_result = self._normalize_report_titles_for_render(research_result)
 
                 from src.content.content_orchestrator import ContentOrchestrator
                 from src.core.preview_storage import PreviewStorage
@@ -398,6 +399,19 @@ class DocumentGenerationAgent(FixedAgent):
                 html_content = self._prepare_html_chart_assets(
                     html_content, output_path.parent,
                 )
+                original_html_content = html_content
+                html_content = self._repair_html_contract(
+                    html_content, research_result=research_result,
+                )
+                if html_content != original_html_content:
+                    research_result["_html_contract_repaired"] = True
+                html_contract = self._finalize_html_contract(
+                    html_content,
+                    research_result=research_result,
+                    render_diagnostics=orchestrator.get_render_diagnostics(),
+                )
+                if html_contract.get("issues") or html_contract.get("explicit_nonformal"):
+                    html_content = self._add_delivery_banner(html_content)
                 output_path.write_text(html_content, encoding="utf-8")
                 
                 file_size = output_path.stat().st_size
@@ -412,6 +426,7 @@ class DocumentGenerationAgent(FixedAgent):
                     document_path=str(output_path),
                     file_size=file_size,
                     pages_estimate=pages_estimate,
+                    metadata=html_contract,
                     message=f"Preview generated: {output_filename}"
                 ).to_dict()
 
@@ -2235,6 +2250,265 @@ class DocumentGenerationAgent(FixedAgent):
             warning="SKELETON_IMPLEMENTATION: Export logic pending (Week 24)"
         ).to_dict()
     
+    @staticmethod
+    def _normalize_report_titles_for_render(
+        research_result: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Use the user-facing manifest titles when rendering HTML.
+
+        Report repair/debug labels can leak into section titles after a late
+        defense pass.  Normalize only titles that have an explicit manifest
+        counterpart; content and data remain untouched.
+        """
+        # Title normalization is a report repair, not merely a presentation
+        # concern. Mutate the canonical payload so cache/session consumers and
+        # the HTML artifact keep the same section identity.
+        result = research_result if isinstance(research_result, dict) else {}
+        structure = result.get("_task_structure")
+        manifest = result.get("section_manifest")
+        if not manifest and isinstance(structure, dict):
+            manifest = structure.get("section_manifest")
+        if isinstance(manifest, list):
+            expected = {
+                str(item.get("section_id") or item.get("id") or "").strip(): str(
+                    item.get("section_name") or item.get("title") or item.get("name") or ""
+                ).strip()
+                for item in manifest
+                if isinstance(item, dict)
+                and str(item.get("output_slot") or "body").strip().lower() == "body"
+            }
+            for section in result.get("sections") or []:
+                if not isinstance(section, dict):
+                    continue
+                section_id = str(section.get("section_id") or section.get("id") or "").strip()
+                title = expected.get(section_id)
+                if title:
+                    section["title"] = title
+                    if "name" in section:
+                        section["name"] = title
+        return result
+
+    @staticmethod
+    def _repair_html_contract(
+        html_content: str,
+        research_result: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Apply deterministic, non-inventive repairs before finalization."""
+        text = str(html_content or "")
+        placeholder_terms = (
+            "当前数据尚缺少可核验的结构化证据", "数据缺口", "待补充",
+            "待数据获取后生成", "数据获取后生成", "示例数据", "数据为示例", "合理估算",
+        )
+        try:
+            from bs4 import BeautifulSoup
+
+            soup = BeautifulSoup(text, "html.parser")
+
+            # Empty tables are layout defects, not meaningful content. Keep
+            # the surrounding section so the artifact remains usable.
+            for table in list(soup.find_all("table")):
+                rows = table.find_all("tr")
+                data_rows = rows[1:] if len(rows) > 1 else []
+                has_data = any(
+                    row.find("td") and row.get_text("", strip=True)
+                    for row in data_rows
+                )
+                if len(rows) < 2 or not has_data:
+                    table.decompose()
+
+            # Placeholder-only paragraphs/list items are removed. For mixed
+            # nodes, remove only the offending phrases; never fabricate data.
+            for node in list(soup.find_all(["p", "li", "td", "th", "caption"])):
+                node_text = node.get_text(" ", strip=True)
+                if not node_text or not any(term in node_text for term in placeholder_terms):
+                    continue
+                if len(node_text) <= 180:
+                    node.decompose()
+                    continue
+                for string in list(node.find_all(string=True)):
+                    cleaned = str(string)
+                    for term in placeholder_terms:
+                        cleaned = cleaned.replace(term, "")
+                    string.replace_with(cleaned)
+
+            # Remove common Markdown residue from text nodes and discard
+            # standalone Markdown table rows that were never rendered.
+            for string in list(soup.find_all(string=True)):
+                cleaned = str(string).replace("**", "")
+                for term in placeholder_terms:
+                    cleaned = cleaned.replace(term, "")
+                if re.match(r"^\s*\|[^\n<]+\|\s*$", cleaned):
+                    parent = string.parent
+                    if parent and parent.name in {"p", "li", "div"}:
+                        parent.decompose()
+                        continue
+                if cleaned != str(string):
+                    string.replace_with(cleaned)
+
+            for element in soup.find_all(True):
+                for attribute in ("alt", "title", "aria-label"):
+                    value = element.get(attribute)
+                    if not isinstance(value, str):
+                        continue
+                    cleaned = value
+                    for term in placeholder_terms:
+                        cleaned = cleaned.replace(term, "")
+                    if cleaned != value:
+                        element[attribute] = cleaned
+
+            # Replace known internal repair labels in headings with the
+            # manifest title for the corresponding section, when available.
+            expected_by_id = {}
+            incoming = research_result or {}
+            manifest = incoming.get("section_manifest")
+            if not manifest and isinstance(incoming.get("_task_structure"), dict):
+                manifest = incoming["_task_structure"].get("section_manifest")
+            if isinstance(manifest, list):
+                expected_by_id = {
+                    str(item.get("section_id") or item.get("id") or "").strip(): str(
+                        item.get("section_name") or item.get("title") or item.get("name") or ""
+                    ).strip()
+                    for item in manifest if isinstance(item, dict)
+                }
+            incoming_sections = [s for s in incoming.get("sections") or [] if isinstance(s, dict)]
+            replacement = next(
+                (
+                    expected_by_id.get(str(section.get("section_id") or section.get("id") or "").strip())
+                    for section in incoming_sections
+                    if "数据精准修补" in str(section.get("title") or section.get("name") or "")
+                    and expected_by_id.get(str(section.get("section_id") or section.get("id") or "").strip())
+                ),
+                "",
+            )
+            if replacement:
+                for string in list(soup.find_all(string=True)):
+                    if "数据精准修补" in str(string):
+                        string.replace_with(str(string).replace("数据精准修补", replacement))
+                for element in soup.find_all(True):
+                    for attribute in ("alt", "title", "aria-label"):
+                        value = element.get(attribute)
+                        if isinstance(value, str) and "数据精准修补" in value:
+                            element[attribute] = value.replace("数据精准修补", replacement)
+
+            return str(soup)
+        except Exception as exc:
+            logger.warning("HTML contract repair skipped: %s", exc)
+            # A failed repair must not prevent delivery; finalizer metadata
+            # will classify the original content as a warning artifact.
+            return text
+
+    @staticmethod
+    def _finalize_html_contract(
+        html_content: str,
+        research_result: Optional[Dict[str, Any]] = None,
+        render_diagnostics: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Run the final, non-blocking delivery check for generated HTML.
+
+        HTML remains available when this check reports defects.  The result is
+        explicitly classified so downstream persistence cannot mistake an
+        existing file for a formally accepted report.
+        """
+        text = str(html_content or "")
+        lower = text.lower()
+        incoming = research_result or {}
+        title_mismatches = []
+        title_manifest = incoming.get("title_manifest") or incoming.get("manifest")
+        if isinstance(title_manifest, dict):
+            expected_report_title = str(
+                title_manifest.get("title") or title_manifest.get("report_title")
+                or title_manifest.get("name") or ""
+            ).strip()
+            if expected_report_title and str(incoming.get("title") or "").strip() != expected_report_title:
+                title_mismatches.append("report")
+        section_manifest = incoming.get("section_manifest")
+        if not section_manifest and isinstance(incoming.get("_task_structure"), dict):
+            section_manifest = incoming["_task_structure"].get("section_manifest")
+        if isinstance(section_manifest, list):
+            expected_titles = {
+                str(item.get("section_id") or item.get("id") or "").strip(): str(
+                    item.get("section_name") or item.get("title") or item.get("name") or ""
+                ).strip()
+                for item in section_manifest
+                if isinstance(item, dict)
+                and str(item.get("output_slot") or "body").strip().lower() == "body"
+            }
+            for section in incoming.get("sections") or []:
+                if not isinstance(section, dict):
+                    continue
+                section_id = str(section.get("section_id") or section.get("id") or "").strip()
+                expected_title = expected_titles.get(section_id, "")
+                actual_title = str(section.get("title") or section.get("name") or "").strip()
+                if expected_title and actual_title != expected_title:
+                    title_mismatches.append(section_id or "section")
+        table_defects = []
+        for table_body in re.findall(r"<table\b[^>]*>(.*?)</table\s*>", text, flags=re.IGNORECASE | re.DOTALL):
+            rows = re.findall(r"<tr\b[^>]*>(.*?)</tr\s*>", table_body, flags=re.IGNORECASE | re.DOTALL)
+            data_rows = rows[1:] if len(rows) > 1 else []
+            nonempty_data = any(
+                re.sub(r"<[^>]+>", "", row).strip()
+                for row in data_rows
+                if re.search(r"<td\b", row, flags=re.IGNORECASE)
+            )
+            if len(rows) < 2 or not nonempty_data:
+                table_defects.append("empty_or_header_only_table")
+        checks = {
+            "placeholder": any(term in text for term in (
+                "当前数据尚缺少可核验的结构化证据", "数据缺口", "待补充",
+                "待数据获取后生成", "数据获取后生成", "示例数据", "数据为示例", "合理估算",
+            )),
+            "raw_markdown": "**" in text or bool(re.search(r"(?:^|>)\s*\|[^<\n]+\|", text)),
+            "unrendered_template": bool(re.search(r"\{\{|\{%", text)),
+            "html_structure": bool(re.search(r"</html>\s*<html", lower)),
+            "title_manifest": bool(title_mismatches),
+            "empty_table": bool(table_defects),
+            "auto_repaired": bool(incoming.get("_html_contract_repaired")),
+        }
+        diagnostics = render_diagnostics or {}
+        diagnostic_issues = list(diagnostics.get("issues") or [])
+        if not (diagnostics.get("post_render_validation") or {}).get("passed", True):
+            diagnostic_issues.append({"code": "POST_RENDER_VALIDATION_FAILED"})
+        issues = [name for name, failed in checks.items() if failed]
+        if diagnostic_issues:
+            issues.append("render_diagnostics")
+
+        has_explicit_quality_state = any(
+            key in incoming for key in ("formal_complete", "quality_gate_status")
+        )
+        gate = str(incoming.get("quality_gate_status") or "").lower()
+        formal_complete = bool(incoming.get("formal_complete", False)) and not issues and gate not in {"blocked", "degraded"}
+        explicit_nonformal = has_explicit_quality_state and not formal_complete
+        return {
+            "finalizer": "html_delivery_contract",
+            "finalizer_passed": not issues,
+            "issues": issues,
+            "title_mismatches": title_mismatches,
+            "table_defects": table_defects,
+            "render_diagnostics": diagnostic_issues,
+            "quality_gate_status": (
+                "passed" if formal_complete
+                else (gate if gate in {"blocked", "degraded"} else ("degraded" if has_explicit_quality_state else "pending"))
+            ),
+            "formal_complete": formal_complete,
+            "delivery_class": "formal_ready" if formal_complete else "available_with_warnings",
+            "artifact_status": "ready",
+            "explicit_nonformal": explicit_nonformal,
+        }
+
+    @staticmethod
+    def _add_delivery_banner(html_content: str) -> str:
+        """Make a warning artifact visibly distinguishable from a formal report."""
+        banner = (
+            '<div class="report-delivery-status report-delivery-status-warning" '
+            'role="status">诊断版 / 草稿版：本文件包含质量或渲染警告，不应作为正式报告使用。</div>'
+        )
+        if "report-delivery-status" in html_content:
+            return html_content
+        match = re.search(r"<body(?:\s[^>]*)?>", html_content, flags=re.IGNORECASE)
+        if match:
+            return html_content[:match.end()] + banner + html_content[match.end():]
+        return banner + html_content
+
     async def _handle_get_preview(
         self,
         request: DocumentGenerationRequest
@@ -2271,9 +2545,10 @@ class DocumentGenerationAgent(FixedAgent):
                 error="No research result for preview",
                 error_code="NO_CONTENT"
             ).to_dict()
-        
+
         # 2. Generate charts for HTML before creating preview
         research_result = await self._generate_charts_for_html(research_result)
+        research_result = self._normalize_report_titles_for_render(research_result)
         
         # 3. Use ContentOrchestrator to generate HTML preview
         try:
@@ -2291,6 +2566,19 @@ class DocumentGenerationAgent(FixedAgent):
             html_content = self._prepare_html_chart_assets(
                 html_content, PreviewStorage.NEW_DIR,
             )
+            original_html_content = html_content
+            html_content = self._repair_html_contract(
+                html_content, research_result=research_result,
+            )
+            if html_content != original_html_content:
+                research_result["_html_contract_repaired"] = True
+            html_contract = self._finalize_html_contract(
+                html_content,
+                research_result=research_result,
+                render_diagnostics=orchestrator.get_render_diagnostics(),
+            )
+            if html_contract.get("issues") or html_contract.get("explicit_nonformal"):
+                html_content = self._add_delivery_banner(html_content)
             
             # 3. Save HTML file to serving directory
             PreviewStorage.write(task_id, html_content)
@@ -2303,7 +2591,8 @@ class DocumentGenerationAgent(FixedAgent):
                 task_id=task_id,
                 output_format=request.output_format,
                 document_path=str(html_path),
-                preview_path=str(html_path)
+                preview_path=str(html_path),
+                metadata=html_contract,
             ).to_dict()
             
         except Exception as e:

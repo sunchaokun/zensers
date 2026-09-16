@@ -32,6 +32,7 @@ from .report_integrity import ReportIntegrityChecker
 from .defense_audit import ReportDefenseAudit
 from .defense_loop import DefenseLoopController
 from .prompt_manager import PromptManager
+from .revision_models import RevisionLocation
 from src.core.quality.checkers import AnalysisQualityChecker
 from src.core.llm_client import call_llm
 
@@ -346,8 +347,18 @@ class ReportOrchestrator:
             return ReportOrchestrator._iter_report_chapter_specs(
                 task_structure.get("sections", [])
             )
+        # The routing manifest is the single ordering contract shared by
+        # execution and report writing.  Keep explicit planner order when it
+        # is present, while retaining legacy manifest order for old tasks.
+        indexed_manifest = list(enumerate(manifest))
+        if any("execution_order" in item for item in manifest):
+            indexed_manifest.sort(key=lambda pair: (
+                1 if str(pair[1].get("role", pair[1].get("section_role", ""))).lower() == "synthesis" else 0,
+                pair[1].get("execution_order", pair[0]),
+                pair[0],
+            ))
         specs = []
-        for item in manifest:
+        for _, item in indexed_manifest:
             spec = dict(item)
             spec.setdefault("name", spec.get("title") or spec["section_id"])
             spec.setdefault("section_name", spec.get("title") or spec["section_id"])
@@ -565,6 +576,11 @@ class ReportOrchestrator:
                 "evidence_registry_count": len(self._evidence_context.evidence_registry),
                 "external_search_count": self._evidence_search_count,
             }
+            # The previous repair round is only complete after this audit of
+            # the newly assembled report.  Keep this explicit so a warning
+            # delivery remains auditable without making HTML generation a
+            # hard-failure path.
+            controller.finalize_action_verification(audit)
             gaps = self._build_defense_search_gaps(audit)
             conflicts = self._data_registry.get_conflicts()
             # P0 coverage acquisition must precede binding, prose rewrites,
@@ -622,16 +638,21 @@ class ReportOrchestrator:
                     "rounds": controller.rounds,
                     "history": history,
                     "issue_states": dict(sorted(controller.issue_states.items())),
+                    "action_lifecycle": [dict(item) for item in controller.action_lifecycle],
                 }
                 return report
 
             structural_actions = [
                 action for action in decision.actions if action.get("type") == "bind_chapter"
             ]
+            successful_actions: List[Dict[str, Any]] = []
+            failed_actions: List[Dict[str, Any]] = []
             applied_structural = (
                 self._apply_defense_structural_repairs(current_chapters, audit)
                 if structural_actions else []
             )
+            if structural_actions:
+                (successful_actions if applied_structural else failed_actions).extend(structural_actions)
             rewrite_actions = [
                 action for action in decision.actions if action.get("type") == "rewrite_scope"
             ]
@@ -643,20 +664,29 @@ class ReportOrchestrator:
             for action in rewrite_actions:
                 chapter_index = chapter_positions.get(action.get("chapter_id", ""))
                 if chapter_index is None:
+                    failed_actions.append(action)
                     continue
                 chapter = current_chapters[chapter_index]
-                patched = await self._chapter_writer.patch_data(
-                    chapter=chapter,
-                    patch_instructions=[
-                        f"{action['layer']}审计修复（{action['code']}）：{action['instruction']}。"
-                        "不得改变已有可验证数值；对无据数字只能删除、降级为数据不足，"
-                        "对口径冲突必须拆分并明确范围。"
-                    ],
-                    framework_config=framework_config,
-                )
+                try:
+                    patched = await self._chapter_writer.patch_data(
+                        chapter=chapter,
+                        patch_instructions=[
+                            f"{action['layer']}审计修复（{action['code']}）：{action['instruction']}。"
+                            "不得改变已有可验证数值；对无据数字只能删除、降级为数据不足，"
+                            "对口径冲突必须拆分并明确范围。"
+                        ],
+                        framework_config=framework_config,
+                    )
+                except Exception as repair_error:
+                    logger.warning("Defense rewrite action failed: %s", repair_error)
+                    failed_actions.append(action)
+                    continue
                 if isinstance(patched, ChapterWriteOutput):
                     current_chapters[chapter_index] = patched
                     applied_rewrites.append(action)
+                    successful_actions.append(action)
+                else:
+                    failed_actions.append(action)
             applied_safety_repairs = self._apply_defense_content_safety_repairs(
                 current_chapters, audit,
             )
@@ -668,17 +698,39 @@ class ReportOrchestrator:
             for action in conflict_actions:
                 conflict = conflict_by_metric.get(action.get("metric", ""))
                 if conflict is None:
+                    failed_actions.append(action)
                     continue
-                resolution = await self._conflict_resolver.resolve(conflict, topic)
+                try:
+                    resolution = await self._conflict_resolver.resolve(conflict, topic)
+                except Exception as repair_error:
+                    logger.warning("Defense conflict action failed: %s", repair_error)
+                    failed_actions.append(action)
+                    continue
                 if self._is_safe_conflict_resolution(resolution):
                     conflict_resolutions.append(resolution)
-            # Record attempted actions before the next audit.  Without an
-            # explicit lifecycle mark, an issue can reappear with slightly
-            # different prose and be scheduled again in a later round.
-            controller.mark_actions_processed(decision.actions)
-            repair_results = await self._acquire_evidence_batch(
-                gaps, topic, scope="report_revision",
+                    successful_actions.append(action)
+                else:
+                    failed_actions.append(action)
+            try:
+                repair_results = await self._acquire_evidence_batch(
+                    gaps, topic, scope="report_revision",
+                )
+            except Exception as repair_error:
+                logger.warning("Defense evidence action batch failed: %s", repair_error)
+                controller.mark_actions_failed(decision.actions)
+                history_record["repair_result"] = {
+                    "status": "failed",
+                    "error": str(repair_error),
+                }
+                continue
+            search_actions = [
+                action for action in decision.actions if action.get("type") == "search_evidence"
+            ]
+            successful_search_actions, failed_search_actions = (
+                self._classify_evidence_search_actions(search_actions, repair_results)
             )
+            successful_actions.extend(successful_search_actions)
+            failed_actions.extend(failed_search_actions)
             found_results = [result for result in repair_results if result.found]
             self._repair_results.extend(found_results)
             if (
@@ -690,6 +742,7 @@ class ReportOrchestrator:
             ):
                 # Re-audit unchanged data once; the controller will convert
                 # the repeated signature into a warning delivery outcome.
+                controller.mark_actions_failed(decision.actions)
                 history_record["repair_result"] = "no_change"
                 continue
 
@@ -707,6 +760,11 @@ class ReportOrchestrator:
                     conflict_resolutions,
                     framework_config,
                 )
+            # Only successful repair work becomes ``executed``.  The next
+            # audit transitions it to verified or unresolved; failed/no-op
+            # actions remain visible as failed.
+            controller.mark_actions_processed(successful_actions)
+            controller.mark_actions_failed(failed_actions)
             history_record["repair_result"] = {
                 "found_evidence": len(found_results),
                 "bound_chapters": len(applied_structural),
@@ -895,6 +953,7 @@ class ReportOrchestrator:
         web_scraper_skill=None,
         chart_planner=None,
         chart_generator=None,
+        checkpoint_dir: Optional[Path] = None,
     ) -> None:
         self._chapter_writer = chapter_writer
         self._chapter_reviewer = chapter_reviewer
@@ -921,6 +980,10 @@ class ReportOrchestrator:
         self._framework_config: Dict[str, Any] = {}
         self._repair_results: List[DataRepairResult] = []
         self._task_id: str = "report"
+        # Keep checkpoints beside the task's output when the caller provides
+        # an output directory. The legacy data/<task_id> location remains the
+        # default for direct/standalone callers.
+        self._checkpoint_dir = Path(checkpoint_dir) if checkpoint_dir else None
         self._evidence_context = ReportEvidenceContext()
         self._coverage_checker = ChapterCoverageChecker()
         self._evidence_acquirer = ReportEvidenceAcquirer(
@@ -1037,7 +1100,9 @@ class ReportOrchestrator:
                         if section.get("section_id")
                     }
                     restored = await self._restore_from_checkpoint(
-                        task_id, allowed_section_ids=requested_section_ids,
+                        task_id,
+                        allowed_section_ids=requested_section_ids,
+                        checkpoint_root=getattr(self, "_checkpoint_dir", None),
                     )
                     if restored:
                         chapters, registry_snapshot = restored
@@ -1824,11 +1889,22 @@ class ReportOrchestrator:
                         f"理由：{update['reason']}）"
                     )
 
-            chapters[i] = await self._chapter_writer.patch_data(
+            patched_chapter = await self._chapter_writer.patch_data(
                 chapter=chapter,
                 patch_instructions=patch_instructions,
                 framework_config=framework_config,
             )
+            if (
+                not isinstance(patched_chapter, ChapterWriteOutput)
+                or str(patched_chapter.status or "ready").lower() != "ready"
+                or not str(patched_chapter.content or "").strip()
+            ):
+                logger.warning(
+                    "Skipping failed/empty data patch for chapter %s; preserving original content",
+                    chapter.chapter_id,
+                )
+                continue
+            chapters[i] = patched_chapter
             # Preserve the structured evidence chain returned by the repair
             # agent.  Text instructions alone are insufficient for L3: the
             # data point itself must carry the URL and provenance identities.
@@ -1879,13 +1955,16 @@ class ReportOrchestrator:
         # sibling chapters and must never enter the data-collection queue.
         ordered_sections = sorted(
             sections or [],
-            key=lambda item: 1 if str(item.get("section_role", "")).lower() == "synthesis" else 0,
+            key=lambda item: (
+                1 if str(item.get("section_role", "")).lower() == "synthesis" else 0,
+                item.get("execution_order", 10**9),
+            ),
         )
         for parent in ordered_sections:
             parent_id = str(parent.get("section_id", "")).strip()
             sub_sections = parent.get("sub_section_requirements", parent.get("sub_sections", [])) or []
             if not sub_sections:
-                expanded.append(dict(parent))
+                expanded.append(dict(parent, execution_order=parent.get("execution_order", len(expanded))))
                 continue
             for index, sub in enumerate(sub_sections, 1):
                 if not isinstance(sub, dict):
@@ -1905,6 +1984,7 @@ class ReportOrchestrator:
                     **(parent.get("config", {}) or {}),
                     "description": sub.get("description") or sub_name,
                 }
+                child["execution_order"] = parent.get("execution_order", len(expanded))
                 expanded.append(child)
         return expanded
 
@@ -2045,6 +2125,30 @@ class ReportOrchestrator:
             if not any(item.get("url") == result.source_url for item in self._evidence_context.raw_search_results):
                 self._evidence_context.raw_search_results.append(evidence)
         return results
+
+    @staticmethod
+    def _classify_evidence_search_actions(
+        actions: List[Dict], results: List[DataRepairResult],
+    ) -> tuple[List[Dict], List[Dict]]:
+        """Attribute each search action to its own evidence-repair result.
+
+        A batch can contain several gaps.  Treating one successful result as
+        proof that every search action succeeded made the L1-L5 audit history
+        claim repairs that never happened.  ``DataRepairResult.gap`` is the
+        stable correlation key even when the batch completes out of order.
+        """
+        result_by_gap = {
+            (str(result.gap.chapter_id), str(result.gap.metric)): result
+            for result in results or []
+            if result is not None and getattr(result, "gap", None) is not None
+        }
+        successful: List[Dict] = []
+        failed: List[Dict] = []
+        for action in actions or []:
+            key = (str(action.get("chapter_id", "")), str(action.get("metric", "")))
+            result = result_by_gap.get(key)
+            (successful if result is not None and result.found else failed).append(action)
+        return successful, failed
 
     def _gateway_scope_searches(self, scope: str) -> Optional[int]:
         """Return actual gateway reservations for a scope when available."""
@@ -2935,6 +3039,14 @@ class ReportOrchestrator:
             for s in all_sources
         ] if all_sources else []
 
+        all_conclusions = []
+        for chapter in chapters:
+            all_conclusions.extend(
+                str(conclusion).strip()
+                for conclusion in (chapter.key_conclusions or [])
+                if str(conclusion or "").strip()
+            )
+
         sections = []
         for ch in chapters:
             chapter_status = str(getattr(ch, "status", "ready") or "ready")
@@ -2979,6 +3091,16 @@ class ReportOrchestrator:
             "aspects": [ch.title for ch in chapters],
             "sections": sections,
             "sources": all_sources,
+            # Keep synthesis in the manifest-declared top-level slots as well
+            # as the legacy key_findings field.  The HTML/document layer and
+            # manifest validator consume the dedicated slots; omitting them
+            # made a generated executive summary look like missing coverage.
+            "exec_summary": str(exec_summary or "").strip(),
+            "conclusion": "\n".join(
+                f"- {conclusion}"
+                for conclusion in all_conclusions
+                if str(conclusion or "").strip()
+            ),
             "key_findings": ReportOrchestrator._clean_key_findings(exec_summary),
         }
         defense_audit = ReportDefenseAudit().audit(
@@ -3036,7 +3158,12 @@ class ReportOrchestrator:
         return result
 
     async def _checkpoint_chapter(self, task_id: str, chapter: ChapterWriteOutput) -> None:
-        checkpoint_dir = Path("data") / task_id / "checkpoints"
+        checkpoint_root = getattr(self, "_checkpoint_dir", None)
+        checkpoint_dir = (
+            checkpoint_root / "checkpoints"
+            if checkpoint_root is not None
+            else Path("data") / task_id / "checkpoints"
+        )
 
         chapter_data = {
             "chapter_id": chapter.chapter_id,
@@ -3046,6 +3173,8 @@ class ReportOrchestrator:
             "key_conclusions": chapter.key_conclusions,
             "self_check_passed": chapter.self_check_passed,
             "self_check_issues": chapter.self_check_issues,
+            "status": chapter.status,
+            "error": chapter.error,
             "sub_section_id": chapter.sub_section_id,
             "data_registry_snapshot": self._data_registry.to_snapshot(),
             "timestamp": datetime.now().isoformat(),
@@ -3063,9 +3192,15 @@ class ReportOrchestrator:
 
     @staticmethod
     async def _restore_from_checkpoint(
-        task_id: str, allowed_section_ids: Optional[Set[str]] = None,
+        task_id: str,
+        allowed_section_ids: Optional[Set[str]] = None,
+        checkpoint_root: Optional[Path] = None,
     ):
-        checkpoint_dir = Path("data") / task_id / "checkpoints"
+        checkpoint_dir = (
+            Path(checkpoint_root) / "checkpoints"
+            if checkpoint_root is not None
+            else Path("data") / task_id / "checkpoints"
+        )
         if not checkpoint_dir.exists():
             return None
 
@@ -3090,6 +3225,12 @@ class ReportOrchestrator:
         chapters = []
         registry_snapshot = {}
         for data in checkpoint_data_list:
+            # Failed/empty checkpoints are recovery evidence, not completed
+            # chapters. They must be retried instead of entering the completed
+            # set and suppressing the next generation attempt.
+            checkpoint_status = str(data.get("status") or "ready").lower()
+            if checkpoint_status != "ready" or not str(data.get("content") or "").strip():
+                continue
             chapter = ChapterWriteOutput(
                 chapter_id=data["chapter_id"],
                 title=data["title"],
@@ -3103,6 +3244,8 @@ class ReportOrchestrator:
                 key_conclusions=[str(c) for c in data.get("key_conclusions", [])],
                 self_check_passed=data.get("self_check_passed", True),
                 self_check_issues=[str(i) for i in data.get("self_check_issues", [])],
+                status=checkpoint_status,
+                error=str(data.get("error") or ""),
             )
             chapters.append(chapter)
             registry_snapshot = data.get("data_registry_snapshot", {})
@@ -3196,7 +3339,15 @@ class ReportOrchestrator:
             chapter_data=chapter_data,
         )
 
-        best_chapter = rewritten
+        # A failed/empty rewrite is not a candidate. Keep the last known-good
+        # chapter so a transient LLM timeout cannot destroy valid content.
+        best_chapter = (
+            rewritten
+            if isinstance(rewritten, ChapterWriteOutput)
+            and str(rewritten.status or "ready").lower() == "ready"
+            and str(rewritten.content or "").strip()
+            else target_chapter
+        )
         best_score = 0.0
 
         review_chapter_data = {"data_points": [dp.__dict__ for dp in target_chapter.data_points_used]} \
@@ -3228,7 +3379,11 @@ class ReportOrchestrator:
                 preceding_summary=preceding_summary,
                 chapter_data=chapter_data,
             )
-            if rewritten.content:
+            if (
+                isinstance(rewritten, ChapterWriteOutput)
+                and str(rewritten.status or "ready").lower() == "ready"
+                and str(rewritten.content or "").strip()
+            ):
                 best_chapter = rewritten
 
         validated_dps = self._extract_and_validate_data_points(best_chapter)
@@ -3242,7 +3397,7 @@ class ReportOrchestrator:
         idx = next(
             (i for i, c in enumerate(self._chapters) if c.chapter_id == target.chapter_id), None
         )
-        if idx is not None:
+        if idx is not None and str(best_chapter.content or "").strip():
             self._chapters[idx] = best_chapter
 
         return ChapterRewriteResult(

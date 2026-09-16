@@ -25,7 +25,11 @@ class DefenseLoopDecision:
 class DefenseLoopController:
     """Bound and make auditable the audit -> repair -> re-audit cycle."""
 
-    _STAGES = ("L1", "L2", "L3", "L4", "L5")
+    # Coverage is a repairable content contract, even though it is not one of
+    # the evidence-defense layers.  Keeping it in the controller prevents a
+    # detected missing topic/metric from being silently converted to
+    # ``no_actions``.
+    _STAGES = ("L1", "L2", "L3", "L4", "L5", "coverage")
 
     def __init__(self, max_rounds: int = 3):
         if max_rounds < 1:
@@ -39,6 +43,7 @@ class DefenseLoopController:
         self.issue_states: Dict[str, str] = {}
         self._processed_action_keys = set()
         self._current_issue_keys = set()
+        self.action_lifecycle: List[Dict[str, Any]] = []
 
     @staticmethod
     def issue_key(issue: Dict[str, Any]) -> str:
@@ -70,6 +75,7 @@ class DefenseLoopController:
             if not isinstance(action, dict):
                 continue
             self._processed_action_keys.add(self._action_key(action))
+            self._set_action_lifecycle_status(action, "executed")
             chapter = str(action.get("chapter_id", "") or "").strip()
             metric = str(action.get("metric", "") or "").strip()
             layer = str(action.get("layer", "") or "").strip()
@@ -99,6 +105,53 @@ class DefenseLoopController:
                 )
                 if same_scope and code_match:
                     self.issue_states[issue_key] = "processed_but_unresolved"
+
+    def _set_action_lifecycle_status(self, action: Dict[str, Any], status: str) -> None:
+        key = self._action_key(action)
+        for item in self.action_lifecycle:
+            if item.get("action_key") == key:
+                item["status"] = status
+                return
+
+    def mark_actions_failed(self, actions: Tuple[Dict[str, Any], ...] | List[Dict[str, Any]]) -> None:
+        """Record an action execution failure without hiding the audit issue."""
+        for action in actions or []:
+            if isinstance(action, dict):
+                self._set_action_lifecycle_status(action, "failed")
+
+    def finalize_action_verification(self, audit: Dict[str, Any]) -> None:
+        """Mark executed actions verified or unresolved after a re-audit."""
+        current_issue_keys = {
+            self.issue_key(issue)
+            for issue in (audit.get("issues", []) if isinstance(audit, dict) else [])
+            if isinstance(issue, dict)
+        }
+        for item in self.action_lifecycle:
+            if item.get("status") != "executed":
+                continue
+            action = item.get("action", {})
+            action_layer = str(action.get("layer", "") or "")
+            action_chapter = str(action.get("chapter_id", "") or "")
+            action_metric = str(action.get("metric", "") or "")
+            action_code = str(action.get("code", "") or "")
+            unresolved = False
+            for issue in (audit.get("issues", []) if isinstance(audit, dict) else []):
+                if not isinstance(issue, dict):
+                    continue
+                same_scope = (
+                    (not action_layer or not issue.get("layer") or str(issue.get("layer", "") or "") == action_layer)
+                    and (not action_chapter or not issue.get("chapter_id") or str(issue.get("chapter_id", "") or "") == action_chapter)
+                    and (not action_metric or not issue.get("metric") or str(issue.get("metric", "") or "") == action_metric)
+                )
+                same_code = (
+                    not action_code
+                    or str(issue.get("code", "") or "") == action_code
+                    or str(issue.get("code", "") or "") in action_code.split("+")
+                )
+                if same_scope and same_code:
+                    unresolved = True
+                    break
+            item["status"] = "unresolved" if unresolved else "verified"
 
     def _update_issue_states(self, audit: Dict[str, Any]) -> None:
         current = set()
@@ -167,6 +220,16 @@ class DefenseLoopController:
                 )
             ) not in self._processed_action_keys
         ]
+
+        for action in valid_actions:
+            key = self._action_key(action)
+            if not any(item.get("action_key") == key for item in self.action_lifecycle):
+                self.action_lifecycle.append({
+                    "action_key": key,
+                    "action": dict(action),
+                    "status": "planned",
+                    "round": self.rounds + 1,
+                })
 
         if self.rounds >= self.max_rounds:
             return DefenseLoopDecision(

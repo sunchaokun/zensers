@@ -213,13 +213,22 @@ class StorageManager:
                 "underscores, and hyphens."
             )
         
-        # 创建记录
+        metadata = metadata or {}
+        record_status = "completed"
+        if (
+            metadata.get("formal_complete") is False
+            or metadata.get("delivery_class") == "available_with_warnings"
+            or metadata.get("quality_gate_status") == "degraded"
+        ):
+            record_status = "completed_with_warnings"
+
+        # 创建记录。文件仍然照常保存；该状态只反映质量告警，不是交付闸门。
         record = ResearchRecord(
             task_id=task_id,
             topic=topic,
-            status="completed",
+            status=record_status,
             completed_at=datetime.now(),
-            metadata=metadata or {},
+            metadata=metadata,
         )
         
         # 保存结果文件（task_id 已验证，可安全拼接）
@@ -231,7 +240,7 @@ class StorageManager:
                 "topic": topic,
                 "result": result,
                 "saved_at": datetime.now().isoformat(),
-                "metadata": metadata or {},
+                "metadata": metadata,
             }
             
             with open(result_path, "w", encoding="utf-8") as f:
@@ -352,6 +361,13 @@ class StorageManager:
         records.sort(key=lambda r: r.created_at, reverse=True)
         
         return records[:limit]
+
+    # Transitional aliases for the pre-redesign result-store interface.
+    def load_result(self, task_id: str) -> Optional[Dict[str, Any]]:
+        return self.load(task_id)
+
+    def list_results(self, limit: int = 100) -> List[ResearchRecord]:
+        return self.list_records(limit=limit)
     
     def delete(self, task_id: str) -> bool:
         """

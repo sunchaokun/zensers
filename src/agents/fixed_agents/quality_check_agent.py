@@ -214,7 +214,11 @@ class QualityCheckAgent(FixedAgent):
                 "standards": {...},
             }
         """
-        report = task_input["report"]
+        # Quality checks may append HTML for format inspection.  Work on a
+        # shallow copy so that this diagnostic input cannot mutate the
+        # authoritative report later used by finalization and persistence.
+        original_report = task_input["report"]
+        report = dict(original_report) if isinstance(original_report, dict) else {}
         standards = task_input.get("standards", self.DEFAULT_STANDARDS)
         html_content = task_input.get("html_content", "")
         
@@ -446,6 +450,7 @@ class QualityCheckAgent(FixedAgent):
                 empty_count += 1
             if re.search(
                 r'本章节数据不足|数据不足.*(?:无法生成|待补充)|本章节待补充|请检查上游数据采集'
+                r'|当前数据尚缺少可核验的结构化证据|待数据获取后生成|数据为示例'
                 r'|insufficient data|not enough data',
                 sec_content,
                 flags=re.IGNORECASE,
@@ -510,9 +515,27 @@ class QualityCheckAgent(FixedAgent):
         # Check for common hallucinations and placeholder values
         hallucination_issues = self._check_hallucinations(content)
         issues.extend(hallucination_issues)
+
+        # Source metadata is useful for diagnosis, but an absent URL is not a
+        # content defect (legacy callers often provide source names only).
+        for source in report.get("sources", []) or []:
+            if isinstance(source, dict) and not any(source.get(k) for k in ("url", "href", "uri")):
+                issues.append({
+                    "type": "source_warning",
+                    "severity": "low",
+                    "blocking": False,
+                    "message": "来源缺少 URL，保留为来源元数据告警，不影响内容质检",
+                })
         
+        blocking_issues = [
+            issue for issue in issues
+            if issue.get("blocking", True) is not False
+            and issue.get("type") != "source_warning"
+        ]
         return {
-            "passed": len(issues) == 0,
+            # Missing source URLs remain visible diagnostics, but do not
+            # lower the content-quality pass/fail decision in this workflow.
+            "passed": len(blocking_issues) == 0,
             "issues": issues,
             "suggestions": suggestions,
         }
@@ -529,6 +552,11 @@ class QualityCheckAgent(FixedAgent):
             r'请检查上游数据采集是否完整',
             r'数据不足.*无法生成',
             r'Data insufficient.*cannot generate',
+            r'当前数据尚缺少可核验的结构化证据',
+            r'数据缺口.*(?:待补充|尚待补充|有待补充)',
+            r'(?:本章节|该章节|此章节).{0,12}(?:待生成|尚未生成|等待生成|待补充)',
+            r'(?:内容|分析|报告).{0,12}(?:待生成|尚未生成|等待生成)',
+            r'(?:placeholder|to be generated|待生成|未生成)',
         ]
         for pp in placeholder_patterns:
             m = re.search(pp, content)
@@ -541,6 +569,33 @@ class QualityCheckAgent(FixedAgent):
                     "auto_fixable": False,
                 })
                 break
+
+        # These phrases can be valid caveats in a methodology section, so
+        # mark them as review warnings rather than hard delivery failures.
+        hard_example_markers = re.findall(
+            r'[^。\n]{0,24}(?:数据为示例|示例数据|待数据获取后生成|待补充)[^。\n]{0,40}',
+            content,
+            flags=re.IGNORECASE,
+        )
+        if hard_example_markers:
+            issues.append({
+                "type": "content_defect",
+                "severity": "high",
+                "blocking": True,
+                "message": f"检测到未清洗的示例/待生成内容 {len(hard_example_markers)} 处",
+            })
+        estimate_markers = re.findall(
+            r'[^。\n]{0,24}(?:仅供示例|举例说明|估算值|粗略估算|假设值|illustrative|estimated)[^。\n]{0,40}',
+            content,
+            flags=re.IGNORECASE,
+        )
+        if estimate_markers:
+            issues.append({
+                "type": "content_warning",
+                "severity": "medium",
+                "blocking": False,
+                "message": f"检测到估算/示例性质内容 {len(estimate_markers)} 处，请确认已明确标注口径",
+            })
         
         compound_patterns = [
             (r'(\d+\.\d+)\s*万辆', '万辆'),
@@ -724,6 +779,61 @@ class QualityCheckAgent(FixedAgent):
         suggestions = []
         
         content = report.get("content", "")
+        sections = report.get("sections", [])
+        rendered_issues = self._check_rendered_artifacts(content)
+        issues.extend(rendered_issues)
+
+        # Compare the authoritative report title with any manifest title.
+        # Manifests have appeared as a dict or a list in older pipelines.
+        report_title = str(report.get("title") or "").strip()
+        manifest = report.get("title_manifest", report.get("manifest", {}))
+        manifest_title = ""
+        if isinstance(manifest, dict):
+            manifest_title = str(
+                manifest.get("title") or manifest.get("report_title")
+                or manifest.get("name") or ""
+            ).strip()
+        elif isinstance(manifest, str):
+            manifest_title = manifest.strip()
+        if report_title and manifest_title and report_title != manifest_title:
+            issues.append({
+                "type": "title_manifest_mismatch",
+                "severity": "high",
+                "blocking": True,
+                "message": f"报告标题与 manifest 不一致: '{report_title}' != '{manifest_title}'",
+            })
+
+        # A report can keep the right section IDs while rendering a temporary
+        # or unrelated chapter title.  Compare body titles against the
+        # manifest carried by the report or its task-structure snapshot.
+        section_manifest = report.get("section_manifest")
+        if not section_manifest:
+            task_structure = report.get("_task_structure") or {}
+            if isinstance(task_structure, dict):
+                section_manifest = task_structure.get("section_manifest")
+        if isinstance(section_manifest, list):
+            expected_titles = {
+                str(item.get("section_id") or item.get("id") or "").strip(): str(
+                    item.get("section_name") or item.get("title") or item.get("name") or ""
+                ).strip()
+                for item in section_manifest
+                if isinstance(item, dict)
+                and str(item.get("output_slot") or "body").strip().lower() == "body"
+            }
+            for section in sections if isinstance(sections, list) else []:
+                if not isinstance(section, dict):
+                    continue
+                section_id = str(section.get("section_id") or section.get("id") or "").strip()
+                expected_title = expected_titles.get(section_id, "")
+                actual_title = str(section.get("title") or section.get("name") or "").strip()
+                if expected_title and actual_title != expected_title:
+                    issues.append({
+                        "type": "title_manifest_mismatch",
+                        "severity": "high",
+                        "blocking": True,
+                        "section": section_id,
+                        "message": f"章节标题与 manifest 不一致: '{actual_title}' != '{expected_title}'",
+                    })
         
         # The quality check runs after HTML preview generation.  Treat a
         # rendered HTML <h1> as a valid top-level heading too; the previous
@@ -756,6 +866,46 @@ class QualityCheckAgent(FixedAgent):
             "issues": issues,
             "suggestions": suggestions,
         }
+
+    def _check_rendered_artifacts(self, content: str) -> List[Dict[str, Any]]:
+        """Find source-format residue that should not appear in rendered HTML."""
+        if not isinstance(content, str) or not re.search(r"<\s*(?:html|body|article|section|table|h1)\b", content, re.I):
+            return []
+        issues: List[Dict[str, Any]] = []
+        if re.search(
+            r"(?m)(?:^|>)\s*(?:#{1,6}\s|```|[-*+]\s+|\|[^<\n]*\|)"
+            r"|\*\*[^*\n]+\*\*",
+            content,
+        ):
+            issues.append({
+                "type": "raw_markdown",
+                "severity": "medium",
+                "blocking": False,
+                "message": "HTML 预览中残留原始 Markdown 标记",
+            })
+        if re.search(r"(?m)(?:^|>)\s*\|[^<\n]*\|", content):
+            issues.append({
+                "type": "orphan_pipe",
+                "severity": "medium",
+                "blocking": False,
+                "message": "HTML 预览中检测到孤立管道符/Markdown 表格行",
+            })
+        for table_body in re.findall(r"<table\b[^>]*>(.*?)</table\s*>", content, flags=re.IGNORECASE | re.DOTALL):
+            rows = re.findall(r"<tr\b[^>]*>(.*?)</tr\s*>", table_body, flags=re.IGNORECASE | re.DOTALL)
+            data_rows = rows[1:] if len(rows) > 1 else []
+            nonempty_data = any(
+                re.sub(r"<[^>]+>", "", row).strip()
+                for row in data_rows
+                if re.search(r"<td\b", row, flags=re.IGNORECASE)
+            )
+            if len(rows) < 2 or not nonempty_data:
+                issues.append({
+                    "type": "empty_table",
+                    "severity": "high",
+                    "blocking": True,
+                    "message": "HTML 中存在空表格或只有表头没有数据行",
+                })
+        return issues
     
     def _calculate_score(
         self, 

@@ -147,7 +147,10 @@ class IntelligentRoutingAdapter:
             use_llm=use_llm,
             fallback_to_keyword=fallback_to_keyword,
         )
-        self._structure_analyzer = TaskStructureAnalyzer()
+        self._structure_analyzer = TaskStructureAnalyzer(
+            use_llm=use_llm,
+            fallback_to_rule=fallback_to_keyword,
+        )
         self._phase_orchestrator = DynamicPhaseOrchestrator()
 
         # ContentLockManager created at execution time
