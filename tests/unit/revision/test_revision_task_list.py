@@ -76,7 +76,7 @@ class TestParseChoiceExtended:
 class TestExecutionFlow:
     def test_new_flow_defaults(self):
         flow = ExecutionFlow()
-        assert flow.status == ExecutionStatus.FAILED
+        assert flow.status == ExecutionStatus.PENDING
         assert flow.tasks == []
         assert flow.current_index == 0
         assert flow._report_version == 0

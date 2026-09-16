@@ -150,11 +150,11 @@ class BatchRevisionService:
             f"[BatchRevision] Starting batch revision for {len(sections)} sections: {sections}"
         )
         
-        # 1. 创建备份
-        backup_path = self._create_backup(document_path)
-        
+        backup_path = None
         try:
-            # 2. 读取文档
+            # 1. Read first so a missing/unreadable document returns the
+            # documented failure result instead of failing while making a
+            # backup that cannot exist.
             doc_content = self._read_document(document_path)
             if not doc_content:
                 return BatchRevisionResult(
@@ -162,6 +162,9 @@ class BatchRevisionService:
                     error_message=f"Failed to read document: {document_path}",
                     execution_time=self._get_elapsed_time(start_time),
                 )
+
+            # 2. Create the rollback point only after the source is readable.
+            backup_path = self._create_backup(document_path)
             
             # 3. 提取章节内容
             sections_content = {}
@@ -275,7 +278,8 @@ class BatchRevisionService:
         
         except asyncio.TimeoutError:
             logger.error(f"[BatchRevision] Timeout after {self._timeout}s")
-            self._rollback(backup_path, document_path)
+            if backup_path:
+                self._rollback(backup_path, document_path)
             return BatchRevisionResult(
                 success=False,
                 error_message=f"Timeout after {self._timeout}s",
@@ -284,7 +288,8 @@ class BatchRevisionService:
         
         except Exception as e:
             logger.error(f"[BatchRevision] Exception: {e}", exc_info=True)
-            self._rollback(backup_path, document_path)
+            if backup_path:
+                self._rollback(backup_path, document_path)
             return BatchRevisionResult(
                 success=False,
                 error_message=str(e),

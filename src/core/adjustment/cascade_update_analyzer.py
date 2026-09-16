@@ -152,6 +152,14 @@ class CascadeUpdateAnalyzer:
     
     # 最大级联深度 (防止循环依赖)
     MAX_CASCADE_DEPTH = 3
+
+    # Frameworks use both names for the same recommendation-oriented
+    # chapter.  Keep the dependency rules stable while resolving the alias
+    # against the actual report section list.
+    SECTION_ALIASES: Dict[str, tuple] = {
+        "投资机会": ("投资建议",),
+        "投资建议": ("投资机会",),
+    }
     
     def __init__(self):
         """初始化级联更新分析器"""
@@ -169,6 +177,10 @@ class CascadeUpdateAnalyzer:
                 if target not in self._reverse_dependencies:
                     self._reverse_dependencies[target] = []
                 self._reverse_dependencies[target].append(source)
+                for alias in self.SECTION_ALIASES.get(target, ()):
+                    if alias not in self._reverse_dependencies:
+                        self._reverse_dependencies[alias] = []
+                    self._reverse_dependencies[alias].append(source)
     
     def analyze_cascade_impact(
         self,
@@ -198,6 +210,7 @@ class CascadeUpdateAnalyzer:
         
         # BFS 遍历依赖关系
         visited: Set[str] = set()
+        max_depth_reached = 0
         # Keep the originally revised section as the source for every emitted
         # consistency check.  The BFS may traverse intermediate dependencies,
         # but those nodes are impact paths, not new revision origins.
@@ -210,6 +223,7 @@ class CascadeUpdateAnalyzer:
                 continue
             
             visited.add(current)
+            max_depth_reached = max(max_depth_reached, depth)
             
             # 获取依赖关系
             deps = self.SECTION_DEPENDENCIES.get(current, {})
@@ -218,8 +232,17 @@ class CascadeUpdateAnalyzer:
             check_type = deps.get("check_type", "value_match")
             
             # 收集受影响的章节
-            for affected_section in affects:
-                if affected_section in all_sections and affected_section not in target_sections:
+            for configured_section in affects:
+                affected_section = configured_section
+                if affected_section not in all_sections:
+                    affected_section = next(
+                        (
+                            alias for alias in self.SECTION_ALIASES.get(configured_section, ())
+                            if alias in all_sections
+                        ),
+                        None,
+                    )
+                if affected_section and affected_section not in target_sections:
                     affected.add(affected_section)
                     
                     # 添加数据一致性检查
@@ -247,7 +270,7 @@ class CascadeUpdateAnalyzer:
             affected_sections=list(affected),
             data_consistency_checks=consistency_checks,
             suggested_updates=suggested_updates,
-            cascade_depth=max(len(visited), 1) if visited else 0,
+            cascade_depth=max(max_depth_reached, 1) if visited else 0,
             risk_level=risk_level,
         )
         

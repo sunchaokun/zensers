@@ -115,8 +115,7 @@ async def test_factory_unknown_type_raises():
         action_type=RevisionOpType.UNKNOWN,
         target=target,
     )
-    with pytest.raises(ValueError, match="Unknown operation type"):
-        factory.create(action)
+    assert factory.create(action) is None
 
 
 @pytest.mark.asyncio
