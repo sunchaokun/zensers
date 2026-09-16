@@ -4841,6 +4841,26 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
             self._session_locks[key] = asyncio.Lock()
         return self._session_locks[key]
 
+    async def get_quality_state(self, session_id: str) -> dict:
+        """Return the persisted quality state for a research session.
+
+        The quality endpoint is read-only.  Do not create a session or infer a
+        quality state for an unknown session: callers need to distinguish an
+        absent state from an empty but valid one.
+        """
+        if not session_id:
+            return {"error": "Missing session_id", "error_code": "MISSING_SESSION_ID"}
+
+        session = session_manager.get(session_id)
+        if not session:
+            return {"error": "Session not found", "error_code": "SESSION_NOT_FOUND"}
+
+        quality_state = session.get("quality_state")
+        if not quality_state:
+            return {"error": "No quality state", "error_code": "NO_QUALITY_STATE"}
+
+        return quality_state
+
     async def handle_quality_action(self, request) -> dict:
         """Handle quality review action"""
         session_id = getattr(request, 'session_id', None)
