@@ -1114,10 +1114,13 @@ class ContentOrchestrator:
         **Phase 1 Simplification**: content already doesn't contain section title, no need to pass section_title parameter
         """
         parts = []
+        # Keep the rendering seam usable for lightweight instances created by
+        # callers/tests without running the full orchestrator constructor.
+        diagnostics = getattr(self, "_last_render_diagnostics", [])
         parts.append(f'<section id="{section.id}" class="document-section">')
         parts.append(f'<h2 class="section-title">{html.escape(section.title)}</h2>')
         if section.content:
-            parts.append(self._content_to_html(section.content))
+            parts.append(self._content_to_html(section.content, diagnostics=diagnostics))
         if section.subsections:
             for subsec in section.subsections:
                 parts.append(f'<section id="{subsec.id}" class="subsection">')
@@ -1127,9 +1130,9 @@ class ContentOrchestrator:
                         parts.append(f'<h4 class="sub-subsection-title">{html.escape(pt)}</h4>')
                         pt_content = ContentOrchestrator._extract_point_content(subsec.content, pt)
                         if pt_content:
-                            parts.append(self._content_to_html(pt_content))
+                            parts.append(self._content_to_html(pt_content, diagnostics=diagnostics))
                 elif subsec.content:
-                    parts.append(self._content_to_html(subsec.content))
+                    parts.append(self._content_to_html(subsec.content, diagnostics=diagnostics))
                 parts.append('</section>')
         parts.append('</section>')
         return '\n'.join(parts)
