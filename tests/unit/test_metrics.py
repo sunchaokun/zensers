@@ -71,7 +71,7 @@ class TestCounter:
         """测试增加负值抛出异常"""
         c = Counter("test_counter")
         
-        with pytest.raises(ValueError, match="只能增加"):
+        with pytest.raises(ValueError, match="only increase"):
             c.increment(-1)
     
     def test_counter_reset(self):

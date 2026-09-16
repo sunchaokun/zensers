@@ -25,7 +25,9 @@ class MetricExtractor:
         # --- Chinese patterns ---
         (r'(?:净利润|归母净利润|扣非净利润)[^\d]*?(\d+\.?\d*)\s*(' + _UNIT_CURRENCY + r')', "净利润"),
         (r'(?:(?:营业)?收入|营收)[^\d]*?(\d+\.?\d*)\s*(' + _UNIT_CURRENCY + r')', "营收"),
-        (r'(?:总)?销量[^\d]*?(\d+\.?\d*)\s*(万辆|万台|万部|万吨|辆|台|部|吨)', "销量"),
+        # Do not let the generic matcher also extract the suffix of
+        # "海外销量"/"出口销量" as domestic/overall sales.
+        (r'(?<!海外)(?<!出口)(?:总)?销量[^\d]*?(\d+\.?\d*)\s*(万辆|万台|万部|万吨|辆|台|部|吨)', "销量"),
         (r'(?:海外|出口)销量[^\d]*?(\d+\.?\d*)\s*(万辆|万台|辆|台)', "海外销量"),
         (r'(?:研发|R&D)(?:投入|费用)?[^\d]*?(\d+\.?\d*)\s*(' + _UNIT_CURRENCY + r')', "研发投入"),
         (r'毛利率[^\d]*?(\d+\.?\d*)\s*%', "毛利率"),
@@ -113,6 +115,12 @@ class MetricExtractor:
                            "unit": _unit, "currency": _currency,
                            "caliber": data.get("caliber", ""),
                            "year": data.get("year", 0), "source": data.get("source", ""),
+                           "period": data.get("period", ""),
+                           "geographic_scope": data.get("geographic_scope", ""),
+                           "population": data.get("population", data.get("statistical_object", "")),
+                           "source_url": data.get("source_url", data.get("url", "")),
+                           "evidence_id": data.get("evidence_id", ""),
+                           "provenance_id": data.get("provenance_id", ""),
                            "confidence": 0.95}
             except (json.JSONDecodeError, ValueError, TypeError):
                 continue

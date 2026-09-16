@@ -539,6 +539,12 @@ class AnnualReportParserSkill(Skill):
             validation["total_tables"] += len(rows)
 
             if not rows:
+                # Key metrics are an optional derived section; the primary
+                # statements already provide sufficient source data when
+                # present, so do not request an unnecessary stock-data
+                # supplement merely because this optional table is empty.
+                if table_type == "key_metrics":
+                    continue
                 validation["warnings"].append(
                     f"{table_type}: 未提取到任何表格数据，将补充stock_data API数据"
                 )

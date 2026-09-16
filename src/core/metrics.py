@@ -427,9 +427,15 @@ class MetricsRegistry:
                 for bucket, count in buckets.items():
                     bucket_str = "inf" if bucket == float('inf') else str(bucket)
                     lines.append(f'{histogram.name}_bucket{{le="{bucket_str}"{label_str}}} {count}')
-                
-                lines.append(f"{histogram.name}_sum{{{label_str[1:]}}} {histogram.get_sum()}")
-                lines.append(f"{histogram.name}_count{{{label_str[1:]}}} {histogram.get_count()}")
+
+                summary_label_str = (
+                    "{" + ",".join(
+                        f'{k}="{v}"' for k, v in histogram.labels.items()
+                    ) + "}"
+                    if histogram.labels else ""
+                )
+                lines.append(f"{histogram.name}_sum{summary_label_str} {histogram.get_sum()}")
+                lines.append(f"{histogram.name}_count{summary_label_str} {histogram.get_count()}")
         
         return "\n".join(lines)
     

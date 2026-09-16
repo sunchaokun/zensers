@@ -99,6 +99,12 @@ class TemplateSelector:
             pct_match = self._PCT_RE.search(item)
 
             if abs_match:
+                # Version/phase identifiers such as ``Version 2B`` and
+                # ``Phase 3B`` are not business KPIs, even though they share
+                # the same number-unit shape as a real metric.
+                preceding_text = item[:abs_match.start()].rstrip()
+                if re.search(r"(?:version|phase)\s*$", preceding_text, re.I):
+                    continue
                 num_unit = self._NUM_UNIT_RE.match(abs_match.group(1))
                 if num_unit:
                     kpi["number"] = num_unit.group(1) + num_unit.group(2)

@@ -75,6 +75,10 @@ class TemplateEngine:
         
         # Format-specific styles
         self._format_styles = self._init_format_styles()
+        self._last_render_validation: Dict[str, Any] = {
+            "passed": True,
+            "issues": [],
+        }
     
     def _init_default_styles(self) -> Dict[str, Any]:
         """Initialize default styles"""
@@ -518,6 +522,14 @@ class TemplateEngine:
         
         # 4. Final cleanup: remove any remaining template syntax
         result = self._cleanup_remaining_tags(result)
+
+        # Post-render validation is diagnostic only.  The caller still receives
+        # the rendered HTML so a quality warning cannot make HTML unavailable.
+        validation_passed = self.validate_rendered(result)
+        self._last_render_validation = {
+            "passed": validation_passed,
+            "issues": [] if validation_passed else ["unrendered_template_tags"],
+        }
         
         return result
     
@@ -555,6 +567,13 @@ class TemplateEngine:
             logger.warning(f"Unrendered template tags: {remaining[:5]}")
             return False
         return True
+
+    def get_last_render_validation(self) -> Dict[str, Any]:
+        """Return the most recent post-render validation result."""
+        return {
+            "passed": self._last_render_validation["passed"],
+            "issues": list(self._last_render_validation["issues"]),
+        }
     
     def _get_nested_value(
         self,

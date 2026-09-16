@@ -122,13 +122,19 @@ class TestSupplementWithApiDegrade:
 
             requirement = MagicMock()
             requirement.analysis_mode = "annual_report"
-            requirement.dynamic_fields = {}
-            requirement.file_ids = ["file1"]
+            requirement.dynamic_fields = {
+                "analysis_mode": "annual_report",
+                "file_ids": [{"id": "file1", "path": "test.pdf"}],
+            }
 
-            file_map = {"file1": "test.pdf"}
-            with patch.object(orch, '_get_file_paths_from_ids', return_value=["test.pdf"]):
-                result = asyncio.get_event_loop().run_until_complete(
-                    orch._handle_annual_report_preparse(requirement, file_map)
+            with patch(
+                "src.skills.analysis.annual_report_parser.AnnualReportParserSkill"
+            ) as parser_cls:
+                parser_cls.return_value.execute = AsyncMock(
+                    return_value=mock_parse_result
+                )
+                result = asyncio.run(
+                    orch._preparse_annual_report(requirement, "annual-report-test")
                 )
             assert result is True
             assert requirement.dynamic_fields.get("supplement_with_api") is True
