@@ -199,6 +199,18 @@ class TestExecutionScheduler:
         assert batches[1] == ["agent_c"]
         assert batches[2] == ["agent_d"]
 
+    def test_decomposition_dependency_conversion_preserves_order(self):
+        """Dependency conversion must be stable and remove duplicates only."""
+        from src.core.orchestrator.execution.scheduler import ExecutionScheduler
+
+        scheduler = ExecutionScheduler()
+        converted = scheduler._convert_dependency_ids(
+            ["agent_c", "agent_a", "agent_b", "agent_c"],
+            {"agent_a": Mock(), "agent_b": Mock(), "agent_c": Mock()},
+        )
+
+        assert converted == ["agent_c", "agent_a", "agent_b"]
+
 
 class TestScheduledAgent:
     """ScheduledAgent 测试"""

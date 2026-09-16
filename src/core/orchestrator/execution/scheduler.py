@@ -79,6 +79,9 @@ class ExecutionScheduler:
         self._scheduled_agents: Dict[str, ScheduledAgent] = {}
         self._completed: Set[str] = set()
         self._failed: Set[str] = set()
+        # Preserve the planner/manifest order for ties in the dependency DAG.
+        # Iterating a set here made equally-ready chapters run nondeterministically.
+        self._registration_order: Dict[str, int] = {}
         self._execution_order: List[str] = []
     
     def _get_agent_category(self, agent: Any) -> str:
@@ -139,6 +142,7 @@ class ExecutionScheduler:
         self._completed.clear()
         self._failed.clear()
         self._execution_order.clear()
+        self._registration_order.clear()
         
         # 1. 构建Agent ID到Agent的映射
         agent_map = {self._get_agent_id(agent): agent for agent in agents}
@@ -154,6 +158,7 @@ class ExecutionScheduler:
         # 3. 构建调度Agent
         for agent in agents:
             agent_id = self._get_agent_id(agent)
+            self._registration_order[agent_id] = len(self._registration_order)
             
             # 从AgentSpec获取依赖，如果没有则从context获取
             spec = agent_specs.get(agent_id)
@@ -267,6 +272,7 @@ class ExecutionScheduler:
         self._completed.clear()
         self._failed.clear()
         self._execution_order.clear()
+        self._registration_order.clear()
         
         # 构建Agent映射
         agent_map = {self._get_agent_id(agent): agent for agent in agents}
@@ -274,6 +280,7 @@ class ExecutionScheduler:
         # 构建调度Agent
         for agent in agents:
             agent_id = self._get_agent_id(agent)
+            self._registration_order[agent_id] = len(self._registration_order)
             
             # 从Agent获取依赖（兼容多种存储方式）
             depends_on = []
@@ -544,7 +551,10 @@ class ExecutionScheduler:
             else:
                 raise ValueError(f"依赖 AgentSpec 匹配多个实际 Agent，拒绝猜测: {spec_dep_id} -> {candidates}")
         
-        return list(set(converted))  # 去重
+        # Keep the planner's dependency order while removing repeated IDs.
+        # A set here makes equally-ready agents nondeterministic across
+        # processes and breaks reproducible execution/audit traces.
+        return list(dict.fromkeys(converted))
     
     def _topological_sort(self) -> List[List[str]]:
         """
@@ -587,10 +597,11 @@ class ExecutionScheduler:
                 raise ValueError(f"检测到循环依赖，拒绝强制执行: {sorted(remaining)}")
             
             # 按优先级排序
-            batch.sort(
-                key=lambda x: self._scheduled_agents[x].priority, 
-                reverse=True
-            )
+            batch.sort(key=lambda x: (
+                -self._scheduled_agents[x].priority,
+                1 if self._get_agent_category(self._scheduled_agents[x].agent) == "synthesis" else 0,
+                self._registration_order.get(x, len(self._registration_order)),
+            ))
             
             batches.append(batch)
             
