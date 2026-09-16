@@ -81,7 +81,15 @@ class TestBug1FixRoutingNoEarlyReturn:
                 break
 
             if "return ResearchResult(" in stripped and indent == 12:
-                if early_return_line is None and i > 2400:
+                # An unavailable routing adapter is a terminal defensive
+                # error path, not the report-generation early return this
+                # regression test is intended to detect.
+                preceding_context = "\n".join(lines[max(0, i - 8):i])
+                if (
+                    early_return_line is None
+                    and i > 2400
+                    and "_routing_adapter is None" not in preceding_context
+                ):
                     early_return_line = i + 1
 
             if "user_confirmed" in stripped and "False" in stripped and indent == 12:
@@ -243,8 +251,16 @@ class TestBug3FixResearchNoEarlyReturn:
                 if 1200 < i < 1400 and early_return_line is None:
                     early_return_line = i + 1
 
-            if "final_document_generated" in stripped and "output_format" in stripped and indent == 12:
-                if final_doc_gen_line is None and i > 1400:
+            if "final_document_generated" in stripped and indent == 12:
+                # The production condition is formatted across multiple
+                # lines; inspect the complete nearby condition block rather
+                # than requiring both names on one physical line.
+                condition_window = "\n".join(lines[i:i + 8])
+                if (
+                    final_doc_gen_line is None
+                    and i > 1400
+                    and "output_format" in condition_window
+                ):
                     final_doc_gen_line = i + 1
 
         assert final_doc_gen_line is not None, "final_document_generated check must exist"
