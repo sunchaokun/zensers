@@ -23,6 +23,16 @@ class CanonicalDataEntry:
     year: str = ""
     source: str = ""
     confidence: float = 0.5
+    # Scope fields are part of the identity of a metric.  They are optional
+    # for backwards compatibility with older callers, but must be preserved
+    # whenever the extractor/evidence layer provides them.
+    period: str = ""
+    geographic_scope: str = ""
+    population: str = ""
+    statistical_object: str = ""
+    source_url: str = ""
+    evidence_id: str = ""
+    provenance_id: str = ""
     alternative_values: List[Dict] = field(default_factory=list)
     conflicts: List[str] = field(default_factory=list)
 
@@ -37,6 +47,31 @@ def _entry_key(entry: CanonicalDataEntry) -> str:
         parts.append(entry.currency)
     if entry.caliber:
         parts.append(entry.caliber.replace("口径", "").strip()[:10])
+    # Keep the historical key stable when no scope identity is available.
+    # This avoids breaking existing callers while preventing scoped values
+    # from being merged when those fields are present.
+    scope = {
+        "period": entry.period,
+        "geo": entry.geographic_scope,
+        "population": entry.population or entry.statistical_object,
+        "unit": entry.unit,
+        "evidence": entry.evidence_id,
+        "provenance": entry.provenance_id,
+        # ``source`` is the authority used to resolve conflicts, not an
+        # identity dimension.  Keep same-metric values from different source
+        # records in the same conflict bucket unless a canonical URL/evidence
+        # identity is explicitly available.
+    }
+    # Evidence/provenance IDs are stable identities. A source URL is evidence
+    # provenance, not metric identity: different URLs must still enter the
+    # same conflict bucket when metric scope is otherwise identical.
+    for label, value in scope.items():
+        value = str(value or "").strip()
+        if value:
+            # Keys are persisted in JSON and used for lookup only; replacing
+            # separators keeps the scope suffix unambiguous and readable.
+            safe_value = value.replace("|", "/").replace("_", "-")
+            parts.append(f"{label}={safe_value}")
     return "_".join(parts)
 
 
@@ -45,7 +80,30 @@ _CURRENCY_CODES = frozenset({"CNY", "HKD", "USD", "EUR", "GBP", "JPY"})
 
 def parse_entry_key(key: str) -> dict:
     parts = key.split("_")
-    result = {"metric": "", "year": "", "currency": "", "caliber": ""}
+    result = {
+        "metric": "", "year": "", "currency": "", "caliber": "",
+        "period": "", "geographic_scope": "", "population": "",
+        "statistical_object": "", "unit": "",
+        "evidence_id": "", "provenance_id": "", "source_url": "",
+    }
+
+    # Scope values are appended as label=value segments by _entry_key().
+    # Parse them first, then parse the historical metric/year suffix.
+    base_parts = []
+    for part in parts:
+        if "=" in part:
+            label, value = part.split("=", 1)
+            field = {
+                "geo": "geographic_scope",
+                "source": "source_url",
+                "evidence": "evidence_id",
+                "provenance": "provenance_id",
+            }.get(label, label)
+            if field in result:
+                result[field] = value
+                continue
+        base_parts.append(part)
+    parts = base_parts
 
     if not parts:
         return result
@@ -133,7 +191,21 @@ class CanonicalDataRegistry:
             self._data[key] = entry
         return conflict
     
-    async def get(self, metric: str, year: str = "", currency: str = "", caliber: str = "") -> Optional[CanonicalDataEntry]:
+    async def get(
+        self,
+        metric: str,
+        year: str = "",
+        currency: str = "",
+        caliber: str = "",
+        period: str = "",
+        geographic_scope: str = "",
+        population: str = "",
+        statistical_object: str = "",
+        unit: str = "",
+        source_url: str = "",
+        evidence_id: str = "",
+        provenance_id: str = "",
+    ) -> Optional[CanonicalDataEntry]:
         """Get the authoritative value for a metric. Specify currency/caliber for multi-market data.
         Key construction matches _entry_key(): metric_year_currency_caliber.
         """
@@ -144,6 +216,18 @@ class CanonicalDataRegistry:
             parts.append(currency)
         if caliber:
             parts.append(caliber.replace("口径", "").strip()[:10])
+        scope = {
+            "period": period,
+            "geo": geographic_scope,
+            "population": population or statistical_object,
+            "unit": unit,
+            "evidence": evidence_id,
+            "provenance": provenance_id,
+        }
+        for label, value in scope.items():
+            value = str(value or "").strip()
+            if value:
+                parts.append(f"{label}={value.replace('|', '/').replace('_', '-')}")
         key = "_".join(parts)
         async with self._lock:
             return self._data.get(key)

@@ -32,6 +32,36 @@ async def test_canonical_registry_keeps_scoped_metrics_separate():
     assert china_entry is not None and china_entry.value == 18.0
 
 
+@pytest.mark.asyncio
+async def test_canonical_registry_conflicts_same_scope_across_source_urls():
+    from src.core.data.canonical_registry import CanonicalDataEntry, CanonicalDataRegistry
+
+    registry = CanonicalDataRegistry()
+    await registry.register(CanonicalDataEntry(
+        metric="出货量", value=100.0, unit="万台", year="2025",
+        period="2025Q1", geographic_scope="中国", source="source-a",
+        source_url="https://a.example/report",
+    ))
+    conflict = await registry.register(CanonicalDataEntry(
+        metric="出货量", value=120.0, unit="万台", year="2025",
+        period="2025Q1", geographic_scope="中国", source="source-b",
+        source_url="https://b.example/report",
+    ))
+
+    assert conflict is not None
+    assert len(registry.get_all()) == 1
+
+
+def test_parse_entry_key_preserves_provenance_identity():
+    from src.core.data.canonical_registry import CanonicalDataEntry, _entry_key, parse_entry_key
+
+    key = _entry_key(CanonicalDataEntry(
+        metric="出货量", value=100.0, year="2025", provenance_id="prov-1",
+    ))
+
+    assert parse_entry_key(key)["provenance_id"] == "prov-1"
+
+
 def test_html_finalizer_classifies_dirty_artifact_without_blocking_generation():
     from src.agents.fixed_agents.document_generation_agent import DocumentGenerationAgent
 
