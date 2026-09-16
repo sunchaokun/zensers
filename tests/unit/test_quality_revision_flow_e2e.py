@@ -98,7 +98,7 @@ class TestQualityState:
         assert QUALITY_PASS_THRESHOLD == 60
 
 
-class TestQualityHandlersDirect:
+class TestQualityActionEndpoint:
 
     @pytest.fixture
     def session_with_issues(self):
@@ -132,207 +132,112 @@ class TestQualityHandlersDirect:
         }
 
     @pytest.mark.asyncio
-    async def test_dismiss_issue(self, session_with_issues):
+    async def test_missing_session_id_returns_error(self):
+        from src.api.research_api import QualityActionRequest, ResearchAPI
+        result = await ResearchAPI().__class__().handle_quality_action(QualityActionRequest(action="review"))
+        assert result["error_code"] == "MISSING_SESSION_ID"
+
+    @pytest.mark.asyncio
+    async def test_missing_session_returns_error(self):
         from src.api.research_api import ResearchAPI
+        from src.api.research_api import QualityActionRequest
         api = ResearchAPI()
-        with patch('src.core.session_streamer.SessionStreamer'):
-            result = await api._handle_quality_dismiss(session_with_issues, "q-abc123")
+        with patch("src.api.research_api.session_manager") as manager:
+            manager.get.return_value = None
+            result = await api.handle_quality_action(QualityActionRequest(session_id="missing", action="review"))
+        assert result["error_code"] == "SESSION_NOT_FOUND"
+
+    @pytest.mark.asyncio
+    async def test_missing_quality_state_returns_error(self, session_with_issues):
+        from src.api.research_api import ResearchAPI
+        from src.api.research_api import QualityActionRequest
+        api = ResearchAPI()
+        session_with_issues.pop("quality_state")
+        with patch("src.api.research_api.session_manager") as manager:
+            manager.get.return_value = session_with_issues
+            result = await api.handle_quality_action(QualityActionRequest(session_id="test-session-1", action="review"))
+        assert result["error_code"] == "NO_QUALITY_STATE"
+
+    @pytest.mark.asyncio
+    async def test_missing_report_sections_returns_error(self, session_with_issues):
+        from src.api.research_api import ResearchAPI
+        from src.api.research_api import QualityActionRequest
+        api = ResearchAPI()
+        session_with_issues["research_result"] = {"report": {"sections": []}}
+        with patch("src.api.research_api.session_manager") as manager:
+            manager.get.return_value = session_with_issues
+            result = await api.handle_quality_action(QualityActionRequest(session_id="test-session-1", action="review"))
+        assert result["error_code"] == "NO_SECTIONS"
+
+    @pytest.mark.asyncio
+    async def test_review_rechecks_and_returns_quality_state(self, session_with_issues):
+        from src.api.research_api import ResearchAPI
+        from src.api.research_api import QualityActionRequest
+        api = ResearchAPI()
+        session_with_issues["research_result"] = {"report": {"sections": [{"title": "市场规模", "content": "报告内容"}]}}
+        with patch("src.api.research_api.session_manager") as manager, \
+             patch.object(api, "_recheck_quality", new_callable=AsyncMock) as recheck, \
+             patch("src.core.session_streamer.SessionStreamer"), \
+             patch("src.core.quality.preview_health.check_preview_health", return_value={"healthy": True, "issues": []}):
+            manager.get.return_value = session_with_issues
+            result = await api.handle_quality_action(QualityActionRequest(session_id="test-session-1", action="review"))
         assert result["success"] is True
-        assert result["state"] == "dismissed"
-        issue = session_with_issues["quality_state"]["section_scores"]["市场规模"]["issues"][0]
-        assert issue["state"] == "dismissed"
+        assert result["status"] == "reviewing"
+        assert result["quality_state"] is session_with_issues["quality_state"]
+        recheck.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_dismiss_nonexistent_issue(self, session_with_issues):
+    async def test_review_preserves_action_in_response(self, session_with_issues):
         from src.api.research_api import ResearchAPI
+        from src.api.research_api import QualityActionRequest
         api = ResearchAPI()
-        result = await api._handle_quality_dismiss(session_with_issues, "q-nonexistent")
-        assert "error" in result
-        assert result["error_code"] == "ISSUE_NOT_FOUND"
+        session_with_issues["research_result"] = {"report": {"sections": [{"title": "市场规模", "content": "报告内容"}]}}
+        with patch("src.api.research_api.session_manager") as manager, \
+             patch.object(api, "_recheck_quality", new_callable=AsyncMock), \
+             patch("src.core.session_streamer.SessionStreamer"), \
+             patch("src.core.quality.preview_health.check_preview_health", return_value={"healthy": True, "issues": []}):
+            manager.get.return_value = session_with_issues
+            result = await api.handle_quality_action(QualityActionRequest(session_id="test-session-1", action="recheck"))
+        assert result["action"] == "recheck"
+        assert session_with_issues["quality_state"]["phase"] == "reviewing"
 
     @pytest.mark.asyncio
-    async def test_reopen_dismissed_issue(self, session_with_issues):
+    async def test_review_replaces_quality_state_after_recheck(self, session_with_issues):
         from src.api.research_api import ResearchAPI
+        from src.api.research_api import QualityActionRequest
         api = ResearchAPI()
-        session_with_issues["quality_state"]["section_scores"]["市场规模"]["issues"][0]["state"] = "dismissed"
-        with patch('src.core.session_streamer.SessionStreamer'):
-            result = await api._handle_quality_reopen(session_with_issues, "q-abc123")
+        session_with_issues["research_result"] = {"report": {"sections": [{"title": "市场规模", "content": "报告内容"}]}}
+        replacement = {"phase": "rechecked", "section_scores": {}}
+        with patch("src.api.research_api.session_manager") as manager, \
+             patch.object(api, "_recheck_quality", new_callable=AsyncMock, side_effect=lambda s, *_args, **_kwargs: s.update(quality_state=replacement)), \
+             patch("src.core.session_streamer.SessionStreamer"), \
+             patch("src.core.quality.preview_health.check_preview_health", return_value={"healthy": True, "issues": []}):
+            manager.get.return_value = session_with_issues
+            result = await api.handle_quality_action(QualityActionRequest(session_id="test-session-1", action="review"))
+        assert result["quality_state"] is replacement
+        assert replacement["phase"] == "reviewing"
+
+
+class TestQualityReviewFlow:
+
+    @pytest.mark.asyncio
+    async def test_review_flow_is_serialized_by_session_lock(self):
+        from src.api.research_api import ResearchAPI
+        from src.api.research_api import QualityActionRequest
+        api = ResearchAPI()
+        session = {
+            "quality_state": {"phase": "reviewing", "section_scores": {}},
+            "research_result": {"report": {"sections": [{"title": "市场", "content": "内容"}]}},
+        }
+        session["_session_id"] = "flow-test"
+        with patch("src.api.research_api.session_manager") as manager, \
+             patch.object(api, "_recheck_quality", new_callable=AsyncMock), \
+             patch("src.core.session_streamer.SessionStreamer"), \
+             patch("src.core.quality.preview_health.check_preview_health", return_value={"healthy": True, "issues": []}):
+            manager.get.return_value = session
+            result = await api.handle_quality_action(QualityActionRequest(session_id="flow-test", action="review"))
         assert result["success"] is True
-        assert result["state"] == "open"
-        issue = session_with_issues["quality_state"]["section_scores"]["市场规模"]["issues"][0]
-        assert issue["state"] == "open"
-
-    @pytest.mark.asyncio
-    async def test_reopen_non_dismissed_fails(self, session_with_issues):
-        from src.api.research_api import ResearchAPI
-        api = ResearchAPI()
-        result = await api._handle_quality_reopen(session_with_issues, "q-abc123")
-        assert "error" in result
-
-    @pytest.mark.asyncio
-    async def test_confirm_with_open_issues(self, session_with_issues):
-        from src.api.research_api import ResearchAPI
-        api = ResearchAPI()
-        with patch('src.core.session_streamer.SessionStreamer'):
-            result = await api._handle_quality_confirm(session_with_issues, force=False)
-        assert result["status"] == "pending_issues"
-        assert len(result["open_issues"]) == 2
-
-    @pytest.mark.asyncio
-    async def test_confirm_force_with_open_issues(self, session_with_issues):
-        from src.api.research_api import ResearchAPI
-        api = ResearchAPI()
-        with patch('src.core.session_streamer.SessionStreamer'):
-            result = await api._handle_quality_confirm(session_with_issues, force=True)
-        assert result["status"] == "confirmed"
-        assert session_with_issues["quality_state"]["phase"] == "confirmed"
-        for issue in session_with_issues["quality_state"]["section_scores"]["市场规模"]["issues"]:
-            assert issue["state"] == "accepted"
-
-    @pytest.mark.asyncio
-    async def test_confirm_no_open_issues(self, session_with_issues):
-        from src.api.research_api import ResearchAPI
-        api = ResearchAPI()
-        for iss in session_with_issues["quality_state"]["section_scores"]["市场规模"]["issues"]:
-            iss["state"] = "dismissed"
-        with patch('src.core.session_streamer.SessionStreamer'):
-            result = await api._handle_quality_confirm(session_with_issues, force=False)
-        assert result["status"] == "confirmed"
-
-    @pytest.mark.asyncio
-    async def test_dismiss_creates_new_quality_state_ref(self, session_with_issues):
-        from src.api.research_api import ResearchAPI
-        api = ResearchAPI()
-        old_ref = session_with_issues["quality_state"]
-        with patch('src.core.session_streamer.SessionStreamer'):
-            await api._handle_quality_dismiss(session_with_issues, "q-abc123")
-        assert session_with_issues["quality_state"] is not old_ref, \
-            "Dismiss should replace quality_state with deep copy"
-
-    @pytest.mark.asyncio
-    async def test_reopen_creates_new_quality_state_ref(self, session_with_issues):
-        from src.api.research_api import ResearchAPI
-        api = ResearchAPI()
-        session_with_issues["quality_state"]["section_scores"]["市场规模"]["issues"][0]["state"] = "dismissed"
-        old_ref = session_with_issues["quality_state"]
-        with patch('src.core.session_streamer.SessionStreamer'):
-            await api._handle_quality_reopen(session_with_issues, "q-abc123")
-        assert session_with_issues["quality_state"] is not old_ref, \
-            "Reopen should replace quality_state with deep copy"
-
-
-class TestFullFlowSimulation:
-
-    @pytest.mark.asyncio
-    async def test_dismiss_reopen_confirm_flow(self):
-        from src.api.research_api import ResearchAPI
-        api = ResearchAPI()
-
-        session = {
-            "_session_id": "flow-test",
-            "quality_state": {
-                "phase": "reviewing",
-                "overall_score": 50.0,
-                "overall_status": "warning",
-                "section_scores": {
-                    "市场": {
-                        "score": 50, "status": "warning",
-                        "issues": [
-                            {"id": "q-issue1", "type": "completeness", "severity": "high",
-                             "message": "数据不足", "section": "市场", "state": "open", "revision_count": 0},
-                            {"id": "q-issue2", "type": "accuracy", "severity": "medium",
-                             "message": "数据过时", "section": "市场", "state": "open", "revision_count": 0},
-                        ]
-                    }
-                },
-                "version_stack": [],
-                "current_version": "v0"
-            },
-        }
-
-        with patch('src.core.session_streamer.SessionStreamer'):
-            r1 = await api._handle_quality_dismiss(session, "q-issue1")
-            assert r1["success"]
-            assert session["quality_state"]["section_scores"]["市场"]["issues"][0]["state"] == "dismissed"
-
-            r2 = await api._handle_quality_confirm(session, force=False)
-            assert r2["status"] == "pending_issues"
-            assert len(r2["open_issues"]) == 1
-
-            r3 = await api._handle_quality_reopen(session, "q-issue1")
-            assert r3["success"]
-            assert session["quality_state"]["section_scores"]["市场"]["issues"][0]["state"] == "open"
-
-            r4 = await api._handle_quality_confirm(session, force=True)
-            assert r4["status"] == "confirmed"
-            assert session["quality_state"]["phase"] == "confirmed"
-            for issue in session["quality_state"]["section_scores"]["市场"]["issues"]:
-                assert issue["state"] == "accepted"
-
-    @pytest.mark.asyncio
-    async def test_double_dismiss_idempotent(self):
-        from src.api.research_api import ResearchAPI
-        api = ResearchAPI()
-
-        session = {
-            "_session_id": "idem-test",
-            "quality_state": {
-                "phase": "reviewing",
-                "overall_score": 50.0,
-                "overall_status": "warning",
-                "section_scores": {
-                    "市场": {
-                        "score": 50, "status": "warning",
-                        "issues": [
-                            {"id": "q-1", "type": "completeness", "severity": "high",
-                             "message": "问题1", "section": "市场", "state": "open", "revision_count": 0},
-                        ]
-                    }
-                },
-                "version_stack": [],
-                "current_version": "v0"
-            },
-        }
-
-        with patch('src.core.session_streamer.SessionStreamer'):
-            r1 = await api._handle_quality_dismiss(session, "q-1")
-            assert r1["success"]
-            r2 = await api._handle_quality_dismiss(session, "q-1")
-            assert r2["success"]
-            assert session["quality_state"]["section_scores"]["市场"]["issues"][0]["state"] == "dismissed"
-
-    @pytest.mark.asyncio
-    async def test_dismiss_all_then_confirm(self):
-        from src.api.research_api import ResearchAPI
-        api = ResearchAPI()
-
-        session = {
-            "_session_id": "dismiss-all-test",
-            "quality_state": {
-                "phase": "reviewing",
-                "overall_score": 50.0,
-                "overall_status": "warning",
-                "section_scores": {
-                    "市场": {
-                        "score": 50, "status": "warning",
-                        "issues": [
-                            {"id": "q-1", "type": "completeness", "severity": "high",
-                             "message": "问题1", "section": "市场", "state": "open", "revision_count": 0},
-                            {"id": "q-2", "type": "accuracy", "severity": "medium",
-                             "message": "问题2", "section": "市场", "state": "open", "revision_count": 0},
-                        ]
-                    }
-                },
-                "version_stack": [],
-                "current_version": "v0"
-            },
-        }
-
-        with patch('src.core.session_streamer.SessionStreamer'):
-            await api._handle_quality_dismiss(session, "q-1")
-            await api._handle_quality_dismiss(session, "q-2")
-            r = await api._handle_quality_confirm(session, force=False)
-            assert r["status"] == "confirmed", "All dismissed → confirm should succeed without force"
+        assert result["status"] == "reviewing"
 
 
 if __name__ == "__main__":

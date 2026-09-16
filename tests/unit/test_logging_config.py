@@ -44,7 +44,7 @@ class TestStructuredLogging:
         logger.info("测试消息", extra={"user_id": "123", "action": "login"})
         
         # 读取日志文件
-        log_file = Path(temp_dir) / "openresearch.log"
+        log_file = Path(temp_dir) / "Zensers.log"
         if log_file.exists():
             with open(log_file, 'r', encoding='utf-8') as f:
                 content = f.read()
@@ -88,7 +88,7 @@ class TestStructuredLogging:
         logger = config.get_logger("text.logger")
         logger.info("普通文本日志")
         
-        log_file = Path(temp_dir) / "openresearch.log"
+        log_file = Path(temp_dir) / "Zensers.log"
         if log_file.exists():
             with open(log_file, 'r', encoding='utf-8') as f:
                 content = f.read()
@@ -142,7 +142,7 @@ class TestLogLevelConfiguration:
         logger.debug("这条消息不应该出现")
         logger.warning("这条警告应该出现")
         
-        log_file = Path(temp_dir) / "openresearch.log"
+        log_file = Path(temp_dir) / "Zensers.log"
         if log_file.exists():
             with open(log_file, 'r', encoding='utf-8') as f:
                 content = f.read()
@@ -193,7 +193,7 @@ class TestLogRotation:
         # 检查是否有备份文件
         log_files = list(Path(temp_dir).glob("*.log*"))
         # 主日志文件应该存在
-        assert any(f.name == "openresearch.log" for f in log_files)
+        assert any(f.name == "Zensers.log" for f in log_files)
         
         config.shutdown()
     
@@ -234,7 +234,7 @@ class TestLogRotation:
         
         # 检查备份文件数量不超过限制
         log_files = list(Path(temp_dir).glob("*.log*"))
-        backup_files = [f for f in log_files if f.name != "openresearch.log"]
+        backup_files = [f for f in log_files if f.name != "Zensers.log"]
         # 应该最多有backup_count个备份
         assert len(backup_files) <= 2
         
@@ -285,7 +285,7 @@ class TestContextTracing:
         logger = config.get_logger("context.json")
         logger.info("上下文测试消息")
         
-        log_file = Path(temp_dir) / "openresearch.log"
+        log_file = Path(temp_dir) / "Zensers.log"
         if log_file.exists():
             with open(log_file, 'r', encoding='utf-8') as f:
                 content = f.read()
@@ -355,7 +355,7 @@ class TestMultipleOutputs:
         logger = config.get_logger("file.output")
         logger.info("文件输出测试")
         
-        log_file = Path(temp_dir) / "openresearch.log"
+        log_file = Path(temp_dir) / "Zensers.log"
         assert log_file.exists()
         
         config.shutdown()
@@ -391,7 +391,7 @@ class TestMultipleOutputs:
         logger.info("多输出目标测试")
         
         # 验证文件输出
-        log_file = Path(temp_dir) / "openresearch.log"
+        log_file = Path(temp_dir) / "Zensers.log"
         assert log_file.exists()
         
         with open(log_file, 'r', encoding='utf-8') as f:
@@ -463,7 +463,7 @@ class TestThreadSafety:
         assert len(errors) == 0
         
         # 验证日志文件完整
-        log_file = Path(temp_dir) / "openresearch.log"
+        log_file = Path(temp_dir) / "Zensers.log"
         if log_file.exists():
             with open(log_file, 'r', encoding='utf-8') as f:
                 lines = f.readlines()
@@ -557,7 +557,7 @@ class TestLoggingIntegration:
         config.shutdown()
         
         # 验证日志文件
-        log_file = Path(temp_dir) / "openresearch.log"
+        log_file = Path(temp_dir) / "Zensers.log"
         assert log_file.exists()
         
         with open(log_file, 'r', encoding='utf-8') as f:
@@ -638,7 +638,7 @@ class TestCompatibility:
         except ValueError:
             logger.exception("捕获异常", extra={"context": "test"})
         
-        log_file = Path(temp_dir) / "openresearch.log"
+        log_file = Path(temp_dir) / "Zensers.log"
         if log_file.exists():
             with open(log_file, 'r', encoding='utf-8') as f:
                 content = f.read()

@@ -86,7 +86,7 @@ class TestFallbackResponseLosesTopic:
                     }
                     import asyncio
                     with pytest.raises(ValueError):
-                        asyncio.get_event_loop().run_until_complete(
+                        asyncio.run(
                             api._llm_converse('ses_001', 'test', MagicMock())
                         )
 
@@ -97,7 +97,7 @@ class TestFallbackResponseLosesTopic:
             mock_llm.side_effect = ValueError("LLM returned empty content")
             with pytest.raises(ValueError):
                 import asyncio
-                asyncio.get_event_loop().run_until_complete(
+                asyncio.run(
                     api._llm_converse('ses_001', 'test', MagicMock())
                 )
 
@@ -108,7 +108,7 @@ class TestFallbackResponseLosesTopic:
             mock_llm.side_effect = ValueError("LLM response contains no valid JSON")
             with pytest.raises(ValueError):
                 import asyncio
-                asyncio.get_event_loop().run_until_complete(
+                asyncio.run(
                     api._llm_converse('ses_001', 'test', MagicMock())
                 )
 

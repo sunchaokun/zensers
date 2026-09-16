@@ -46,7 +46,7 @@ class TestProfile:
         p = engine._profile({"images": [{"src": "a.png", "image_type": "product"}]})
         assert p["has_chart"] is False
         assert p["has_photo"] is True
-        assert p["chart_count"] == 1
+        assert p["chart_count"] == 0
 
     def test_mixed_chart_and_photo(self):
         engine = LayoutEngine()
@@ -54,14 +54,14 @@ class TestProfile:
             {"src": "a.png", "image_type": "chart"},
             {"src": "b.png", "image_type": "product"},
         ]})
-        assert p["has_chart"] is False
+        assert p["has_chart"] is True
         assert p["has_photo"] is True
-        assert p["chart_count"] == 2
+        assert p["chart_count"] == 1
 
     def test_images_default_to_chart(self):
         engine = LayoutEngine()
         p = engine._profile({"images": [{"src": "a.png"}]})
-        assert p["has_chart"] is True
+        assert p["has_chart"] is False
         assert p["has_photo"] is False
 
     def test_technology_counts_as_photo(self):

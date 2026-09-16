@@ -68,7 +68,8 @@ class TestMCPConfig:
         """测试默认配置"""
         config = get_default_config()
         
-        assert config.version == "2.0"
+        # The default loader reads the repository's configured MCP schema.
+        assert config.version == "1.0"
         assert len(config.tools) > 0
         assert len(config.servers) > 0
     
@@ -385,24 +386,27 @@ class TestMCPClient:
         
         assert client.state == ClientState.DISCONNECTED
     
-    def test_client_connect_disconnect(self):
-        """测试客户端连接和断开"""
+    @pytest.mark.asyncio
+    async def test_client_connect_without_server_stays_disconnected(self):
+        """未提供传输目标时连接应安全失败"""
         client = MCPClient()
-        
-        client.connect()
-        assert client.state == ClientState.CONNECTED
+
+        assert await client.connect() is False
+        assert client.state == ClientState.DISCONNECTED
         
         client.disconnect()
         assert client.state == ClientState.DISCONNECTED
     
-    def test_client_context_manager(self):
+    @pytest.mark.asyncio
+    async def test_client_context_manager(self):
         """测试客户端上下文管理器"""
-        with MCPClient() as client:
+        async with MCPClient(server=MCPServer()) as client:
             assert client.state == ClientState.CONNECTED
         
         assert client.state == ClientState.DISCONNECTED
     
-    def test_client_connect_to_server(self):
+    @pytest.mark.asyncio
+    async def test_client_connect_to_server(self):
         """测试连接到服务器"""
         registry = ToolRegistry()
         registry.register(MockTool())
@@ -410,12 +414,13 @@ class TestMCPClient:
         server = MCPServer(tool_registry=registry)
         client = MCPClient(server=server)
         
-        client.connect()
+        await client.connect()
         
         assert client.state == ClientState.CONNECTED
         assert server.state == ServerState.RUNNING
     
-    def test_client_call_tool(self):
+    @pytest.mark.asyncio
+    async def test_client_call_tool(self):
         """测试调用工具"""
         registry = ToolRegistry()
         registry.register(MockTool())
@@ -423,47 +428,51 @@ class TestMCPClient:
         server = MCPServer(tool_registry=registry)
         client = MCPClient(server=server)
         
-        client.connect()
+        await client.connect()
         
-        response = client.call_tool("mock_tool", {"input": "test"})
+        response = await client.call_tool("mock_tool", {"input": "test"})
         
         assert response["success"] is True
         assert response["result"]["output"] == "test"
     
-    def test_client_call_tool_not_connected(self):
+    @pytest.mark.asyncio
+    async def test_client_call_tool_not_connected(self):
         """测试调用工具 - 未连接"""
         client = MCPClient()
         
-        response = client.call_tool("mock_tool", {"input": "test"})
+        response = await client.call_tool("mock_tool", {"input": "test"})
         
         assert response["success"] is False
-        assert "未连接" in response["error"]
+        assert response["error"] == "client_not_connected"
     
-    def test_client_list_tools(self):
+    @pytest.mark.asyncio
+    async def test_client_list_tools(self):
         """测试列出工具"""
         registry = create_default_registry()
         server = MCPServer(tool_registry=registry)
         client = MCPClient(server=server)
         
-        client.connect()
+        await client.connect()
+        await client.discover_tools()
         
         tools = client.list_tools()
         
         assert len(tools) >= 2
     
-    def test_client_stats(self):
+    @pytest.mark.asyncio
+    async def test_client_stats(self):
         """测试客户端统计"""
         registry = ToolRegistry()
         registry.register(MockTool())
         
         server = MCPServer(tool_registry=registry)
         client = MCPClient(server=server)
-        client.connect()
+        await client.connect()
         
         # 执行几次调用
-        client.call_tool("mock_tool", {"input": "test1"})
-        client.call_tool("mock_tool", {"input": "test2"})
-        client.call_tool("unknown", {})  # 失败
+        await client.call_tool("mock_tool", {"input": "test1"})
+        await client.call_tool("mock_tool", {"input": "test2"})
+        await client.call_tool("unknown", {})  # 失败
         
         stats = client.get_stats()
         
@@ -479,7 +488,8 @@ class TestMCPClient:
 class TestMCPIntegration:
     """MCP 集成测试"""
     
-    def test_full_flow(self):
+    @pytest.mark.asyncio
+    async def test_full_flow(self):
         """测试完整流程"""
         # 1. 创建配置
         config = MCPConfig(
@@ -499,10 +509,10 @@ class TestMCPIntegration:
         client = MCPClient(server=server)
         
         # 5. 连接
-        client.connect()
+        await client.connect()
         
         # 6. 调用工具
-        response = client.call_tool("mock_tool", {"input": "integration test"})
+        response = await client.call_tool("mock_tool", {"input": "integration test"})
         
         assert response["success"] is True
         assert response["result"]["output"] == "integration test"
@@ -547,7 +557,8 @@ settings:
         finally:
             os.unlink(temp_path)
     
-    def test_multiple_clients(self):
+    @pytest.mark.asyncio
+    async def test_multiple_clients(self):
         """测试多个客户端"""
         registry = ToolRegistry()
         registry.register(MockTool())
@@ -559,12 +570,12 @@ settings:
         client1 = MCPClient(server=server)
         client2 = MCPClient(server=server)
         
-        client1.connect()
-        client2.connect()
+        await client1.connect()
+        await client2.connect()
         
         # 两个客户端都应能调用工具
-        response1 = client1.call_tool("mock_tool", {"input": "client1"})
-        response2 = client2.call_tool("mock_tool", {"input": "client2"})
+        response1 = await client1.call_tool("mock_tool", {"input": "client1"})
+        response2 = await client2.call_tool("mock_tool", {"input": "client2"})
         
         assert response1["result"]["output"] == "client1"
         assert response2["result"]["output"] == "client2"
@@ -573,7 +584,8 @@ settings:
         stats = server.get_stats()
         assert stats["total_requests"] == 2
     
-    def test_error_handling(self):
+    @pytest.mark.asyncio
+    async def test_error_handling(self):
         """测试错误处理"""
         registry = ToolRegistry()
         
@@ -594,9 +606,9 @@ settings:
         server = MCPServer(tool_registry=registry)
         client = MCPClient(server=server)
         
-        client.connect()
+        await client.connect()
         
-        response = client.call_tool("error_tool", {})
+        response = await client.call_tool("error_tool", {})
         
         assert response["success"] is False
         assert "Test error" in response["error"]

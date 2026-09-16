@@ -336,6 +336,22 @@ class TestQualitySnapshotManager:
         assert "md_path" in result
 
     @pytest.mark.asyncio
+    async def test_report_sections_round_trip_when_requested(self, manager, sample_files):
+        html_path, md_path = sample_files
+        quality_state = {"phase": "reviewing", "overall_score": 72.5}
+        report = {
+            "title": "旧报告",
+            "sections": [{"section_id": "s1", "title": "旧章节", "content": "旧内容"}],
+            "data_points": [{"metric": "市场规模", "value": "100"}],
+            "key_findings": ["旧结论"],
+        }
+        await manager.create_snapshot("sess-report", html_path, md_path, quality_state, report=report)
+
+        result = await manager.restore_snapshot("sess-report", "v0")
+        assert result["quality_state"] == quality_state
+        assert result["report"] == report
+
+    @pytest.mark.asyncio
     async def test_restore_nonexistent_snapshot(self, manager):
         result = await manager.restore_snapshot("no-such-session", "v99")
         assert result is None
@@ -606,7 +622,7 @@ class TestQualityWorkflowScenario:
 
         mgr = QualitySnapshotManager(base_dir=str(tmp_path / "snapshots"))
         import asyncio
-        version_id = asyncio.get_event_loop().run_until_complete(
+        version_id = asyncio.run(
             mgr.create_snapshot("sess-e2e", str(html_path), str(md_path), session["quality_state"])
         )
         assert version_id == "v0"
@@ -614,7 +630,7 @@ class TestQualityWorkflowScenario:
         session["quality_state"]["overall_score"] = 85.0
         session["quality_state"]["phase"] = "confirmed"
 
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             mgr.restore_snapshot("sess-e2e", "v0")
         )
         assert result is not None

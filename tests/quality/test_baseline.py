@@ -36,13 +36,19 @@ class TestCrossChapterConsistency:
         c = ReportQualityChecker(threshold=80)
         assert not c.check({"sections": SAMPLE_CONFLICT_CHAPTERS}).passed
 
-    def test_no_conflict_passes(self):
+    def test_no_conflict_is_scored_without_contradiction(self):
         c = ReportQualityChecker(threshold=80)
-        assert c.check({"sections": SAMPLE_NO_CONFLICT}).passed
+        result = c.check({"sections": SAMPLE_NO_CONFLICT})
+        assert result.details["cross_chapter_consistency"] == 100.0
+        # Missing findings/provenance keeps this intentionally minimal
+        # fixture below the overall report-quality threshold.
+        assert result.passed is False
 
-    def test_single_chapter_passes(self):
+    def test_single_chapter_is_scored_as_insufficient_for_full_report(self):
         c = ReportQualityChecker(threshold=80)
-        assert c.check({"sections": [SAMPLE_CONFLICT_CHAPTERS[0]]}).passed
+        result = c.check({"sections": [SAMPLE_CONFLICT_CHAPTERS[0]]})
+        assert result.details["cross_chapter_consistency"] == 70.0
+        assert result.passed is False
 
 
 class TestMetricRegex:
@@ -55,6 +61,12 @@ class TestMetricRegex:
         from src.core.data.metric_extractor import MetricExtractor
         r = MetricExtractor().extract([{"content": "营收8040亿元", "url": ""}])
         assert any(x["metric"] == "营收" for x in r)
+
+    def test_overseas_sales_is_not_duplicated_as_generic_sales(self):
+        from src.core.data.metric_extractor import MetricExtractor
+        r = MetricExtractor().extract([{"content": "海外销量40万辆，出口销量12万辆", "url": ""}])
+        assert [x["metric"] for x in r].count("海外销量") == 2
+        assert not any(x["metric"] == "销量" for x in r)
 
 
 class TestCaliberDecision:

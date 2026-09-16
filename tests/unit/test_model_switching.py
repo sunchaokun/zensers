@@ -232,7 +232,7 @@ class TestRetryJsonOnlyWithApiKey:
         assert call_kwargs.get('base_url') == 'https://session.api.com/v1', f"Expected session endpoint, got {call_kwargs.get('base_url')}"
 
     @pytest.mark.asyncio
-    async def test_falls_back_to_global_api_key(self):
+    async def test_delegates_global_credentials_to_call_llm(self):
         api = self._make_api()
         llm_config = {'model': 'test-model', 'max_tokens': 9999}
         mock_settings = MagicMock()
@@ -251,8 +251,10 @@ class TestRetryJsonOnlyWithApiKey:
                         await api._retry_json_only('sys', llm_config, 'sess1')
 
         call_kwargs = mock_call_llm.call_args.kwargs
-        assert call_kwargs.get('api_key') == 'global-key'
-        assert call_kwargs.get('base_url') == 'https://global.api.com/v1'
+        # The lower-level call_llm owns global credential resolution.  The
+        # retry layer must not duplicate or override that routing decision.
+        assert call_kwargs.get('api_key') is None
+        assert call_kwargs.get('base_url') is None
 
 
 class TestCallLlmWithApiKeyBaseUrl:
@@ -279,18 +281,18 @@ class TestCallLlmWithApiKeyBaseUrl:
             'usage': {'total_tokens': 10},
         }
         with patch("src.core.llm_client.settings", ms):
-            with patch("openai.AsyncOpenAI") as mock_client_cls:
-                mock_client = AsyncMock()
-                mock_client_cls.return_value = mock_client
-                mock_client.chat.completions.create.return_value = mock_response
-
+            with patch(
+                "src.core.llm_client._call_llm_api",
+                new_callable=AsyncMock,
+                return_value=mock_response.model_dump.return_value,
+            ) as raw_call:
                 from src.core.llm_client import call_llm
                 result = await call_llm(prompt="test", api_key="custom-key", base_url="https://custom.api.com/v1")
 
                 assert result['success'] is True
-                init_kwargs = mock_client_cls.call_args[1]
-                assert init_kwargs["api_key"] == "custom-key"
-                assert init_kwargs["base_url"] == "https://custom.api.com/v1"
+                call_kwargs = raw_call.call_args.kwargs
+                assert call_kwargs["api_key"] == "custom-key"
+                assert call_kwargs["base_url"] == "https://custom.api.com/v1"
 
     @pytest.mark.asyncio
     async def test_call_llm_fallback_to_settings(self):
@@ -301,18 +303,18 @@ class TestCallLlmWithApiKeyBaseUrl:
             'usage': {'total_tokens': 10},
         }
         with patch("src.core.llm_client.settings", ms):
-            with patch("openai.AsyncOpenAI") as mock_client_cls:
-                mock_client = AsyncMock()
-                mock_client_cls.return_value = mock_client
-                mock_client.chat.completions.create.return_value = mock_response
-
+            with patch(
+                "src.core.llm_client._call_llm_api",
+                new_callable=AsyncMock,
+                return_value=mock_response.model_dump.return_value,
+            ) as raw_call:
                 from src.core.llm_client import call_llm
                 result = await call_llm(prompt="test")
 
                 assert result['success'] is True
-                init_kwargs = mock_client_cls.call_args[1]
-                assert init_kwargs["api_key"] == "default-key"
-                assert init_kwargs["base_url"] == "https://default.example.com"
+                call_kwargs = raw_call.call_args.kwargs
+                assert call_kwargs["api_key"] == "default-key"
+                assert call_kwargs["base_url"] == "https://default.example.com"
 
 
 class TestInteractEndpointLlmParams:

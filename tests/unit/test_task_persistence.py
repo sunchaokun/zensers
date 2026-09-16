@@ -769,9 +769,11 @@ class TestTaskPersistenceManagerEdgeCases:
         history = manager.get_state_history(task.task_id)
         
         assert len(history) == 3
-        assert history[0]["state"] == "running"
-        assert history[1]["state"] == "paused"
-        assert history[2]["state"] == "running"
+        # History records the persisted state immediately before each update,
+        # so the first entry is the task's initial state.
+        assert history[0]["state"] == "created"
+        assert history[1]["state"] == "running"
+        assert history[2]["state"] == "paused"
     
     def test_empty_directory_recovery(self, temp_dir):
         """测试空目录恢复"""

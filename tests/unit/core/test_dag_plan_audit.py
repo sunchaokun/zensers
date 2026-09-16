@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -136,6 +137,58 @@ def test_routing_reaudits_after_safe_order_revision():
     assert result.dag_document["audit"]["passed"] is True
 
 
+def test_routing_reaudits_subsection_plan_without_reexpansion_failure():
+    """A safe DAG reorder must be able to re-plan an already expanded tree."""
+    from src.core.intelligent_routing_adapter import IntelligentRoutingAdapter
+
+    downstream = SectionSpec(
+        "section_0",
+        "下游分析",
+        SectionRole.ANALYSIS,
+        content_dependency=["section_1"],
+    )
+    upstream = SectionSpec("section_1", "上游数据", SectionRole.ANALYSIS)
+    structure = TaskStructure(
+        task_id="dag-subsection-replan-test",
+        topic="测试主题",
+        sections=[downstream, upstream],
+        section_data_specs=[
+            {
+                "section_id": "section_0",
+                "name": "下游分析",
+                "sub_sections": [{"id": "sub_0_0", "name": "下游指标", "points": ["指标"]}],
+            },
+            {
+                "section_id": "section_1",
+                "name": "上游数据",
+                "sub_sections": [{"id": "sub_1_0", "name": "上游指标", "points": ["指标"]}],
+            },
+        ],
+        dependencies=[
+            ContentDependency(
+                from_section="section_1",
+                to_section="section_0",
+                dependency_type="analysis",
+            )
+        ],
+    )
+
+    adapter = IntelligentRoutingAdapter(use_llm=False)
+    adapter._analyze_intent = lambda *_args, **_kwargs: _intent()
+    adapter._analyze_structure = lambda *_args, **_kwargs: structure
+
+    result = adapter.analyze(
+        "测试任务",
+        {"topic": "测试主题", "aspects": ["下游分析", "上游数据"]},
+        "测试主题",
+    )
+
+    assert result.dag_audit.passed is True
+    assert len(result.dag_review_history) == 2
+    assert result.dag_review_history[0]["passed"] is False
+    assert result.dag_review_history[-1]["passed"] is True
+
+
 @pytest.mark.asyncio
 async def test_failed_dag_audit_blocks_agent_creation():
     from unittest.mock import MagicMock
@@ -186,3 +239,53 @@ async def test_failed_dag_audit_blocks_agent_creation():
     assert "DAG计划审查未通过" in result.summary
     orchestrator._create_agents_from_plan.assert_not_called()
     orchestrator._create_agents.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_routing_receives_confirmed_framework_context_before_dag_planning():
+    """The routing boundary must not discard the confirmed chapter tree.
+
+    This is a diagnostic regression test for the manifest failure observed in
+    the six-chapter E2E.  The adapter is stopped immediately after capture so
+    the test exercises only the requirement -> routing boundary and cannot
+    pass because of later report assembly behavior.
+    """
+    from src.core.orchestrator.orchestrator import ResearchOrchestrator
+
+    orchestrator = ResearchOrchestrator(use_intelligent_routing=True)
+    orchestrator._task_persistence = MagicMock()
+    orchestrator._preparse_annual_report = AsyncMock(return_value=True)
+
+    captured = {}
+
+    def capture_and_stop(*args, **kwargs):
+        captured["requirement"] = kwargs["requirement"]
+        raise RuntimeError("stop after routing-boundary capture")
+
+    orchestrator._routing_adapter.analyze = capture_and_stop
+
+    framework_tree = [
+        {
+            "id": "market",
+            "name": "市场规模与出货量",
+            "sub_sections": [{"id": "volume", "name": "出货量", "points": ["出货量"]}],
+        }
+    ]
+    result = await orchestrator._research_with_routing(
+        user_input={
+            "topic": "中国智能手机行业分析",
+            "aspects": ["市场规模与出货量"],
+            "sections_tree": framework_tree,
+        },
+        output_dir=None,
+        user_id=None,
+        interaction_mode=False,
+        interaction_callback=None,
+        task_id="routing-context-contract-test",
+    )
+
+    assert result.status == "failed"
+    assert "section_details" in captured["requirement"]
+    assert captured["requirement"]["section_details"][0]["id"] == "market"
+    assert captured["requirement"]["sections_tree"] == framework_tree
+    assert captured["requirement"]["dynamic_fields"]["sections_tree"] == framework_tree

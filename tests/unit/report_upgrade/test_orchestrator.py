@@ -387,6 +387,18 @@ def test_report_writer_restore_and_audit_share_manifest_only_chapter_set():
     assert specs[1]["section_role"] == "synthesis"
 
 
+def test_report_writer_honors_routing_manifest_order_and_keeps_synthesis_last():
+    specs = ReportOrchestrator._report_chapter_specs({
+        "sections": [],
+        "section_manifest": [
+            {"section_id": "synthesis_0", "title": "摘要", "role": "synthesis", "execution_order": 3},
+            {"section_id": "section_1", "title": "竞争格局", "role": "analysis", "execution_order": 1},
+            {"section_id": "section_0", "title": "市场规模", "role": "analysis", "execution_order": 0},
+        ],
+    })
+    assert [spec["section_id"] for spec in specs] == ["section_0", "section_1", "synthesis_0"]
+
+
 def test_synthesis_chapters_are_expanded_after_data_chapters():
     specs = ReportOrchestrator._iter_report_chapter_specs([
         {"section_id": "summary", "section_name": "摘要", "section_role": "synthesis"},

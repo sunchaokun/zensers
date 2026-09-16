@@ -5,12 +5,23 @@ import pytest
 
 PROMPTS_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "prompts", "agents")
 REQUIRED_INCLUDE = "{include:quality_rubric}"
-EXPECTED_COUNT = 24
-
+EXPECTED_PROMPT_FILES = frozenset({
+    "body_agent.md", "competition.md", "conclusion_role.md", "conversation.md",
+    "enterprise.md", "executive_summary_role.md", "executive_summary.md",
+    "financial_analysis.md", "general.md", "industry_chain.md",
+    "intent_analysis_system.md", "intent_analysis_user.md", "investment.md",
+    "market_size.md", "policy.md", "research_conclusion.md", "risk.md",
+    "section_analysis_system.md", "section_analysis_user.md", "strategic_intent.md",
+    "survey_cross_synthesis.md", "technology.md", "trend.md", "validation.md",
+    "valuation.md",
+})
 
 def test_all_agent_prompts_have_quality_rubric():
     files = sorted(f for f in os.listdir(PROMPTS_DIR) if f.endswith(".md"))
-    assert len(files) == EXPECTED_COUNT, f"Expected {EXPECTED_COUNT} agent prompts, found {len(files)}"
+    assert files, "No agent prompts found"
+    assert set(files) == EXPECTED_PROMPT_FILES, (
+        "Agent prompt manifest changed; update this contract deliberately"
+    )
 
     missing = []
     for fname in files:

@@ -22,7 +22,10 @@ def mock_prompts(tmp_path):
 
 @pytest.fixture
 def writer(mock_prompts):
-    return ChapterWriter(prompt_manager=mock_prompts)
+    # Existing unit tests exercise the legacy response contract. The
+    # production default is streaming; the dedicated streaming regression
+    # below uses the default explicitly.
+    return ChapterWriter(prompt_manager=mock_prompts, use_streaming=False)
 
 
 def _llm_ok(content_json: str) -> dict:
@@ -53,9 +56,46 @@ def make_input(**overrides):
 
 
 _CALL_LLM_PATH = "src.agents.fixed_agents.report_upgrade.chapter_writer.call_llm"
+_CALL_LLM_STREAM_PATH = "src.agents.fixed_agents.report_upgrade.chapter_writer.call_llm_stream"
 
 
 class TestChapterWriterWrite:
+    @pytest.mark.asyncio
+    async def test_stream_timeout_retries_before_compatibility_fallback(self, writer):
+        attempts = 0
+
+        async def streamed(**kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise TimeoutError("provider read timeout")
+            for chunk in ("```json\n", _VALID_CHAPTER_JSON, "\n```"):
+                yield chunk
+
+        streaming_writer = ChapterWriter(prompt_manager=writer._prompts)
+        with patch(_CALL_LLM_STREAM_PATH, side_effect=streamed) as stream_call, \
+                patch(_CALL_LLM_PATH, new_callable=AsyncMock) as legacy_call:
+            result = await streaming_writer.write(make_input())
+
+        assert result.content == "正文"
+        assert stream_call.call_count == 2
+        legacy_call.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_write_collects_streamed_response_instead_of_fixed_total_wait(self, writer):
+        async def streamed(**kwargs):
+            for chunk in ("```json\n", _VALID_CHAPTER_JSON, "\n```"):
+                yield chunk
+
+        streaming_writer = ChapterWriter(prompt_manager=writer._prompts)
+        with patch(_CALL_LLM_STREAM_PATH, side_effect=streamed) as stream_call, \
+                patch(_CALL_LLM_PATH, new_callable=AsyncMock) as legacy_call:
+            result = await streaming_writer.write(make_input())
+
+        assert result.content == "正文"
+        stream_call.assert_called_once()
+        legacy_call.assert_not_called()
+
     @pytest.mark.asyncio
     async def test_write_returns_chapter_output(self, writer):
         with patch(_CALL_LLM_PATH, new_callable=AsyncMock) as mock_call:
@@ -156,6 +196,16 @@ class TestChapterWriterParseOutput:
         assert result.title == "测试"
         assert len(result.data_points_used) == 1
 
+    def test_parse_invalid_data_point_item_becomes_failed_chapter(self, writer):
+        raw = (
+            '```json\n{"content": "正文", "data_points_used": ["不是对象"], '
+            '"key_conclusions": []}\n```'
+        )
+        result = writer._parse_output(raw, {"section_id": "ch1", "section_name": "测试"})
+        assert result.status == "failed"
+        assert result.content == ""
+        assert "JSON解析失败" in result.error
+
     def test_parse_filters_extra_fields(self, writer):
         raw = '```json\n{"title": "测试", "content": "正文", "data_points_used": [{"metric": "GDP", "value": "120", "unit": "万亿元", "source": "gov.cn", "year": 2025}], "key_conclusions": [], "self_check_passed": true, "self_check_issues": []}\n```'
         result = writer._parse_output(raw, {"section_id": "ch1", "section_name": "测试"})
@@ -168,7 +218,9 @@ class TestChapterWriterParseOutput:
         result = writer._parse_output(raw, {"section_id": "ch1", "section_name": "测试"})
         assert result.self_check_passed is False
         assert "JSON解析失败" in result.self_check_issues[0]
-        assert result.content == raw
+        assert result.content == ""
+        assert result.status == "failed"
+        assert result.error
 
     def test_parse_missing_json_block_fallback(self, writer):
         raw = '{"title": "测试", "content": "正文"}'
@@ -177,10 +229,19 @@ class TestChapterWriterParseOutput:
         assert result.content == "正文"
         assert result.self_check_passed is True
 
+    def test_parse_empty_content_is_failed_not_a_valid_chapter(self, writer):
+        result = writer._parse_output(
+            '{"title": "测试", "content": ""}',
+            {"section_id": "ch1", "section_name": "测试"},
+        )
+        assert result.status == "failed"
+        assert result.content == ""
+        assert result.self_check_passed is False
+
     def test_parse_raw_json_no_code_block(self, writer):
         raw = '一些文字\n{"title": "市场分析", "content": "市场规模达2000亿", "data_points_used": [], "key_conclusions": ["增速15%"], "self_check_passed": true}\n更多文字'
         result = writer._parse_output(raw, {"section_id": "ch2", "section_name": "默认标题"})
-        assert result.title == "市场分析"
+        assert result.title == "默认标题"
         assert result.content == "市场规模达2000亿"
         assert len(result.key_conclusions) == 1
 

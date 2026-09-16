@@ -747,8 +747,10 @@ class TestSessionStateConsistency:
             await api._regenerate_report(SESSION_ID)
 
         rr = wrapped.get("research_result", {})
-        assert rr.get("status") == "completed"
-        assert rr.get("document_path") == "/new/preview.html"
+        assert rr.get("status") == "completed_with_warnings"
+        # document_path is the final downloadable artifact; the HTML preview
+        # is copied to PreviewStorage separately by _generate_documents_from_cache.
+        assert rr.get("document_path") == "/new/report.docx"
 
         _teardown_session()
 
@@ -808,7 +810,7 @@ class TestSessionStateConsistency:
             assert result["status"] == "completed"
 
         rr = wrapped.get("research_result", {})
-        assert rr.get("status") == "completed"
+        assert rr.get("status") == "completed_with_warnings"
 
         _teardown_session()
 
@@ -869,7 +871,7 @@ class TestSessionStateConsistency:
             await api._regenerate_report(SESSION_ID)
 
         rr = wrapped.get("research_result", {})
-        assert rr.get("document_path") == "/new/preview.html"
+        assert rr.get("document_path") == "/new/report.docx"
 
         _teardown_session()
 
@@ -1063,7 +1065,7 @@ class TestEndToEndUserJourneys:
         assert result["message"] == "文档已重新生成"
 
         assert wrapped.get("mode") == "chat"
-        assert wrapped.get("research_result", {}).get("status") == "completed"
+        assert wrapped.get("research_result", {}).get("status") == "completed_with_warnings"
 
         _teardown_session()
 

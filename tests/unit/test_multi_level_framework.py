@@ -287,12 +287,12 @@ class TestStartExecutionSectionsTree:
 
         with patch('src.api.research_api.session_manager') as mock_sm, \
              patch('src.core.orchestrator.execution.coordinator.cancel_manager.get_cancel_manager') as mock_cm, \
-             patch('src.api.research_api.asyncio') as mock_asyncio, \
+             patch('src.api.research_api.safe_create_task') as mock_create_task, \
              patch('src.core.progress_streamer.ProgressStreamer'):
             mock_sm.get.return_value = session
             mock_cm.return_value.is_paused.return_value = False
-            mock_asyncio.create_task.return_value = MagicMock()
-            mock_asyncio.create_task.return_value.add_done_callback = MagicMock()
+            mock_task = MagicMock()
+            mock_create_task.return_value = mock_task
 
             await api._start_execution('test')
 
@@ -331,12 +331,12 @@ class TestStartExecutionSectionsTree:
 
         with patch('src.api.research_api.session_manager') as mock_sm, \
              patch('src.core.orchestrator.execution.coordinator.cancel_manager.get_cancel_manager') as mock_cm, \
-             patch('src.api.research_api.asyncio') as mock_asyncio, \
+             patch('src.api.research_api.safe_create_task') as mock_create_task, \
              patch('src.core.progress_streamer.ProgressStreamer'):
             mock_sm.get.return_value = session
             mock_cm.return_value.is_paused.return_value = False
-            mock_asyncio.create_task.return_value = MagicMock()
-            mock_asyncio.create_task.return_value.add_done_callback = MagicMock()
+            mock_task = MagicMock()
+            mock_create_task.return_value = mock_task
 
             await api._start_execution('test')
 

@@ -26,8 +26,8 @@ class TestM2FilterDataByAspect:
         assert len(result) == 1
         assert "营收" in result[0]["content"]
 
-    def test_aspect_no_match_returns_limited(self):
-        """无匹配时降级到全量限 200"""
+    def test_aspect_no_match_refuses_unrelated_fallback(self):
+        """无匹配时不应把无关证据注入章节"""
         from src.core.orchestrator.execution.engine import ExecutionEngine
 
         engine = ExecutionEngine.__new__(ExecutionEngine)
@@ -36,8 +36,7 @@ class TestM2FilterDataByAspect:
             {"content": "政策环境有利于行业发展", "title": "政策"},
         ]
         result = engine._filter_data_by_aspect(data_points, "section_财务")
-        assert len(result) == 2  # 降级返回全量
-        assert len(result) <= 200
+        assert result == []
 
     def test_synonym_expansion(self):
         """同义词扩展：财务 → 营收/利润/毛利率"""
@@ -78,14 +77,14 @@ class TestM2FilterDataByAspect:
         assert len(result) == 1
         assert "R&D" in result[0]["content"]
 
-    def test_empty_aspect_returns_limited(self):
-        """aspect 为空时返回前 200 条"""
+    def test_empty_aspect_refuses_cache_injection(self):
+        """aspect 为空时不能猜测章节并注入缓存"""
         from src.core.orchestrator.execution.engine import ExecutionEngine
 
         engine = ExecutionEngine.__new__(ExecutionEngine)
         data_points = [{"content": f"数据点{i}", "title": ""} for i in range(300)]
         result = engine._filter_data_by_aspect(data_points, "")
-        assert len(result) == 200
+        assert result == []
 
     def test_scored_by_relevance(self):
         """相关性高的排在前面"""

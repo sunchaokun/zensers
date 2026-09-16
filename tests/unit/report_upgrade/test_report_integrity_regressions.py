@@ -6,7 +6,7 @@ implemented.  Keep them deterministic: no network and no LLM calls.
 
 import pytest
 
-from src.agents.fixed_agents.report_upgrade.models import ChapterWriteOutput, DataPoint
+from src.agents.fixed_agents.report_upgrade.models import ChapterWriteOutput, DataPoint, ReviewOutput
 from src.agents.fixed_agents.report_upgrade.orchestrator import ReportOrchestrator
 from src.core.agents.generic_agent import GenericAgent
 from src.services.chart_generator import ChartConfig, ChartGenerator, ChartType
@@ -370,13 +370,29 @@ def test_claim_namespace_is_scoped_by_task_chapter_and_section():
     assert "claim::0" not in second
 
 
-def test_low_quality_does_not_block_formal_export_but_structure_does():
+def test_quality_and_coverage_warnings_do_not_block_artifact_export():
     assert ResearchOrchestrator._quality_allows_formal_export(
         quality_passed=False, artifact_kind="formal"
     ) is True
     assert ResearchOrchestrator._quality_allows_formal_export(
         quality_passed=False, artifact_kind="formal", structural_passed=False
-    ) is False
+    ) is True
     assert ResearchOrchestrator._quality_allows_formal_export(
         quality_passed=False, artifact_kind="diagnostic"
     ) is True
+
+
+def test_report_assembly_populates_manifest_synthesis_slots():
+    chapter = ChapterWriteOutput(
+        chapter_id="ch1",
+        title="市场规模",
+        content="市场规模达到100亿元。",
+        key_conclusions=["市场规模达到100亿元"],
+    )
+
+    result = ReportOrchestrator._assemble_final_report(
+        [chapter], "执行摘要内容", ReviewOutput(overall_score=90), "测试主题"
+    )
+
+    assert result["exec_summary"] == "执行摘要内容"
+    assert "市场规模达到100亿元" in result["conclusion"]

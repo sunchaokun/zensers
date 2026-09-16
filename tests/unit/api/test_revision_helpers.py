@@ -169,6 +169,27 @@ class TestApplyRevisionToSession:
 
 
 class TestReportDefenseRecheck:
+    def test_html_finalizer_warning_is_persisted_as_nonformal_delivery(self, tmp_path):
+        from src.api.research_api import ResearchAPI
+
+        artifact = tmp_path / "preview.html"
+        artifact.write_text("<html></html>", encoding="utf-8")
+        session = _make_session()
+        session["research_result"]["document_path"] = str(artifact)
+
+        ResearchAPI._record_html_finalizer_state(session, {
+            "issues": ["placeholder"],
+            "quality_gate_status": "degraded",
+            "formal_complete": False,
+        })
+
+        result = session["research_result"]
+        assert result["status"] == "completed_with_warnings"
+        assert result["formal_complete"] is False
+        assert result["artifact_status"] == "ready"
+        assert result["delivery_class"] == "available_with_warnings"
+        assert result["report"]["html_finalizer"]["issues"] == ["placeholder"]
+
     def test_rechecks_current_report_and_marks_unresolved_l5_as_blocked(self):
         from src.api.research_api import ResearchAPI
         from src.agents.fixed_agents.report_upgrade.data_registry import DataRegistry
@@ -200,4 +221,6 @@ class TestReportDefenseRecheck:
         assert session["research_result"]["report"]["defense_audit"] == audit
         assert session["research_result"]["quality_gate_status"] == "blocked"
         assert session["research_result"]["status"] == "completed_with_warnings"
+        assert session["research_result"]["formal_complete"] is False
+        assert session["research_result"]["delivery_class"] == "missing"
         assert session["l1_l5_recheck"]["status"] == "failed"

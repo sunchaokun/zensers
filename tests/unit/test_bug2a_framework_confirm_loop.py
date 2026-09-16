@@ -86,8 +86,11 @@ class TestFrameworkModifyFailureReturnsModify:
                 'language': 'zh',
                 'llm_config': {},
             }
-            with patch('src.api.research_api.asyncio') as mock_asyncio:
-                mock_asyncio.wait_for = AsyncMock(side_effect=Exception("LLM down"))
+            with patch(
+                'src.api.research_api.call_llm',
+                new_callable=AsyncMock,
+                side_effect=Exception("LLM down"),
+            ):
                 result = await api._llm_framework_modify('ses_001', '我想加一个章节')
                 assert result['action'] == 'modify'
 
@@ -104,8 +107,11 @@ class TestFrameworkModifyFailureReturnsModify:
                 'language': 'zh',
                 'llm_config': {},
             }
-            with patch('src.api.research_api.asyncio') as mock_asyncio:
-                mock_asyncio.wait_for = AsyncMock(return_value={'success': False, 'error': 'timeout'})
+            with patch(
+                'src.api.research_api.call_llm',
+                new_callable=AsyncMock,
+                return_value={'success': False, 'error': 'timeout'},
+            ):
                 result = await api._llm_framework_modify('ses_001', '我想加一个章节')
                 assert result['action'] == 'modify'
 
@@ -122,8 +128,11 @@ class TestFrameworkModifyFailureReturnsModify:
                 'language': 'zh',
                 'llm_config': {},
             }
-            with patch('src.api.research_api.asyncio') as mock_asyncio:
-                mock_asyncio.wait_for = AsyncMock(return_value={'success': True, 'content': 'plain text no json'})
+            with patch(
+                'src.api.research_api.call_llm',
+                new_callable=AsyncMock,
+                return_value={'success': True, 'content': 'plain text no json'},
+            ):
                 result = await api._llm_framework_modify('ses_001', '我想加一个章节')
                 assert result['action'] == 'modify'
 
