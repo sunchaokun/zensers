@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 _UNAVAILABLE_PROFILES = set()
 _PROFILE_SEMAPHORES = {}
 _RATE_LIMIT_RETRIES = 2
+_TIMEOUT_RETRIES = 2
 
 
 def _is_auth_error(error: Exception) -> bool:
@@ -90,20 +91,30 @@ def _is_rate_limit_error(error: Exception) -> bool:
     return "429" in text or "too many requests" in text or "rate limit" in text
 
 
+def _is_timeout_error(error: Exception) -> bool:
+    text = str(error).lower()
+    return isinstance(error, (asyncio.TimeoutError, TimeoutError)) or "timeout" in text or "timed out" in text
+
+
 async def _call_profile_api(*, profile: Optional[LLMProfile], **kwargs):
     """Call a provider under its concurrency gate with bounded 429 backoff."""
     semaphore = _profile_semaphore(profile)
-    for attempt in range(_RATE_LIMIT_RETRIES + 1):
+    for attempt in range(max(_RATE_LIMIT_RETRIES, _TIMEOUT_RETRIES) + 1):
         try:
             async with semaphore:
                 return await _call_llm_api(**kwargs)
         except Exception as exc:
-            if not _is_rate_limit_error(exc) or attempt >= _RATE_LIMIT_RETRIES:
+            retry_limit = (
+                _RATE_LIMIT_RETRIES if _is_rate_limit_error(exc)
+                else _TIMEOUT_RETRIES if _is_timeout_error(exc)
+                else -1
+            )
+            if retry_limit < 0 or attempt >= retry_limit:
                 raise
             delay = min(2 ** attempt, 8)
             logger.warning(
-                "LLM profile '%s' rate-limited; retrying after %ss (%s/%s)",
-                getattr(profile, "name", "direct"), delay, attempt + 1, _RATE_LIMIT_RETRIES,
+                "LLM profile '%s' transient failure; retrying after %ss (%s/%s): %s",
+                getattr(profile, "name", "direct"), delay, attempt + 1, retry_limit, exc,
             )
             await asyncio.sleep(delay)
 
@@ -229,42 +240,70 @@ async def call_llm_stream(
 
     from openai import AsyncOpenAI
     last_error = None
+
+    async def _stream_profile(profile, p_model, p_api_key, p_base_url):
+        """Yield one provider attempt; the caller owns retry semantics."""
+        request_timeout = float(os.environ.get("LLM_REQUEST_TIMEOUT_SECONDS", "600"))
+        try:
+            client_context = AsyncOpenAI(
+                api_key=p_api_key,
+                base_url=p_base_url,
+                timeout=request_timeout,
+            )
+        except TypeError as constructor_error:
+            if "timeout" not in str(constructor_error).lower():
+                raise
+            client_context = AsyncOpenAI(api_key=p_api_key, base_url=p_base_url)
+        async with client_context as client:
+            response = await client.chat.completions.create(
+                model=p_model,
+                messages=messages,
+                max_tokens=max_tokens if profile is None else (profile.max_tokens if max_tokens is None else max_tokens),
+                temperature=temperature if profile is None else (profile.temperature if temperature is None else temperature),
+                top_p=settings.llm.top_p if profile is None else profile.top_p,
+                frequency_penalty=settings.llm.frequency_penalty if profile is None else profile.frequency_penalty,
+                presence_penalty=settings.llm.presence_penalty if profile is None else profile.presence_penalty,
+                stream=True,
+            )
+            async for chunk in response:
+                choices = chunk.choices if chunk.choices else []
+                if choices:
+                    delta = choices[0].delta
+                    if delta and delta.content:
+                        yield delta.content
+
     for profile in candidates:
         if profile is not None and profile.name in _UNAVAILABLE_PROFILES:
             continue
         p_model = model or (profile.model if profile is not None else settings.llm.model)
         p_api_key = api_key or (profile.api_key if profile is not None else settings.llm.api_key)
         p_base_url = (base_url or (profile.base_url if profile is not None else settings.llm.base_url) or '').strip()
-        try:
-            emitted = False
-            async with AsyncOpenAI(api_key=p_api_key, base_url=p_base_url) as client:
-                response = await client.chat.completions.create(
-                    model=p_model,
-                    messages=messages,
-                    max_tokens=max_tokens if profile is None else (profile.max_tokens if max_tokens is None else max_tokens),
-                    temperature=temperature if profile is None else (profile.temperature if temperature is None else temperature),
-                    top_p=settings.llm.top_p if profile is None else profile.top_p,
-                    frequency_penalty=settings.llm.frequency_penalty if profile is None else profile.frequency_penalty,
-                    presence_penalty=settings.llm.presence_penalty if profile is None else profile.presence_penalty,
-                    stream=True,
-                )
-                async for chunk in response:
-                    choices = chunk.choices if chunk.choices else []
-                    if choices:
-                        delta = choices[0].delta
-                        if delta and delta.content:
-                            emitted = True
-                            yield delta.content
-            return
-        except Exception as exc:
-            last_error = exc
-            if emitted:
-                raise
-            if profile is not None and _is_auth_error(exc):
-                _UNAVAILABLE_PROFILES.add(profile.name)
-                logger.error("Disabling streaming LLM profile '%s' after authentication failure", profile.name)
-            logger.warning("Streaming LLM call failed on profile '%s': %s; trying configured fallback", getattr(profile, 'name', 'direct'), exc)
-            continue
+        emitted = False
+        for attempt in range(_TIMEOUT_RETRIES + 1):
+            try:
+                # This is an inactivity/read timeout, not a total generation
+                # deadline. Each received chunk resets the provider timer.
+                async for token in _stream_profile(profile, p_model, p_api_key, p_base_url):
+                    emitted = True
+                    yield token
+                return
+            except Exception as exc:
+                last_error = exc
+                if emitted:
+                    raise
+                if _is_timeout_error(exc) and attempt < _TIMEOUT_RETRIES:
+                    delay = min(2 ** attempt, 8)
+                    logger.warning(
+                        "Streaming LLM timeout on profile '%s'; retrying same profile after %ss (%s/%s)",
+                        getattr(profile, "name", "direct"), delay, attempt + 1, _TIMEOUT_RETRIES,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                if profile is not None and _is_auth_error(exc):
+                    _UNAVAILABLE_PROFILES.add(profile.name)
+                    logger.error("Disabling streaming LLM profile '%s' after authentication failure", profile.name)
+                logger.warning("Streaming LLM call failed on profile '%s': %s; trying configured fallback", getattr(profile, 'name', 'direct'), exc)
+                break
     if last_error is not None:
         raise last_error
 

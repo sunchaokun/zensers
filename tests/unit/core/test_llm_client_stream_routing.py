@@ -85,6 +85,52 @@ async def test_stream_uses_configured_default_after_auth_failure():
 
 
 @pytest.mark.asyncio
+async def test_stream_retries_same_profile_timeout_before_provider_fallback():
+    import src.core.llm_client as mod
+
+    primary = LLMProfile(name="primary", provider="mimo", api_key="primary-key", base_url="https://primary", model="mimo-v2.5")
+    backup = LLMProfile(name="backup", provider="local", api_key="backup-key", base_url="http://local", model="local")
+    registry = LLMProfileRegistry(profiles={"primary": primary, "backup": backup}, default_profile="primary", fallback_chain=["primary", "backup"])
+    old_router = mod._router
+    old_unavailable = set(mod._UNAVAILABLE_PROFILES)
+    calls = []
+
+    class _RetryOpenAI:
+        def __init__(self, **kwargs):
+            self.api_key = kwargs["api_key"]
+            self.chat = type("Chat", (), {"completions": self})()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def create(self, **kwargs):
+            calls.append(self.api_key)
+            if self.api_key == "primary-key" and calls.count("primary-key") == 1:
+                raise TimeoutError("provider timed out")
+
+            async def response():
+                yield _Chunk()
+            return response()
+
+    mod._UNAVAILABLE_PROFILES.clear()
+    try:
+        mod.init_llm_infrastructure(registry)
+        with patch("openai.AsyncOpenAI", _RetryOpenAI):
+            tokens = [token async for token in mod.call_llm_stream("hello")]
+    finally:
+        mod._router = old_router
+        mod._UNAVAILABLE_PROFILES.clear()
+        mod._UNAVAILABLE_PROFILES.update(old_unavailable)
+
+    assert tokens == ["ok"]
+    assert calls[:2] == ["primary-key", "primary-key"]
+    assert "backup-key" not in calls
+
+
+@pytest.mark.asyncio
 async def test_stream_does_not_retry_after_partial_output():
     import src.core.llm_client as mod
 
