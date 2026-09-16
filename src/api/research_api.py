@@ -4801,6 +4801,34 @@ IMPORTANT: The DEFAULT action for ambiguous messages like "继续" is resume_res
                 logger.warning(f"Recheck quality failed: {result.get('error', 'unknown')}")
                 return None
 
+            # A recheck is part of the persisted quality lifecycle, not only
+            # an SSE notification. Keep the current version metadata while
+            # replacing the summary produced by the checker.
+            quality_data = session.get("quality_state")
+            if isinstance(quality_data, dict):
+                import copy
+                quality_data = copy.deepcopy(quality_data)
+                quality_data["overall_score"] = result.get(
+                    "quality_score", quality_data.get("overall_score", 0)
+                )
+                quality_data["overall_status"] = (
+                    "passed" if result.get("passed", False) else "warning"
+                )
+                quality_data["phase"] = "reviewing"
+                section_results = result.get("section_results") or (
+                    result.get("check_details", {}).get("section_quality", {}).get(
+                        "section_results", {}
+                    ) if isinstance(result.get("check_details"), dict) else {}
+                )
+                if isinstance(section_results, dict) and section_results:
+                    quality_data["section_scores"] = section_results
+                quality_data["last_recheck"] = {
+                    "quality_score": result.get("quality_score", 0),
+                    "passed": bool(result.get("passed", False)),
+                    "issues": list(result.get("issues", []) or []),
+                }
+                session["quality_state"] = quality_data
+
             if push_preview:
                 SessionStreamer.push_quality_result(session_id, result)
 
