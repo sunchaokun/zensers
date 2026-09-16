@@ -82,6 +82,12 @@ class ResearchResultMeta:
     
     # 用户信息
     user_id: Optional[str] = None
+
+    # Delivery semantics are intentionally separate from file availability.
+    # A warning artifact may be delivered without being a formal report.
+    delivery_class: str = "unknown"
+    formal_complete: Optional[bool] = None
+    quality_gate_status: str = ""
     
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""
@@ -96,7 +102,10 @@ class ResearchResultMeta:
             "generated_formats": self.generated_formats,
             "document_requests": self.document_requests,
             "document_paths": self.document_paths,
-            "user_id": self.user_id
+            "user_id": self.user_id,
+            "delivery_class": self.delivery_class,
+            "formal_complete": self.formal_complete,
+            "quality_gate_status": self.quality_gate_status,
         }
     
     @classmethod
@@ -114,6 +123,17 @@ class ResearchResultMeta:
         except ValueError as e:
             raise ValueError(f"Invalid status value: {data['status']}") from e
         
+        formal_complete = data.get("formal_complete")
+        quality_gate_status = data.get("quality_gate_status", "")
+        delivery_class = data.get("delivery_class", "")
+        if not delivery_class:
+            if formal_complete is True and quality_gate_status not in {"blocked", "degraded"}:
+                delivery_class = "formal_ready"
+            elif data.get("document_paths") or data.get("generated_formats"):
+                delivery_class = "available_with_warnings"
+            else:
+                delivery_class = "missing"
+
         return cls(
             task_id=data["task_id"],
             title=data["title"],
@@ -125,7 +145,10 @@ class ResearchResultMeta:
             generated_formats=data.get("generated_formats", []),
             document_requests=data.get("document_requests", []),
             document_paths=data.get("document_paths", []),
-            user_id=data.get("user_id")
+            user_id=data.get("user_id"),
+            delivery_class=delivery_class,
+            formal_complete=formal_complete,
+            quality_gate_status=quality_gate_status,
         )
 
 
@@ -288,46 +311,120 @@ class ResearchResultStore:
             new_dps = result.get("data_points", [])
             new_srcs = result.get("sources", [])
 
-            def _merge_url_records(records: List[Any]) -> List[Any]:
-                """Merge same-URL records without discarding late evidence.
+            def _merge_url_records(records: List[Any], kind: str) -> List[Any]:
+                """Merge records without collapsing different metric scopes.
 
                 Collection is incremental: an early search result may only
                 contain a URL, while a later scrape adds the evidence and
-                provenance fields. URL deduplication must therefore merge
-                non-empty fields instead of keeping the first record.
+                provenance fields. For structured data points, URL alone is
+                not an identity because one source can contain multiple
+                metrics, periods, regions, or populations.
                 """
-                merged: List[Any] = []
-                by_url: Dict[str, int] = {}
+                def _url(record: Dict[str, Any]) -> str:
+                    return str(
+                        record.get("source_url", "")
+                        or record.get("url", "")
+                        or record.get("href", "")
+                        or ""
+                    ).strip()
+
+                def _merge(left: Dict[str, Any], right: Dict[str, Any]) -> Dict[str, Any]:
+                    combined = dict(left)
+                    for field_name, value in right.items():
+                        if value not in (None, "", [], {}):
+                            combined[field_name] = value
+                    return combined
+
+                # Sources are URL-identified. Data points are different: a URL
+                # may contain several metrics/scopes, but an early URL-only
+                # checkpoint is an upgradeable placeholder. Resolve each URL
+                # group first so that placeholder -> structured evidence can
+                # merge without collapsing two genuinely different metrics.
+                if kind == "source":
+                    merged: List[Any] = []
+                    by_key: Dict[str, int] = {}
+                    for record in records:
+                        if not isinstance(record, dict):
+                            merged.append(record)
+                            continue
+                        merge_key = "source:" + _url(record) if _url(record) else ""
+                        if not merge_key or merge_key not in by_key:
+                            if merge_key:
+                                by_key[merge_key] = len(merged)
+                            merged.append(dict(record))
+                            continue
+                        merged[by_key[merge_key]] = _merge(
+                            merged[by_key[merge_key]], record
+                        )
+                    return merged
+
+                grouped: Dict[str, List[Any]] = {}
+                no_url: List[Any] = []
                 for record in records:
                     if not isinstance(record, dict):
-                        merged.append(record)
+                        no_url.append(record)
                         continue
-                    url = str(record.get("url", "") or record.get("href", "") or "").strip()
-                    if not url or url not in by_url:
-                        if url:
-                            by_url[url] = len(merged)
-                        merged.append(dict(record))
-                        continue
-                    existing_record = merged[by_url[url]]
-                    if not isinstance(existing_record, dict):
-                        merged[by_url[url]] = dict(record)
-                        continue
-                    combined = dict(existing_record)
-                    for key, value in record.items():
-                        if value not in (None, "", [], {}):
-                            combined[key] = value
-                    merged[by_url[url]] = combined
+                    url = _url(record)
+                    if url:
+                        grouped.setdefault(url, []).append(record)
+                    else:
+                        no_url.append(record)
+
+                merged = list(no_url)
+                for url_records in grouped.values():
+                    structured: Dict[str, Dict[str, Any]] = {}
+                    placeholders: List[Dict[str, Any]] = []
+                    for record in url_records:
+                        evidence_id = str(record.get("evidence_id", "") or "").strip()
+                        provenance_id = str(record.get("provenance_id", "") or "").strip()
+                        metric = str(record.get("metric", "") or "").strip()
+                        scope = tuple(
+                            str(record.get(field, "") or "").strip()
+                            for field in ("unit", "period", "geographic_scope", "population")
+                        )
+                        if evidence_id:
+                            identity = ("evidence", evidence_id)
+                        elif provenance_id:
+                            identity = ("provenance", provenance_id)
+                        elif metric:
+                            identity = ("metric", metric, *scope)
+                        else:
+                            placeholders.append(record)
+                            continue
+                        key = json.dumps(identity, ensure_ascii=False, default=str)
+                        structured[key] = (
+                            _merge(structured[key], record)
+                            if key in structured
+                            else dict(record)
+                        )
+
+                    # A placeholder is safe to upgrade only when the URL has a
+                    # single structured identity. If there are multiple metric
+                    # identities, retain the placeholder rather than guessing.
+                    if len(structured) == 1 and placeholders:
+                        key = next(iter(structured))
+                        for placeholder in placeholders:
+                            structured[key] = _merge(structured[key], placeholder)
+                        placeholders = []
+                    elif len(structured) == 0 and placeholders:
+                        merged_placeholder = dict(placeholders[0])
+                        for placeholder in placeholders[1:]:
+                            merged_placeholder = _merge(merged_placeholder, placeholder)
+                        placeholders = [merged_placeholder]
+
+                    merged.extend(structured.values())
+                    merged.extend(placeholders)
                 return merged
         
             if existing:
                 exist_dps = existing.get("data_points", [])
                 exist_srcs = existing.get("sources", [])
 
-                merged_dps = _merge_url_records(exist_dps + new_dps)
-                merged_srcs = _merge_url_records(exist_srcs + new_srcs)
+                merged_dps = _merge_url_records(exist_dps + new_dps, "data_point")
+                merged_srcs = _merge_url_records(exist_srcs + new_srcs, "source")
             else:
-                merged_dps = _merge_url_records(new_dps)
-                merged_srcs = _merge_url_records(new_srcs)
+                merged_dps = _merge_url_records(new_dps, "data_point")
+                merged_srcs = _merge_url_records(new_srcs, "source")
         
             # R2-FIX: merge completed_agents and agent_contents instead of overwriting
             new_completed = result.get("completed_agents", [])
@@ -428,6 +525,8 @@ class ResearchResultStore:
                 "coverage_warnings", "quality", "quality_metadata",
                 "report_version", "report_context", "defense_audit",
                 "quality_gate_status", "formal_complete", "l1_l5_recheck",
+                "delivery_class", "artifact_delivery_class", "artifact_status",
+                "defense_loop",
             ):
                 if field in result:
                     result_data[field] = result[field]
@@ -447,6 +546,9 @@ class ResearchResultStore:
                 document_paths = existing_meta.document_paths
                 output_format = existing_meta.output_format
                 completed_at = datetime.now() if status == ResearchStatus.COMPLETED else existing_meta.completed_at
+                delivery_class = existing_meta.delivery_class
+                formal_complete = existing_meta.formal_complete
+                quality_gate_status = existing_meta.quality_gate_status
             else:
                 title = new_title
                 topic = new_topic
@@ -456,6 +558,12 @@ class ResearchResultStore:
                 document_paths = []
                 output_format = None
                 completed_at = datetime.now() if status == ResearchStatus.COMPLETED else None
+                delivery_class = "unknown"
+                formal_complete = None
+                quality_gate_status = ""
+            delivery_class = result.get("delivery_class", delivery_class)
+            formal_complete = result.get("formal_complete", formal_complete)
+            quality_gate_status = result.get("quality_gate_status", quality_gate_status)
             metadata = ResearchResultMeta(
                 task_id=task_id,
                 title=title,
@@ -468,6 +576,9 @@ class ResearchResultStore:
                 document_requests=document_requests,
                 document_paths=document_paths,
                 output_format=output_format,
+                delivery_class=delivery_class,
+                formal_complete=formal_complete,
+                quality_gate_status=quality_gate_status,
             )
         
             self._save_metadata(task_id, metadata)

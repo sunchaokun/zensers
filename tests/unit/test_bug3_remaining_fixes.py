@@ -214,7 +214,7 @@ class TestFix4dResultStoreMerge:
         src_urls = [s.get("url") for s in loaded.get("sources", [])]
         assert src_urls == ["http://src1.com", "http://src2.com"], f"got src urls: {src_urls}"
 
-    def test_save_result_dedup_preserves_first_value(self, tmp_path):
+    def test_save_result_dedup_merges_late_evidence(self, tmp_path):
         store = ResearchResultStore(storage_path=str(tmp_path))
         task_id = "test_dedup_first_001"
 
@@ -228,7 +228,31 @@ class TestFix4dResultStoreMerge:
         loaded = store.load_result(task_id)
         dps = loaded.get("data_points", [])
         assert len(dps) == 1
-        assert dps[0]["value"] == "first"
+        # A later collection pass may provide fresher evidence for the same
+        # URL, so non-empty fields from that pass must be retained.
+        assert dps[0]["value"] == "second"
+
+    def test_save_result_upgrades_url_placeholder_to_structured_evidence(self, tmp_path):
+        store = ResearchResultStore(storage_path=str(tmp_path))
+        task_id = "test_dedup_upgrade_001"
+
+        store.save_result(task_id, {
+            "data_points": [{"url": "http://a.com"}],
+        })
+        store.save_result(task_id, {
+            "data_points": [{
+                "source_url": "http://a.com",
+                "metric": "出货量",
+                "value": "100",
+                "unit": "万台",
+                "evidence_id": "ev-a",
+            }],
+        })
+
+        dps = store.load_result(task_id).get("data_points", [])
+        assert len(dps) == 1
+        assert dps[0]["metric"] == "出货量"
+        assert dps[0]["evidence_id"] == "ev-a"
 
     def test_save_result_first_save_no_existing(self, tmp_path):
         store = ResearchResultStore(storage_path=str(tmp_path))
