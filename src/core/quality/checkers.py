@@ -684,6 +684,31 @@ class ReportQualityChecker(BaseQualityChecker):
         
         metric_values = defaultdict(list)
 
+        def _scope_token(text: str, patterns: tuple[tuple[str, str], ...]) -> str:
+            for token, pattern in patterns:
+                if re.search(pattern, text, flags=re.IGNORECASE):
+                    return token
+            return "unknown"
+
+        geographic_patterns = (
+            ("china", r"中国|国内|境内"),
+            ("global", r"全球|世界|国际"),
+            ("usa", r"美国|北美"),
+            ("europe", r"欧洲|欧盟"),
+            ("asia_pacific", r"亚太"),
+        )
+        period_patterns = (
+            ("quarter", r"季度|Q[1-4]"),
+            ("month", r"月度|月份"),
+            ("half_year", r"上半年|下半年"),
+            ("annual", r"年度|全年"),
+        )
+        population_patterns = (
+            ("consumer", r"消费者|个人用户"),
+            ("enterprise", r"企业客户|企业用户"),
+            ("user", r"用户|活跃用户"),
+        )
+
         section_texts = []
         for idx, s in enumerate(sections):
             text = s.get("content", "") if isinstance(s, dict) else (s if isinstance(s, str) else "")
@@ -708,7 +733,14 @@ class ReportQualityChecker(BaseQualityChecker):
                             caliber_parts.append('扣非')
                         caliber = '_'.join(caliber_parts) if caliber_parts else 'default'
                         
-                        metric_values[f"{metric_name}_{year}_{caliber}"].append((value, sid))
+                        geographic_scope = _scope_token(window, geographic_patterns)
+                        period_scope = _scope_token(window, period_patterns)
+                        population_scope = _scope_token(window, population_patterns)
+
+                        metric_values[
+                            (metric_name, year, caliber, geographic_scope,
+                             period_scope, population_scope)
+                        ].append((value, sid))
                     except (ValueError, IndexError):
                         continue
         
@@ -716,8 +748,7 @@ class ReportQualityChecker(BaseQualityChecker):
         total = 0
         for key, entries in metric_values.items():
             if len(entries) >= 2:
-                parts = key.split('_')
-                year = parts[1] if len(parts) >= 2 else "unknown"
+                year = key[1] if len(key) >= 2 else "unknown"
                 if year == "unknown":
                     continue
                 total += 1

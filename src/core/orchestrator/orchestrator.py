@@ -3343,9 +3343,16 @@ class ResearchOrchestrator:
                                                 self._apply_quality_adjustment(
                                                     s, adj.get("adjustment")
                                                 )
+                                # The repair payload is the source for both
+                                # the next quality pass and the final
+                                # document. Keeping the old reference here
+                                # caused a successful repair to be audited and
+                                # rendered from stale content.
+                                if isinstance(aggregated_dict, dict):
+                                    research_result_data = aggregated_dict
                                 preview_input = {
                                     "action": "produce_document",
-                                    "research_result": aggregated_dict,
+                                    "research_result": research_result_data,
                                     "output_format": "html",
                                     "output_dir": str(Path(output_path).parent),
                                     "task_id": task_id,

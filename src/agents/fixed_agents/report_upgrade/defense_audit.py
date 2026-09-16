@@ -20,6 +20,9 @@ _QUANTIFIED_NUMBER = re.compile(
 _SCOPE_DISCLAIMER = re.compile(
     r"不同口径|不直接比较|不可直接合并|分别估算|仅作参考|统计范围不同|非同一指标|口径不同"
 )
+_SCOPE_COMPARISON = re.compile(
+    r"相比|相较|对比|比较|其中|而中国|中国.*高于|中国.*低于|全球.*高于|全球.*低于"
+)
 
 
 def _norm_value(value: Any) -> str:
