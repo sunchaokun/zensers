@@ -488,7 +488,7 @@ async def call_llm(
                     "message": f"Primary: {primary_err}; Fallback: {fallback_err}",
                     "error": "llm_call_failed",
                 })
-    return _finish({"success": False, "message": str(primary_err), "error": "llm_call_failed"})
+        return _finish({"success": False, "message": str(primary_err), "error": "llm_call_failed"})
 
 
 async def call_llm_with_tools(
@@ -517,12 +517,23 @@ async def call_llm_with_tools(
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": prompt})
-    client_timeout = float(os.environ.get("LLM_REQUEST_TIMEOUT_SECONDS", "120"))
-    client = AsyncOpenAI(
-        api_key=settings.llm.api_key,
-        base_url=(settings.llm.base_url or "").strip(),
-        timeout=client_timeout,
-    )
+    client_timeout = float(os.environ.get("LLM_REQUEST_TIMEOUT_SECONDS", "600"))
+    try:
+        client = AsyncOpenAI(
+            api_key=settings.llm.api_key,
+            base_url=(settings.llm.base_url or "").strip(),
+            timeout=client_timeout,
+        )
+    except TypeError as constructor_error:
+        # Older OpenAI-compatible shims may not accept the SDK timeout
+        # keyword. Keep the compatibility path usable while real clients
+        # still receive the configured 600s transport timeout.
+        if "timeout" not in str(constructor_error).lower():
+            raise
+        client = AsyncOpenAI(
+            api_key=settings.llm.api_key,
+            base_url=(settings.llm.base_url or "").strip(),
+        )
     try:
         for _ in range(max(0, int(max_tool_rounds)) + 1):
             response = await client.chat.completions.create(
@@ -626,7 +637,7 @@ async def _call_llm_api(
 
     _api_key = api_key or settings.llm.api_key
     _base_url = base_url or settings.llm.base_url
-    request_timeout = float(os.environ.get("LLM_REQUEST_TIMEOUT_SECONDS", "120"))
+    request_timeout = float(os.environ.get("LLM_REQUEST_TIMEOUT_SECONDS", "600"))
     messages = []
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})

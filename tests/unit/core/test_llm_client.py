@@ -281,3 +281,17 @@ class TestCallLlmErrorDetailPropagation:
                 assert result["success"] is False
                 assert "Primary:" in result["message"]
                 assert "Fallback:" in result["message"]
+
+    @pytest.mark.asyncio
+    async def test_primary_failure_without_fallback_returns_primary_error(self):
+        """A direct call without a fallback must not reference an out-of-scope exception."""
+        settings = _mock_settings()
+        settings.llm.cheap_model = ""
+        with patch("src.core.llm_client.settings", settings):
+            with patch("src.core.llm_client._call_llm_api", new_callable=AsyncMock) as mock_api:
+                mock_api.side_effect = Exception("provider unavailable")
+                from src.core.llm_client import call_llm
+                result = await call_llm(prompt="test")
+                assert result["success"] is False
+                assert result["message"] == "provider unavailable"
+                assert result["error"] == "llm_call_failed"
