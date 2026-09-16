@@ -120,6 +120,69 @@ def test_final_report_boundary_does_not_downgrade_unknown_report_id():
     assert exc_info.value.code == "unknown_section_id"
 
 
+def test_final_report_boundary_rejects_manifest_title_mismatch():
+    requirement = type("Requirement", (), {"section_details": []})()
+    task_structure = {
+        "section_data_specs": [{"section_id": "section_0", "name": "市场规模", "sub_sections": []}],
+        "section_manifest": [{
+            "section_id": "section_0",
+            "title": "市场规模",
+            "output_slot": "body",
+            "producer_agent_ids": {"analysis": "analysis_0"},
+        }],
+    }
+    with pytest.raises(ManifestContractError) as exc_info:
+        _audit_report_manifest_contract(
+            requirement,
+            task_structure,
+            [{"agent_id": "analysis_0"}],
+            [{"section_id": "section_0"}],
+            {"sections": [{"section_id": "section_0", "title": "数据精准修补", "content": "body"}]},
+        )
+    assert exc_info.value.code == "report_title_mismatch"
+
+
+def test_final_audit_uses_expanded_runtime_sections_when_specs_keep_display_ids():
+    """Raw framework specs must not split the final runtime identity space."""
+    requirement = type("Requirement", (), {
+        "section_details": [
+            {"id": "市场规模与出货量", "name": "市场规模与出货量"},
+            {"id": "品牌竞争格局", "name": "品牌竞争格局"},
+        ]
+    })()
+    task_structure = {
+        "sections": [
+            {"section_id": "section_0", "section_name": "市场规模与出货量"},
+            {"section_id": "section_1", "section_name": "品牌竞争格局"},
+        ],
+        "section_data_specs": [
+            {"section_id": "市场规模与出货量", "name": "市场规模与出货量", "sub_sections": []},
+            {"section_id": "品牌竞争格局", "name": "品牌竞争格局", "sub_sections": []},
+        ],
+        "section_manifest": [
+            {"section_id": "section_0", "output_slot": "body", "producer_agent_ids": {"analysis": "a0"}},
+            {"section_id": "section_1", "output_slot": "body", "producer_agent_ids": {"analysis": "a1"}},
+        ],
+    }
+    report = {
+        "sections": [
+            {"section_id": "section_0", "content": "市场规模"},
+            {"section_id": "section_1", "content": "品牌竞争"},
+        ]
+    }
+
+    audit = _audit_report_manifest_contract(
+        requirement,
+        task_structure,
+        [{"agent_id": "a0"}, {"agent_id": "a1"}],
+        [{"section_id": "section_0"}, {"section_id": "section_1"}],
+        report,
+    )
+
+    assert audit["status"] == "passed"
+    assert audit["framework_leaf_ids"] == ["section_0", "section_1"]
+
+
 def test_manifest_synthesis_uses_exact_id_and_dedicated_output_slots():
     manifest = [
         {"section_id": "a", "title": "市场规模", "role": "analysis", "output_slot": "body"},

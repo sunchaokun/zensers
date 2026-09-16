@@ -179,6 +179,26 @@ def validate_manifest_contract(
     report_duplicates = _duplicates(report_ids)
     if report_duplicates:
         raise ManifestContractError("duplicate_section_id", {"ids": sorted(report_duplicates)})
+    # Section identity is not enough: the report agent must preserve the
+    # manifest's user-facing title exactly.  Otherwise a correct section ID
+    # can still render the wrong chapter (the original quality defect).
+    manifest_titles = {
+        _id(item): _text(item.get("section_name") or item.get("title") or item.get("name"))
+        for item in manifest_items
+        if _text(item.get("output_slot")).lower() == "body"
+    }
+    title_mismatches = {}
+    for item in report_sections:
+        item_id = _id(item)
+        expected_title = manifest_titles.get(item_id, "")
+        actual_title = _text(item.get("title") or item.get("name"))
+        if expected_title and actual_title != expected_title:
+            title_mismatches[item_id] = {
+                "expected": expected_title,
+                "actual": actual_title,
+            }
+    if title_mismatches:
+        raise ManifestContractError("report_title_mismatch", {"sections": title_mismatches})
     actual_body_ids = {value for value in report_ids if value}
     unknown = actual_body_ids - planned_body_ids
     missing = planned_body_ids - actual_body_ids
