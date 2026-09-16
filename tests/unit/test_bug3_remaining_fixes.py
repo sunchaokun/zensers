@@ -254,6 +254,21 @@ class TestFix4dResultStoreMerge:
         assert dps[0]["metric"] == "出货量"
         assert dps[0]["evidence_id"] == "ev-a"
 
+    def test_save_result_keeps_unidentifiable_url_placeholders_separate(self, tmp_path):
+        store = ResearchResultStore(storage_path=str(tmp_path))
+        task_id = "test_dedup_placeholders_001"
+
+        store.save_result(task_id, {
+            "data_points": [
+                {"url": "http://a.com", "title": "候选一"},
+                {"url": "http://a.com", "title": "候选二"},
+            ],
+        })
+
+        dps = store.load_result(task_id).get("data_points", [])
+        assert len(dps) == 2
+        assert {item["title"] for item in dps} == {"候选一", "候选二"}
+
     def test_save_result_first_save_no_existing(self, tmp_path):
         store = ResearchResultStore(storage_path=str(tmp_path))
         task_id = "test_first_save_001"

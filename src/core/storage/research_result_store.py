@@ -406,11 +406,29 @@ class ResearchResultStore:
                         for placeholder in placeholders:
                             structured[key] = _merge(structured[key], placeholder)
                         placeholders = []
-                    elif len(structured) == 0 and placeholders:
-                        merged_placeholder = dict(placeholders[0])
-                        for placeholder in placeholders[1:]:
-                            merged_placeholder = _merge(merged_placeholder, placeholder)
-                        placeholders = [merged_placeholder]
+                    # Without a metric or evidence identity there is no safe
+                    # basis for deciding that two placeholders are the same
+                    # data point. Keep each one until a later pass supplies
+                    # enough identity to perform an unambiguous upgrade.
+                    if len(structured) == 0 and len(placeholders) > 1:
+                        legacy_value_records = [
+                            item for item in placeholders
+                            if item.get("value") not in (None, "", [], {})
+                        ]
+                        opaque_placeholders = [
+                            item for item in placeholders
+                            if item.get("value") in (None, "", [], {})
+                        ]
+                        if legacy_value_records:
+                            merged_legacy = dict(legacy_value_records[0])
+                            for item in legacy_value_records[1:]:
+                                merged_legacy = _merge(merged_legacy, item)
+                            opaque_placeholders = [merged_legacy] + opaque_placeholders
+                        unique_placeholders: List[Dict[str, Any]] = []
+                        for item in opaque_placeholders:
+                            if item not in unique_placeholders:
+                                unique_placeholders.append(item)
+                        placeholders = unique_placeholders
 
                     merged.extend(structured.values())
                     merged.extend(placeholders)
