@@ -605,9 +605,20 @@ class TaskStructureAnalyzer:
                         section.content_dependency.append(dependency.from_section)
                     break
 
-        # If LLM didn't output dependencies, use rule inference
-        if not dependencies:
-            dependencies = self._infer_dependencies(sections, intent)
+        # LLM output can be only partially complete. Always supplement the
+        # accepted edges with deterministic stage-boundary dependencies so a
+        # single valid synthesis edge cannot suppress the required
+        # data_collection -> analysis edges.
+        inferred_dependencies = self._infer_dependencies(sections, intent)
+        for dependency in inferred_dependencies:
+            key = (
+                dependency.from_section,
+                dependency.to_section,
+                dependency.dependency_type,
+            )
+            if key not in seen_dependencies:
+                seen_dependencies.add(key)
+                dependencies.append(dependency)
 
         # Build execution graph
         execution_graph = self._build_execution_graph(sections, dependencies)
