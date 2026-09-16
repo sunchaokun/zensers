@@ -233,10 +233,22 @@ class TestDataRepairAgentParseExtraction:
     def test_valid_json_found_true(self, agent):
         gap = make_gap()
         raw = '{"found": true, "value": "2000", "unit": "\u4ebf\u5143", "source": "iimedia.cn", "source_title": "\u62a5\u544a", "confidence": 0.9}'
-        result = agent._parse_extraction(raw, gap)
+        raw = raw.replace('"confidence": 0.9}', '"source_url": "https://iimedia.cn/report", "confidence": 0.9}')
+        result = agent._parse_extraction(raw, gap, evidence_candidates=[{
+            "title": "报告", "url": "https://iimedia.cn/report",
+            "evidence_id": "ev-1", "provenance_id": "prov-1",
+        }])
         assert result.found is True
         assert result.value == "2000"
         assert result.unit == "\u4ebf\u5143"
+
+    def test_found_true_without_traceable_evidence_is_downgraded(self, agent):
+        result = agent._parse_extraction(
+            '{"found": true, "value": "123", "unit": "亿元"}',
+            make_gap(),
+        )
+
+        assert result.found is False
 
     def test_valid_json_found_false(self, agent):
         gap = make_gap()

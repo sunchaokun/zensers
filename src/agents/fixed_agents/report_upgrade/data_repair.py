@@ -178,9 +178,17 @@ class DataRepairAgent:
                         if (source_url and candidate.get("url") == source_url)
                         or (source_title and candidate.get("title") == source_title)
                     ]
+                    if source_url and len(matched) != 1:
+                        return DataRepairResult(gap=gap, found=False)
                     selected = matched[0] if len(matched) == 1 else (
                         candidates[0] if len(candidates) == 1 else {}
                     )
+                    if not selected or not (
+                        selected.get("url")
+                        or selected.get("evidence_id")
+                        or selected.get("provenance_id")
+                    ):
+                        return DataRepairResult(gap=gap, found=False)
                     return DataRepairResult(
                         gap=gap,
                         found=True,
