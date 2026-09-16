@@ -211,6 +211,38 @@ class TestExecutionScheduler:
 
         assert converted == ["agent_c", "agent_a", "agent_b"]
 
+    def test_decomposition_dependency_conversion_preserves_underscored_section(self):
+        """Legacy runtime IDs must match plan IDs with underscored sections."""
+        from src.core.orchestrator.execution.scheduler import ExecutionScheduler
+
+        scheduler = ExecutionScheduler()
+        converted = scheduler._convert_dependency_ids(
+            ["deep_analysis_1_市场_规模"],
+            {"research_市场_规模_2": Mock()},
+        )
+
+        assert converted == ["research_市场_规模_2"]
+
+    def test_decomposition_schedule_compatibility_lookup_preserves_underscored_section(self):
+        """Agent-to-spec compatibility lookup must use the same parser."""
+        from src.core.decomposition.strategies import AgentSpec, ResearchPhase
+        from src.core.orchestrator.execution.scheduler import ExecutionScheduler
+
+        plan = type("Plan", (), {
+            "phases": {
+                ResearchPhase.DEEP_ANALYSIS: [AgentSpec(
+                    agent_id="deep_analysis_1_市场_规模",
+                    agent_type="analysis", category="analysis",
+                    task_description="分析", dependencies=[],
+                )],
+            }
+        })()
+        agent = Mock(agent_id="research_市场_规模_2", context={}, category="research")
+
+        assert ExecutionScheduler().schedule_from_decomposition(plan, [agent]) == [
+            ["research_市场_规模_2"]
+        ]
+
 
 class TestScheduledAgent:
     """ScheduledAgent 测试"""

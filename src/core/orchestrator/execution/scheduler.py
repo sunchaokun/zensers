@@ -173,38 +173,20 @@ class ExecutionScheduler:
                 agent_id_lower = agent_id.lower()
                 candidates = []
                 for spec_id, spec_obj in agent_specs.items():
-                    spec_id_lower = spec_id.lower()
-                    agent_parts = agent_id_lower.split('_')
-                    spec_parts = spec_id_lower.split('_')
-                    
-                    # 检查是否包含相同的关键词
-                    if len(agent_parts) >= 2 and len(spec_parts) >= 3:
-                        # 提取章节名关键词
-                        # agent: research_市场规模_2 -> 章节=市场规模
-                        # spec: deep_analysis_1_市场规模 -> 章节=市场规模
-                        agent_section = agent_parts[1] if len(agent_parts) >= 3 else agent_parts[-1]
-                        spec_section = spec_parts[-1]
-                        
-                        # 如果章节名匹配
-                        if agent_section == spec_section or agent_section in spec_section or spec_section in agent_section:
-                            # 检查类型是否匹配
-                            agent_type = agent_parts[0] if agent_parts else ''
-                            
-                            # spec类型可能是组合词: deep_analysis, data_collection
-                            if spec_parts[0] in ['deep', 'data'] and len(spec_parts) >= 4:
-                                spec_type = '_'.join(spec_parts[:2])  # deep_analysis
-                            else:
-                                spec_type = spec_parts[0]  # synthesis
-                            
-                            # 类型映射: research -> deep_analysis, synthesis -> synthesis
-                            type_match = (
-                                agent_type == spec_type or
-                                (agent_type == 'research' and spec_type in ['deep_analysis', 'data_collection', 'data_validation']) or
-                                (agent_type == 'synthesis' and spec_type == 'synthesis')
-                            )
-                            
-                            if type_match:
-                                candidates.append((spec_id, spec_obj))
+                    agent_type, agent_section = self._parse_compatible_id(agent_id_lower)
+                    spec_type, spec_section = self._parse_compatible_id(spec_id)
+                    section_match = (
+                        agent_section == spec_section
+                        or agent_section in spec_section
+                        or spec_section in agent_section
+                    )
+                    type_match = (
+                        agent_type == spec_type
+                        or (agent_type == 'research' and spec_type in ['deep_analysis', 'data_collection', 'data_validation'])
+                        or (agent_type == 'synthesis' and spec_type == 'synthesis')
+                    )
+                    if section_match and type_match:
+                        candidates.append((spec_id, spec_obj))
                 if len(candidates) == 1:
                     spec_id, spec = candidates[0]
                     logger.warning(f"[Scheduler] 使用唯一兼容匹配: Agent {agent_id} -> AgentSpec {spec_id}")
@@ -432,6 +414,22 @@ class ExecutionScheduler:
             return agent.id
         else:
             return str(id(agent))
+
+    @staticmethod
+    def _parse_compatible_id(agent_id: str) -> Tuple[str, str]:
+        """Parse plan/runtime IDs without truncating underscored sections."""
+        parts = str(agent_id or "").lower().split("_")
+        if not parts:
+            return "", ""
+        if len(parts) >= 4 and parts[0] in {"deep", "data"} and parts[1] in {
+            "analysis", "collection", "validation"
+        } and parts[2].isdigit():
+            return "_".join(parts[:2]), "_".join(parts[3:])
+        if len(parts) >= 3 and parts[-1].isdigit():
+            return parts[0], "_".join(parts[1:-1])
+        if len(parts) >= 3 and parts[1].isdigit():
+            return parts[0], "_".join(parts[2:])
+        return parts[0], "_".join(parts[1:])
     
     def _resolve_dependencies(
         self,
@@ -495,39 +493,16 @@ class ExecutionScheduler:
                 converted.append(spec_dep_id)
                 continue
             
-            # 模糊匹配：提取章节名关键词
-            spec_parts = spec_dep_id.lower().split('_')
-            if len(spec_parts) < 3:  # 至少要有 type_index_section 格式
+            # 模糊匹配：按完整章节后缀解析，不能只取最后一段。
+            spec_type, spec_section = self._parse_compatible_id(spec_dep_id)
+            if not spec_type or not spec_section:
                 raise ValueError(
                     f"依赖格式非法，拒绝静默跳过: {spec_dep_id}"
                 )
             
-            # 提取章节名（最后一个部分）
-            spec_section = spec_parts[-1]
-            
-            # 提取类型（可能是前两个部分组合，如 deep_analysis）
-            # 格式: deep_analysis_1_市场规模 -> type='deep_analysis', index='1', section='市场规模'
-            if spec_parts[0] in ['deep', 'data'] and len(spec_parts) >= 4:
-                spec_type = '_'.join(spec_parts[:2])  # deep_analysis 或 data_collection
-            else:
-                spec_type = spec_parts[0]  # synthesis, report
-            
             candidates = []
             for actual_agent_id in agent_map:
-                actual_parts = actual_agent_id.lower().split('_')
-                if len(actual_parts) < 2:
-                    continue
-                
-                # 实际Agent ID格式: research_市场规模_2 或 synthesis_执行摘要_1
-                actual_type = actual_parts[0]  # research, synthesis
-                
-                # 章节名在中间或末尾
-                if len(actual_parts) >= 3:
-                    actual_section = actual_parts[1]  # research_市场规模_2 -> 市场规模
-                else:
-                    actual_section = actual_parts[-1] if len(actual_parts) >= 2 else ''
-                
-                # 类型映射
+                actual_type, actual_section = self._parse_compatible_id(actual_agent_id)
                 type_match = (
                     (spec_type in ['deep_analysis', 'data_collection', 'data_validation'] and actual_type == 'research') or
                     (spec_type == 'synthesis' and actual_type == 'synthesis') or
