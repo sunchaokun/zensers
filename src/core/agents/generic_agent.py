@@ -709,7 +709,7 @@ class GenericAgent(
                     
             # Phase 3: DEEP_ANALYSIS - use pre-collected data, apply analytical frameworks
             # These agents receive dependency-filtered data_points/sources from upstream phases.
-            # No search_skill is assigned (see ASPECT_SKILL_MAP in strategies.py).
+            # search_skill is available (via ASPECT_SKILL_MAP) for on-demand model/data lookup.
             if agent_category in ("market-analysis", "analysis", "financial-analysis"):
                 self._report_progress(f"Analyzing {aspect or topic}...", "analyzing")
                 aggregated_data_points = task.get("aggregated_data_points", [])
@@ -4505,8 +4505,16 @@ Output ONE type name only: fact_driven / inference_driven / forward_looking / as
             List of query strings (mix of Chinese and English)
         """
         queries = []
-        search_topic = self._extract_keywords(topic)
-        
+
+        # 使用 KeywordDeriver 结构化派生关键词
+        try:
+            from src.core.search.keyword_deriver import KeywordDeriver
+            deriver = KeywordDeriver()
+            kw = deriver.derive(topic, aspect or "")
+            search_topic = kw["core"][0] if kw["core"] else self._extract_keywords(topic)
+        except Exception:
+            search_topic = self._extract_keywords(topic)
+
         from datetime import datetime
         current_year = datetime.now().year
         prev_year = current_year - 1

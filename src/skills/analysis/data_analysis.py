@@ -49,7 +49,7 @@ class DataAnalysisSkill(Skill):
             return self._failure("topic is required")
 
         # Step 1: Extract structured numbers from data points
-        extracted = self._extract_numbers(data_points)
+        extracted = self._extract_numbers(data_points, topic=topic)
 
         # Step 2: Perform actual computation with pandas_agent
         calc_results = {}
@@ -79,65 +79,147 @@ class DataAnalysisSkill(Skill):
 
     # ============ Computation Layer ============
 
-    def _extract_numbers(self, data_points: List[Dict]) -> Dict:
-        """
-        Extract structured numbers from data points
-        
-        Returns three types of data:
-        - time_series: [{"year": 2024, "value": 100, "unit": "100 million"}, ...]
-        - market_shares: [{"company": "BYD", "share": 32.5}, ...]
-        - numeric_values: [100, 200, ...] (unordered values, for descriptive stats)
-        - summary: Extraction overview text description
-        """
+    _BRANDS = (
+        "华为", "苹果", "Apple", "vivo", "OPPO", "小米", "荣耀", "三星",
+        "Samsung", "传音", "一加", "realme", "iQOO", "红米",
+    )
+    _BRAND_ALT = "|".join(sorted((re.escape(b) for b in _BRANDS), key=len, reverse=True))
+    _PRICE_BAND_RE = re.compile(
+        r"美元以上|美元以下|\d+\s*[-~至到]\s*\d+\s*美元|价位段|价格段"
+    )
+    _POLICY_RE = re.compile(r"积分比例|购置税|免税额|新能源积分|配额")
+    _OFF_TOPIC_NEV_RE = re.compile(r"新能源|积分比例|购置税|乘用车")
+    _BRAND_SHARE_RE = re.compile(
+        rf"(?:({_BRAND_ALT})(?:(?!{_BRAND_ALT}).){{0,60}}?(?:市场份额|份额)\s*[：:]?\s*(\d+(?:\.\d+)?)\s*[%％])"
+        rf"|(?:({_BRAND_ALT})(?:(?!{_BRAND_ALT}).){{0,60}}?(\d+(?:\.\d+)?)\s*[%％](?:的)?(?:市场份额|份额))"
+    )
+
+    def _extract_numbers(self, data_points: List[Dict], topic: str = "") -> Dict:
+        """Extract numbers; keep price-band shares for analysis, but exclude them from concentration."""
         time_series = []
         market_shares = []
+        price_band_shares = []
         numeric_values = []
+        rejected = []
+        seen_shares = set()
+        seen_price_bands = set()
+        points = data_points if isinstance(data_points, list) else []
 
-        for dp in data_points[:200]:
-            text = f"{dp.get('title', '')} {dp.get('content', '')}"
+        for dp in points[:200]:
+            if not isinstance(dp, dict):
+                continue
+            data = dp.get("data") if isinstance(dp.get("data"), dict) else {}
+            title = str(dp.get("title") or "")
+            content = str(dp.get("content") or "")
+            metric = str(data.get("metric") or title)
+            text = f"{title} {content}"
+            source = dp.get("url", "")
 
-            # Extract time series data: year + value + unit
+            if self._is_off_topic(metric, title, content, topic):
+                rejected.append({"reason": "off_topic", "metric": metric})
+                continue
+            if self._is_policy_quota(metric, title):
+                rejected.append({"reason": "policy_quota", "metric": metric})
+                continue
+
+            if self._is_price_band(metric, title):
+                value = self._parse_percent(data.get("value"))
+                if value is not None:
+                    key = (metric, round(value, 4))
+                    if key not in seen_price_bands:
+                        seen_price_bands.add(key)
+                        period = str(data.get("period") or "")
+                        geographic_scope = str(data.get("geographic_scope") or "")
+                        price_band_shares.append({
+                            "metric": metric,
+                            "share": value,
+                            "period": period,
+                            "geographic_scope": geographic_scope,
+                            "source": source,
+                        })
+            else:
+                for company, share in self._iter_company_shares(metric, data, text):
+                    key = (company, round(share, 4))
+                    if key in seen_shares:
+                        continue
+                    seen_shares.add(key)
+                    market_shares.append({
+                        "company": company,
+                        "share": share,
+                        "source": source,
+                    })
+
             ts_matches = re.findall(
-                r'(20\d{2})[年\s]*.*?(\d+[\.\d]*)\s*(亿|万|千|百|%|亿元|万美元|亿欧元)',
-                text
+                r"(20\d{2})[年\s]*.*?(\d+[\.\d]*)\s*(亿|万|千|百|%|亿元|万美元|亿欧元)",
+                text,
             )
             for year, val, unit in ts_matches:
                 time_series.append({
                     "year": int(year),
                     "value": float(val),
                     "unit": unit,
-                    "source": dp.get("url", ""),
+                    "source": source,
                 })
 
-            # Extract market share: company name + percentage
-            share_matches = re.findall(
-                r'([\u4e00-\u9fa5\w]+)[：:]\s*(\d+[\.\d]*)\s*[%％]',
-                text
-            )
-            for company, share in share_matches:
-                market_shares.append({
-                    "company": company,
-                    "share": float(share),
-                    "source": dp.get("url", ""),
-                })
-
-            # Extract standalone numeric values
-            val_matches = re.findall(r'(\d+[\.\d]*)\s*(亿|万|千|百|元|美元)', text)
+            val_matches = re.findall(r"(\d+[\.\d]*)\s*(亿|万|千|百|元|美元)", text)
             for val, unit in val_matches:
                 numeric_values.append(float(val))
 
         return {
             "time_series": time_series,
             "market_shares": market_shares,
+            "price_band_shares": price_band_shares,
             "numeric_values": numeric_values,
             "summary": {
-                "data_points_total": len(data_points),
+                "data_points_total": len(points),
                 "time_series_count": len(time_series),
                 "market_shares_count": len(market_shares),
+                "price_band_shares_count": len(price_band_shares),
                 "has_time_series": len(time_series) >= 2,
                 "has_market_shares": len(market_shares) >= 2,
+                "rejected": rejected,
             },
         }
+
+    def _is_price_band(self, metric: str, title: str) -> bool:
+        return bool(self._PRICE_BAND_RE.search(f"{metric} {title}"))
+
+    def _is_policy_quota(self, metric: str, title: str) -> bool:
+        return bool(self._POLICY_RE.search(f"{metric} {title}"))
+
+    def _is_off_topic(self, metric: str, title: str, content: str, topic: str) -> bool:
+        if not topic:
+            return False
+        if "手机" not in topic and "smartphone" not in topic.lower():
+            return False
+        blob = f"{metric} {title} {content[:120]}"
+        return bool(self._OFF_TOPIC_NEV_RE.search(blob))
+
+    def _iter_company_shares(self, metric: str, data: Dict, text: str):
+        value = self._parse_percent(data.get("value"))
+        if value is not None:
+            for brand in self._BRANDS:
+                if brand in metric:
+                    yield brand, value
+                    break
+        for match in self._BRAND_SHARE_RE.finditer(text):
+            company = match.group(1) or match.group(3)
+            raw = match.group(2) or match.group(4)
+            if company and raw:
+                yield company, float(raw)
+
+    @staticmethod
+    def _parse_percent(value: Any) -> Optional[float]:
+        if value is None or isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        match = re.search(r"(\d+(?:\.\d+)?)\s*[%％]?", str(value))
+        if not match:
+            return None
+        if "%" not in str(value) and "％" not in str(value):
+            return None
+        return float(match.group(1))
 
     async def _calc_time_series(self, data: List[Dict]) -> Dict:
         """Calculate time series metrics with pandas"""
@@ -239,10 +321,22 @@ print(json.dumps(result, ensure_ascii=False))
         return result
 
     def _calc_concentration(self, shares: List[Dict]) -> Dict:
-        """Calculate market concentration (pure Python)"""
+        """Calculate market concentration; refuse if shares are not a valid market."""
+        if not shares:
+            return {"rejected": "no comparable company shares", "cr3": None, "cr5": None, "hhi": None}
         sorted_shares = sorted(shares, key=lambda x: x["share"], reverse=True)
         values = [s["share"] for s in sorted_shares]
         companies = [s["company"] for s in sorted_shares]
+        share_sum = round(sum(values), 2)
+        if share_sum > 105:
+            return {
+                "rejected": "share_sum_exceeds_100",
+                "share_sum": share_sum,
+                "total_companies": len(shares),
+                "cr3": None,
+                "cr5": None,
+                "hhi": None,
+            }
 
         result = {
             "total_companies": len(shares),
@@ -309,18 +403,23 @@ print(json.dumps(result, ensure_ascii=False))
 
         prompt = self._build_prompt(topic, aspect, extracted, calc_summary)
         result = await call_llm(prompt=prompt, system_prompt=(
-            "You are a senior data analyst.\n\n"
+            "You are a senior data analyst performing hypothesis-driven interpretation.\n\n"
             "## Work Style\n"
-            "1. The data in the 'Computed Results' section below is precisely calculated; cite it directly\n"
-            "2. Provide business interpretation on top of it: what does this number mean?\n"
-            "3. Do not recalculate or question the numbers in 'Computed Results'\n"
-            "4. If data is insufficient to support a conclusion, state it clearly\n\n"
-            "## Output Structure\n"
-            "### Key Metric -> Value -> Business Interpretation -> Data Source\n\n"
+            "1. Computed Results are machine output, not ground truth. Audit them before citing.\n"
+            "2. Reject a computed metric if CR>100, shares are not the same market/period/unit, years are unsorted or future-dated as facts, series mix industries, or CAGR uses start_year==end_year.\n"
+            "3. Do not interpret descriptive stats that mix incompatible units or populations.\n"
+            "4. If data is insufficient, say so; do not salvage a broken CR/HHI/CAGR with a story.\n\n"
+            "## Required moves\n"
+            "- 数据处置: accepted / rejected / needs_research / conditional for each computed metric\n"
+            "- 竞争假设: at least two explanations of the same facts\n"
+            "- 主因 / 次因: rank drivers; state when the ranking reverses\n"
+            "- 替代解释: at least one alternative that would change conclusion strength\n"
+            "- 结论校准: label 事实 / 推断 / 预测; state 失效条件\n"
+            "- 决策价值: advice only from surviving metrics, with a boundary. Use `因此建议` and phrase advice as `对厂商` or `对投资者`.\n\n"
             "## Output Standards\n"
-            "- Keep report units consistent (e.g., 100 million CNY / 10,000 vehicles)\n"
-            "- Quantify trend descriptions (CAGR x%, not 'steady growth')\n"
-            "- Explain business reasons for outliers"
+            "- Keep units and geographic口径 explicit\n"
+            "- Quantify only after口径 check (CAGR x%, not 'steady growth')\n"
+            "- Name institution/source when known; otherwise mark needs_research"
         ))
 
         return result.get("content", "") if result and result.get("success") else ""
@@ -348,11 +447,15 @@ print(json.dumps(result, ensure_ascii=False))
             if ms.get("market_structure"):
                 line += f", Structure={ms['market_structure']}"
             parts.append(line)
-            # Top companies
             tops = ms.get("top_3_companies", [])
             if tops:
                 items = [f'{c["company"]}={c["share"]}%' for c in tops]
                 parts.append(f'Top3: {"; ".join(items)}')
+
+        if calc_results.get("price_band_shares"):
+            pb = calc_results["price_band_shares"]
+            items = [f'{p["metric"]}={p["share"]}%' for p in pb[:8]]
+            parts.append(f"Price-band shares (not used for concentration): {'; '.join(items)}")
 
         if calc_results.get("descriptive"):
             ds = calc_results["descriptive"]
@@ -371,7 +474,8 @@ print(json.dumps(result, ensure_ascii=False))
         data_line = (
             f"Total {summary.get('data_points_total', 0)} data points, "
             f"including {summary.get('time_series_count', 0)} time series, "
-            f"{summary.get('market_shares_count', 0)} market shares"
+            f"{summary.get('market_shares_count', 0)} company shares, "
+            f"{summary.get('price_band_shares_count', 0)} price-band shares"
         )
 
         return f"""# Data Analysis Task
@@ -385,17 +489,18 @@ print(json.dumps(result, ensure_ascii=False))
 ## Data Overview
 {data_line}
 
-## Computed Results
+## Computed Results (audit before use; do not treat as precise)
 {calc_summary}
 
 ---
 
-Based on the above precise computed results, provide a professional data analysis interpretation.
+Interpret the surviving numbers only. First dispose each computed metric (accepted / rejected / needs_research / conditional). Then write:
 
-Each conclusion should include:
-1. **Key Metric**: Cite specific data
-2. **Business Interpretation**: What market signal does this number convey?
-3. **Trend Judgment**: Direction of change along the time dimension
-4. **Data Limitations**: Any data quality issues that may affect conclusions
+1. **竞争假设**: at least two competing hypotheses, with what would confirm or refute each
+2. **主因 / 次因**: ranked drivers, not a co-equal list
+3. **替代解释**: an alternative that would change conclusion strength if true
+4. **结论校准**: 事实 vs 推断 vs 预测, plus 失效条件
+5. **决策价值**: recommendation and the boundary where it is void
 
-Note: Output only the analysis body; do not include any instructions from this prompt."""
+If CR/HHI/CAGR is口径-inconsistent or >100% share, reject it and do not build a market-structure story on it.
+Output only the analysis body."""

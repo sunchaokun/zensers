@@ -14,10 +14,8 @@ config:
 
 ## DATE CONTEXT (CRITICAL)
 Current real date: ${current_date} | Current year: ${current_year}
-- Every year reference in your output must be consistent with the current date above
+- Every year reference must be consistent with current date
 - Do NOT make up data for years after ${current_date}
-- "Latest FY" means the most recent full fiscal year before ${current_date}
-- If no recent data is available, say "Data as of [year], no newer data found"
 
 ## Research Topic
 ${topic}
@@ -28,101 +26,107 @@ ${aspect}
 ## Pre-collected Data Sources
 ${data}
 
-## Analysis Framework Selection
-Select and apply the MOST appropriate analytical framework for this dimension:
+---
 
-| Dimension | Recommended Framework |
-|-----------|---------------------|
-| Market size / growth | TAM/SAM/SOM, S-curve analysis, growth driver decomposition |
-| Competition / landscape | Porter's Five Forces, strategic group mapping, CR4/HHI |
-| Technology / R&D | Gartner Hype Cycle, TRL assessment (ISO 16290), patent landscape |
-| Policy / regulation | PESTEL analysis, regulatory impact assessment |
-| Value chain / supply chain | Profit pool analysis, bargaining power framework |
-| Financial / valuation | DuPont analysis, DCF valuation, comparable company analysis |
-| Company / enterprise | SWOT analysis, business model canvas, moat assessment |
-| Risk | Risk matrix (Probability x Impact), scenario analysis |
-| Trends / outlook | S-curve positioning, STEEP analysis, cross-impact matrix |
+## ANALYSIS PROTOCOL
 
-## Output Structure (MANDATORY — must follow exactly, missing segments will trigger QC failure)
-Each analysis section MUST contain all 5 segments below, in order:
+### Step 1: Topic-Data Check (MANDATORY)
+Before analyzing, verify data matches research topic:
+1. Scan all data points' metrics, content, and sources for industry/topic keywords
+2. Compare with the research topic (${topic})
+3. If >50% of data points are from a DIFFERENT industry:
+   - State: "数据与研究主题存在根本性错配"
+   - Mark ALL data as `rejected`
+   - Do NOT analyze mismatched data
 
-1. **Core Judgment** (1 sentence): A clear, falsifiable claim about the dimension
-2. **Logical Derivation**: Show causal reasoning chain (because X, therefore Y)
-3. **Data Support**: Specific numbers with years, units, and context from the pre-collected data
-4. **Counter Evidence**: Factors that could challenge the judgment, boundary conditions
-5. **Implication**: Why this matters for strategic decision-making
+### Step 2: Data Disposition (MANDATORY)
+Mark every material item `accepted` / `rejected` / `needs_research` / `conditional`:
+- `accepted`: numeric value + unit + period + geographic_scope, NOT 预测/预估
+- `conditional`: forecast, estimate, single-quarter for full-year
+- `needs_research`: qualitative only, missing comparator, unverified
+- `rejected`: off-topic, mixed口径, incomparable inputs
 
-### Sub-Topic Structure (when provided)
-If sub-topics are listed in the prompt, you MUST organize your output as follows:
-- Use `### ` heading for each sub-topic, in the order listed
-- Under each sub-topic heading, follow the 5-segment structure above
-- Cover ALL listed sub-topics — do not skip or reorder them
-- Do not add sub-topics not in the provided list
+### Step 3: Multi-Dimensional Analysis (Core)
+Analyze from **at least 4 dimensions**. Each dimension: key findings + conclusion type (事实/推断/预测).
 
-## Quantitative Requirements
-Include quantified metrics where data permits:
-- Current values with YoY change and trend direction
-- Growth rates (CAGR where applicable)
-- Market shares, concentration ratios
-- Penetration rates and adoption curves
-- Confidence intervals or ranges for estimates
+| Dimension | Key Questions |
+|-----------|---------------|
+| **供需基本面** | 产能→开工率→实际供给？需求弹性？替代品影响？供需缺口？ |
+| **成本结构** | 边际成本？盈亏平衡点？成本支撑位？不同规模企业成本差异？ |
+| **上下游传导** | 各环节价差？利润分配？传导链瓶颈？ |
+| **政策与制度** | 已生效/待生效政策？传导链？政府干预触发条件？ |
+| **外部冲击** | 疾病/贸易摩擦/汇率/宏观经济周期影响？ |
+| **市场博弈** | 集中度？龙头策略？囚徒困境？进入/退出壁垒？ |
+| **消费周期** | 季节性？结构性变化？需求弹性？替代效应？ |
+| **价格机制** | 传导链？定价权？预期影响？成本支撑位？ |
 
-## Data Visualization (IMPORTANT)
-When your analysis contains quantitative data, you MUST include an HTML table to visualize the data.
+### Step 4: Cross-Validation (MANDATORY)
+- List conclusions from each dimension
+- Check: do they converge or conflict?
+- If conflict: which evidence is stronger and why
+- If converge: "多维度交叉验证一致，置信度提升"
 
-### When to Include Tables
-Include a data table when your analysis contains:
-- Comparative data (market shares, rankings, segment sizes)
-- Time series data (growth trends, historical comparison)
-- Multi-dimensional metrics (financial ratios, performance indicators)
-- Distribution data (regional breakdown, customer segments)
+### Step 5: Competing Hypotheses
+At least 2 hypotheses. Each: confirm test + refute test from data.
 
-### Table Format
-Use HTML table format:
-```
-<table>
-  <thead><tr><th>Category</th><th>Metric 1</th><th>Metric 2</th><th>Metric 3</th></tr></thead>
-  <tbody>
-    <tr><td>Item A</td><td>100</td><td>25%</td><td>$1.2M</td></tr>
-    <tr><td>Item B</td><td>200</td><td>50%</td><td>$2.4M</td></tr>
-    <tr><td>Item C</td><td>100</td><td>25%</td><td>$1.2M</td></tr>
-  </tbody>
-</table>
-```
+### Step 6: 主因/次因 + Reverse Test
+Rank drivers. State which evidence would swap ranking.
 
-### Table Placement
-- Place the table after your analysis text
-- Add a brief table caption above (e.g., "Table: Market Share by Company")
-- Ensure numeric values are in consistent units
-- Round percentages to 1 decimal place (e.g., 25.5%)
+### Step 7: 替代解释
+One 供给侧, one 需求侧. Each: mechanism → "如果此解释成立，则..." → can data rule it out?
 
-### Example
-After analyzing market competition:
-```
-Based on the data, the market shows high concentration with the top 3 players controlling 68.5% of total market share...
+### Step 8: Scenario Analysis (MANDATORY)
+| Scenario | 核心假设 | 概率 | 预期结果 |
+|----------|----------|------|----------|
+| 乐观 | 供给出清+需求企稳 | 15-25% | ... |
+| 基准 | 当前趋势延续 | 50-60% | ... |
+| 悲观 | 需求继续恶化 | 15-25% | ... |
 
-Table: Market Share by Company (2024)
-| Company | Market Share | Revenue ($M) | YoY Growth |
-|---------|--------------|--------------|------------|
-| Company A | 31.5% | 12,800 | +8.2% |
-| Company B | 22.3% | 9,100 | +5.5% |
-| Company C | 14.7% | 6,000 | +12.1% |
-| Others | 31.5% | 12,800 | +3.2% |
-```
+### Step 9: Trend Judgment
+- 短期（季度/半年度）
+- 长期（年度/多年）
+- If diverge, state which drives conclusion
 
-## Data Usage Rules
-- ONLY use data provided in the Pre-collected Data Sources section
-- Do NOT supplement with external knowledge or make up data points
-- If data is insufficient to support a conclusion, state "Insufficient data to confirm"
-- Cross-reference data from multiple sources when available
-- Flag any contradictions in the provided data
+### Step 10: 决策价值
+- 因此建议（对厂商/对投资者）
+- 失效条件 + 反面假设
 
-## Writing Standards
-- Each paragraph starts with a clear judgment statement
-- Data and analysis must be naturally integrated (not "data says... I think...")
-- Use professional written language, no colloquial expressions
-- No source markers in text (sources are listed at the end)
+### Step 11: 研究缺口
+Each `needs_research` → one data task.
+
+### Step 12: 数据推理分析论证 (MANDATORY)
+从预收集数据中建立分析模型，推导出数据中未直接给出的结论：
+- **建模**: 识别关键变量，建立传导关系（如：产能×PSY→商品猪→猪肉产量→供需缺口）
+- **量化可量化的**: 有数据的部分做精确计算
+- **定性推理不可量化的**: 没数据的部分做方向性推理
+- **综合论证**: 将量化和定性结合，得出供需缺口的方向和幅度
+- **标注不确定性**: 每个推算步骤标注置信度
+
+注意：产能≠实际供给量。实际供给受开工率、出栏节奏、进口、库存释放等多因素影响。
+
+---
+
+## OUTPUT FORMAT
+
+### 核心结论（置信度：高/中/低）
+### 数据处置（accepted/rejected/needs_research/conditional）
+### 多维度分析（每个维度：结论 + 数据支撑 + 置信度）
+### 竞争假设验证
+### 主因/次因 + 替代解释
+### 趋势与场景
+### 决策建议与研究缺口
+### 数据推理分析论证
+### 关键数据对比表
+| 指标 | 数值 | 时期 | 范围 | 性质 | 来源 |
+
+---
+
+## RULES
+- Lead with claim + epistemic status, then mechanism, then numbers
+- Cite institution + period + 口径
 - 300 words of powerful argument > 3000 words of vague discussion
-- **ALWAYS include a data table when presenting quantitative comparisons**
+- Do NOT use 行业常识 as evidence
+- Do NOT treat global data as China evidence
+- Output analysis only. No "好的" "我将" "作为分析师"
 
 {include:language_rule}

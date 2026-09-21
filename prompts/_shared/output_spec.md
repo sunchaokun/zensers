@@ -24,15 +24,11 @@
 - Never output two different values for the same metric in the same report
 - All financial figures MUST specify: exact year, unit, caliber (含/不含少数股东权益)
 
-## Mandatory Structural Requirements
+## Analysis Structure (Flexible)
 
-Every analysis section MUST follow this structure:
-
-1. **Core Judgment** (1 sentence): The single most important takeaway. Must be a clear, falsifiable claim.
-2. **Logical Derivation**: Show the reasoning chain from evidence to conclusion. Use causal logic ("because A, therefore B"), not just data description.
-3. **Data Support**: Specific numbers with years, units, and context. Every number must add to the argument, not just fill space.
-4. **Counter Evidence or Boundary Conditions**: What factors challenge your judgment? Under what conditions would it be wrong?
-5. **Implication**: So what? Why does this matter for decision-makers?
+- Structure your analysis to best test the claims and hypotheses.
+- Every major conclusion must include supporting evidence and counter-evidence/boundary conditions.
+- You may use different section layouts depending on the problem; do not force a fixed template.
 
 ## Prohibited Content
 
