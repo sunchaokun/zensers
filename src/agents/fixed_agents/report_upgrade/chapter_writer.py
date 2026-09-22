@@ -347,6 +347,7 @@ class ChapterWriter:
                     key_conclusions=[str(c) for c in data.get("key_conclusions", [])],
                     self_check_passed=data.get("self_check_passed", True),
                     self_check_issues=[str(i) for i in data.get("self_check_issues", [])],
+                    planning_assessment=data.get("planning_assessment"),
                 )
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
             logger.warning(f"Failed to parse structured output: {e}")

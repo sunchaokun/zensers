@@ -112,6 +112,8 @@ class ChapterWriteOutput:
     # from the assembled report and being mistaken for successful coverage.
     status: str = "ready"
     error: str = ""
+    # Planning assessment from the LLM's pre-writing analysis
+    planning_assessment: Optional[Dict[str, Any]] = None
 
 
 @dataclass

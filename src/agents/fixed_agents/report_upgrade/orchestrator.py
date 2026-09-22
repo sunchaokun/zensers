@@ -1243,6 +1243,26 @@ class ReportOrchestrator:
 
                             chapter.content = _enforce_structure_compliance(chapter.content)
 
+                            # Log planning assessment from LLM
+                            if chapter.planning_assessment:
+                                assessment = chapter.planning_assessment
+                                logger.info(
+                                    "CHAPTER_PLANNING_ASSESSMENT section=%s severity=%s "
+                                    "framework_issues=%s data_sufficiency=%s recommended=%s",
+                                    section_id,
+                                    assessment.get("severity", "unknown"),
+                                    assessment.get("framework_issues", []),
+                                    assessment.get("data_sufficiency", {}),
+                                    assessment.get("recommended_actions", []),
+                                )
+                                if assessment.get("severity") in ("high", "critical"):
+                                    logger.warning(
+                                        "Chapter %s flagged %s severity issues: %s",
+                                        section_id,
+                                        assessment.get("severity"),
+                                        assessment.get("framework_issues", []),
+                                    )
+
                             validated_dps = self._extract_and_validate_data_points(chapter)
                             for dp in validated_dps:
                                 self._data_registry.register(
