@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""生成半导体行业深度研究报告 - HTML和Word版本"""
+"""生成半导体行业HTML和Word报告"""
 
 import json
 import re
@@ -12,23 +12,14 @@ sys.path.insert(0, str(ROOT))
 
 from src.converters.html_to_word import HTMLToWordConverter
 
-# 加载研究数据
-research_data_path = ROOT / 'output' / 'full_research' / 'semiconductor_research_result.json'
-if not research_data_path.exists():
-    print(f"错误：未找到研究数据文件 {research_data_path}")
-    print("请先运行研究流程生成数据")
-    sys.exit(1)
-
-with open(research_data_path, 'r', encoding='utf-8') as f:
+# 加载半导体行业研究数据
+with open(ROOT / 'output' / 'full_research' / 'semiconductor_revised_report_llm.json', 'r', encoding='utf-8') as f:
     data = json.load(f)
 
-# 加载HTML模板
 template = (ROOT / 'templates' / 'professional_report.html').read_text(encoding='utf-8')
 
-# 中文数字映射
 cn_nums = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十']
 
-# 生成目录
 toc_lines = []
 page_num = 3
 for i, section in enumerate(data.get('sections', []), 1):
@@ -50,36 +41,13 @@ def strip_markdown(text):
 
 
 def clean_heading_numbering(text):
-    """清理标题中的冗余编号"""
+    """清理标题中的冗余编号：'1. xxx' -> 'xxx', '一、xxx' -> 'xxx'"""
     text = strip_markdown(text)
     text = re.sub(r'^[①②③④⑤⑥⑦⑧⑨⑩]\s*', '', text)
     text = re.sub(r'^\d+[.、]\s*', '', text)
     text = re.sub(r'^[一二三四五六七八九十]+[、.]\s*', '', text)
     text = re.sub(r'^第[一二三四五六七八九十]+部分[：:]\s*', '', text)
     return text.strip()
-
-
-def parse_table_block(lines, start_idx):
-    """解析连续表格行"""
-    headers = []
-    rows = []
-    idx = start_idx
-    while idx < len(lines):
-        line = lines[idx].strip()
-        if not line.startswith('|'):
-            break
-        cells = [c.strip() for c in line.split('|')]
-        if line.endswith('|'):
-            cells = cells[1:-1]
-        else:
-            cells = cells[1:]
-        if not headers:
-            headers = [c for c in cells if c and c != '---']
-        else:
-            if not all(c in ['---', ''] for c in cells):
-                rows.append(cells)
-        idx += 1
-    return headers, rows, idx
 
 
 def content_to_html(content):
@@ -111,7 +79,7 @@ def content_to_html(content):
     i = 0
     while i < len(lines):
         line = lines[i].strip()
-        if not line or '统计口径' in line:
+        if not line or '全球与中国市场统计口径不同' in line:
             i += 1
             continue
 
@@ -147,7 +115,7 @@ def content_to_html(content):
         if line.startswith('- ') or line.startswith('* '):
             text = strip_markdown(line[2:])
             if text:
-                parts.append('<p>{}</p>'.format(text))
+                parts.append('<li>{}</li>'.format(text))
             i += 1
             continue
 
@@ -155,7 +123,7 @@ def content_to_html(content):
         if m2:
             text = strip_markdown(m2.group(2))
             if text:
-                parts.append('<p>{}</p>'.format(text))
+                parts.append('<li>{}</li>'.format(text))
             i += 1
             continue
 
@@ -166,6 +134,29 @@ def content_to_html(content):
         i += 1
 
     return '\n'.join(parts)
+
+
+def parse_table_block(lines, start_idx):
+    """解析连续表格行"""
+    headers = []
+    rows = []
+    idx = start_idx
+    while idx < len(lines):
+        line = lines[idx].strip()
+        if not line.startswith('|'):
+            break
+        cells = [c.strip() for c in line.split('|')]
+        if line.endswith('|'):
+            cells = cells[1:-1]
+        else:
+            cells = cells[1:]
+        if not headers:
+            headers = [c for c in cells if c and c != '---']
+        else:
+            if not all(c in ['---', ''] for c in cells):
+                rows.append(cells)
+        idx += 1
+    return headers, rows, idx
 
 
 # 生成各章节HTML

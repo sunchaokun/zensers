@@ -1,209 +1,112 @@
 # -*- coding: utf-8 -*-
-"""半导体行业报告LLM修订脚本"""
+"""
+半导体行业报告LLM修订脚本
+使用LLM生成真实的研究内容
+"""
 
+from dotenv import load_dotenv
+load_dotenv()
+
+import asyncio
 import json
 import sys
 from pathlib import Path
-from datetime import datetime
 
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-# 加载环境变量
-from dotenv import load_dotenv
-load_dotenv(ROOT / '.env')
+from src.config.settings import settings
+from src.core.llm_client import init_llm_infrastructure, call_llm
 
-# 加载研究数据
-research_data_path = ROOT / 'output' / 'full_research' / 'semiconductor_research_result.json'
-if not research_data_path.exists():
-    print(f"错误：未找到研究数据文件 {research_data_path}")
-    print("请先运行 run_semiconductor_research.py 生成数据")
-    sys.exit(1)
-
-with open(research_data_path, 'r', encoding='utf-8') as f:
-    research_data = json.load(f)
-
-# 修订提示词
-revision_prompts = {
-    "industry_overview": """
-请修订以下关于半导体行业概览的内容，使其更加专业、深入、符合德勤咨询公司风格：
-
-原始内容：
-{content}
-
-修订要求：
-1. 增强专业性和深度，使用更多行业术语
-2. 补充更多权威数据（SIA、WSTS、中国半导体行业协会等）
-3. 增强段落之间的逻辑连贯性
-4. 避免列表和要点，使用段落式写作
-5. 每个主要观点需要详细阐述，不少于200字
-6. 总字数不少于3000字
-7. 保持客观中立的立场
-8. 使用专业咨询公司风格（德勤/麦肯锡/BCG）
-""",
-    "market_size": """
-请修订以下关于半导体市场规模的内容，使其更加专业、深入、符合德勤咨询公司风格：
-
-原始内容：
-{content}
-
-修订要求：
-1. 增强专业性和深度，使用更多行业术语
-2. 补充更多权威数据（SIA、WSTS、中国半导体行业协会等）
-3. 增强段落之间的逻辑连贯性
-4. 避免列表和要点，使用段落式写作
-5. 每个主要观点需要详细阐述，不少于200字
-6. 总字数不少于3000字
-7. 保持客观中立的立场
-8. 使用专业咨询公司风格（德勤/麦肯锡/BCG）
-""",
-    "industry_chain": """
-请修订以下关于半导体产业链的内容，使其更加专业、深入、符合德勤咨询公司风格：
-
-原始内容：
-{content}
-
-修订要求：
-1. 增强专业性和深度，使用更多行业术语
-2. 补充更多权威数据
-3. 增强段落之间的逻辑连贯性
-4. 避免列表和要点，使用段落式写作
-5. 每个主要观点需要详细阐述，不少于200字
-6. 总字数不少于3000字
-7. 保持客观中立的立场
-8. 使用专业咨询公司风格（德勤/麦肯锡/BCG）
-""",
-    "competitive_landscape": """
-请修订以下关于半导体竞争格局的内容，使其更加专业、深入、符合德勤咨询公司风格：
-
-原始内容：
-{content}
-
-修订要求：
-1. 增强专业性和深度，使用更多行业术语
-2. 补充更多权威数据
-3. 增强段落之间的逻辑连贯性
-4. 避免列表和要点，使用段落式写作
-5. 每个主要观点需要详细阐述，不少于200字
-6. 总字数不少于3000字
-7. 保持客观中立的立场
-8. 使用专业咨询公司风格（德勤/麦肯锡/BCG）
-""",
-    "technology_trends": """
-请修订以下关于半导体技术趋势的内容，使其更加专业、深入、符合德勤咨询公司风格：
-
-原始内容：
-{content}
-
-修订要求：
-1. 增强专业性和深度，使用更多行业术语
-2. 补充更多权威数据
-3. 增强段落之间的逻辑连贯性
-4. 避免列表和要点，使用段落式写作
-5. 每个主要观点需要详细阐述，不少于200字
-6. 总字数不少于3000字
-7. 保持客观中立的立场
-8. 使用专业咨询公司风格（德勤/麦肯锡/BCG）
-""",
-    "policy_environment": """
-请修订以下关于半导体政策环境的内容，使其更加专业、深入、符合德勤咨询公司风格：
-
-原始内容：
-{content}
-
-修订要求：
-1. 增强专业性和深度，使用更多行业术语
-2. 补充更多权威数据
-3. 增强段落之间的逻辑连贯性
-4. 避免列表和要点，使用段落式写作
-5. 每个主要观点需要详细阐述，不少于200字
-6. 总字数不少于3000字
-7. 保持客观中立的立场
-8. 使用专业咨询公司风格（德勤/麦肯锡/BCG）
-""",
-    "risk_analysis": """
-请修订以下关于半导体风险分析的内容，使其更加专业、深入、符合德勤咨询公司风格：
-
-原始内容：
-{content}
-
-修订要求：
-1. 增强专业性和深度，使用更多行业术语
-2. 补充更多权威数据
-3. 增强段落之间的逻辑连贯性
-4. 避免列表和要点，使用段落式写作
-5. 每个主要观点需要详细阐述，不少于200字
-6. 总字数不少于3000字
-7. 保持客观中立的立场
-8. 使用专业咨询公司风格（德勤/麦肯锡/BCG）
-""",
-    "investment_recommendations": """
-请修订以下关于半导体投资建议的内容，使其更加专业、深入、符合德勤咨询公司风格：
-
-原始内容：
-{content}
-
-修订要求：
-1. 增强专业性和深度，使用更多行业术语
-2. 补充更多权威数据
-3. 增强段落之间的逻辑连贯性
-4. 避免列表和要点，使用段落式写作
-5. 每个主要观点需要详细阐述，不少于200字
-6. 总字数不少于3000字
-7. 保持客观中立的立场
-8. 使用专业咨询公司风格（德勤/麦肯锡/BCG）
-"""
-}
+# 初始化LLM
+init_llm_infrastructure(settings.llm_profiles)
 
 
-def revise_chapter_content(chapter_id, content):
-    """使用LLM修订章节内容"""
-    if chapter_id not in revision_prompts:
-        print(f"警告：未找到章节 {chapter_id} 的修订提示词")
-        return content
+async def revise_chapter_with_llm(chapter_title, chapter_content):
+    """使用LLM修订单个章节"""
     
-    prompt = revision_prompts[chapter_id].format(content=content)
+    prompt = f"""你是一位专业的行业研究分析师，请对以下章节进行修订，使其更加详细和专业。
+
+## 当前章节标题
+{chapter_title}
+
+## 当前章节内容
+{chapter_content}
+
+## 修订要求
+1. 增加更多数据支撑，包括具体的市场规模数字、增长率、市场份额等
+2. 增加数据表格，展示历史数据和预测数据
+3. 改进内容结构，确保有清晰的概述、详细分析、关键发现和战略启示
+4. 删除重复内容
+5. 确保数据一致性
+6. 增加专业术语和分析框架
+7. 每个章节至少3000字符
+8. 使用专业咨询公司风格（德勤/麦肯锡/BCG）
+9. 段落式写作，避免列表和要点
+
+## 输出格式
+请直接输出修订后的完整章节内容，不要包含"修订后的章节"等前缀。"""
+
+    response = await call_llm(
+        prompt=prompt,
+        model='mimo-v2.5',
+        max_tokens=4000
+    )
     
-    # 这里应该调用LLM API进行修订
-    # 由于是示例，我们返回原始内容
-    print(f"  警告：LLM修订功能未实现，使用原始内容")
-    return content
+    return response.get('content', '')
 
 
-def revise_report():
+async def revise_report():
     """修订整个报告"""
-    print("开始修订半导体行业报告...")
+    print("=" * 60)
+    print("半导体行业报告 - LLM修订")
+    print("=" * 60)
     
-    revised_data = {
-        "title": research_data["title"],
-        "subtitle": research_data["subtitle"],
-        "institution": research_data["institution"],
-        "date": research_data["date"],
-        "sections": []
+    # 加载研究结果
+    research_file = Path("output/full_research/semiconductor_research_result.json")
+    if not research_file.exists():
+        print("研究结果文件不存在")
+        return
+    
+    research_data = json.loads(research_file.read_text(encoding="utf-8"))
+    
+    sections = research_data.get("sections", [])
+    revised_sections = []
+    
+    for i, section in enumerate(sections, 1):
+        title = section.get("title", f"第{i}章")
+        content = section.get("content", "")
+        
+        print(f"\n[{i}/{len(sections)}] 修订章节: {title}")
+        print(f"  当前内容长度: {len(content)} 字符")
+        
+        try:
+            revised_content = await revise_chapter_with_llm(title, content)
+            print(f"  修订后内容长度: {len(revised_content)} 字符")
+            
+            revised_sections.append({
+                "id": section.get("id", ""),
+                "title": title,
+                "content": revised_content,
+            })
+            
+        except Exception as e:
+            print(f"  修订失败: {e}")
+            revised_sections.append(section)
+    
+    # 保存修订后的报告
+    revised_report = {
+        "topic": "全球半导体行业深度研究报告",
+        "sections": revised_sections,
     }
     
-    for section in research_data["sections"]:
-        print(f"修订章节: {section['title']}")
-        
-        revised_content = revise_chapter_content(section["id"], section["content"])
-        
-        revised_data["sections"].append({
-            "id": section["id"],
-            "title": section["title"],
-            "content": revised_content
-        })
+    revised_file = Path("output/full_research/semiconductor_revised_report_llm.json")
+    revised_file.write_text(json.dumps(revised_report, ensure_ascii=False, indent=2), encoding="utf-8")
     
-    # 保存修订结果
-    output_dir = ROOT / 'output' / 'full_research'
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
-    output_file = output_dir / 'semiconductor_revised_report_llm.json'
-    with open(output_file, 'w', encoding='utf-8') as f:
-        json.dump(revised_data, f, ensure_ascii=False, indent=2)
-    
-    print(f"修订报告已保存: {output_file}")
-    return revised_data
+    print("\n" + "=" * 60)
+    print("LLM修订完成!")
+    print("=" * 60)
+    print(f"修订报告已保存: {revised_file}")
 
 
 if __name__ == "__main__":
-    revise_report()
+    asyncio.run(revise_report())

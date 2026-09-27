@@ -1,247 +1,388 @@
 # -*- coding: utf-8 -*-
-"""半导体行业研究执行脚本 - 生成研究数据"""
+"""
+半导体行业深度研究流程执行脚本
+参考新能源汽车行业案例，制作半导体行业案例
+"""
 
+from dotenv import load_dotenv
+load_dotenv()
+
+import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 from datetime import datetime
 
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-# 加载环境变量
-from dotenv import load_dotenv
-load_dotenv(ROOT / '.env')
+from src.config.settings import settings
+from src.core.llm_client import init_llm_infrastructure
 
-# 半导体行业研究框架
-research_framework = {
-    "title": "全球半导体行业深度研究报告",
-    "subtitle": "产业链、技术趋势与投资策略分析",
-    "institution": "zensers Research",
-    "date": datetime.now().strftime("%Y年%m月"),
-    "sections": [
-        {
-            "id": "industry_overview",
-            "title": "行业概览",
-            "description": "半导体行业定义、边界、发展阶段与关键驱动因素"
-        },
-        {
-            "id": "market_size",
-            "title": "市场规模深度分析",
-            "description": "全球与中国市场规模、细分市场、市场预测"
-        },
-        {
-            "id": "industry_chain",
-            "title": "产业链深度分析",
-            "description": "上游设备材料、中游设计制造封测、下游终端应用"
-        },
-        {
-            "id": "competitive_landscape",
-            "title": "竞争格局分析",
-            "description": "全球与中国竞争格局、主要企业分析、并购重组趋势"
-        },
-        {
-            "id": "technology_trends",
-            "title": "技术趋势分析",
-            "description": "制程技术、封装技术、新兴技术方向、技术路线图"
-        },
-        {
-            "id": "policy_environment",
-            "title": "政策环境与监管分析",
-            "description": "全球政策、中国政策、政策影响、监管趋势"
-        },
-        {
-            "id": "risk_analysis",
-            "title": "风险分析",
-            "description": "市场风险、技术风险、政策风险、供应链风险、财务风险"
-        },
-        {
-            "id": "investment_recommendations",
-            "title": "投资建议与策略",
-            "description": "投资机会、投资策略、重点投资标的、风险提示"
-        }
-    ]
-}
+# 初始化LLM
+init_llm_infrastructure(settings.llm_profiles)
 
-# 研究提示词模板
-research_prompts = {
-    "industry_overview": """
-请撰写关于全球半导体行业的概览章节，包括：
-1. 行业定义与边界：明确半导体行业的定义、产业链位置、与相关行业（如消费电子、汽车电子、人工智能）的关系
-2. 市场规模与增长：提供2022-2025年全球和中国半导体市场规模数据，计算CAGR
-3. 行业发展阶段：回顾半导体行业发展历程（从集成电路发明到当前AI芯片时代），判断当前发展阶段（后摩尔时代/先进制程突破期）
-4. 关键驱动因素：分析技术驱动（AI、5G、物联网）、需求驱动（数字化转型、智能制造）、政策驱动（各国半导体政策）
+# 研究配置
+TOPIC = "全球半导体行业深度研究报告"
+CHAPTERS = [
+    "行业概览",
+    "市场规模深度分析",
+    "产业链深度分析", 
+    "竞争格局分析",
+    "技术趋势分析",
+    "政策环境与监管分析",
+    "风险分析",
+    "投资建议与策略",
+]
 
-要求：
-- 使用专业咨询公司风格（德勤/麦肯锡/BCG）
-- 段落式写作，避免列表和要点
-- 每个主要观点需要详细阐述，不少于200字
-- 引用权威数据（SIA、WSTS、中国半导体行业协会等）
-- 总字数不少于3000字
-""",
-    "market_size": """
-请撰写关于半导体市场规模的深度分析章节，包括：
-1. 全球市场格局：区域分布（北美、欧洲、亚太）、增长动力、市场趋势
-2. 中国市场规模：国内市场现状、进口替代进程、自主可控进程
-3. 细分市场分析：设计、制造、封测、设备、材料、EDA六大细分领域的市场规模、增速、主要玩家、国产化率
-4. 市场预测：短期（1-3年）、中期（3-5年）、长期（5-10年）市场预测
-
-要求：
-- 使用专业咨询公司风格
-- 段落式写作，避免列表和要点
-- 每个主要观点需要详细阐述，不少于200字
-- 引用权威数据
-- 总字数不少于3000字
-""",
-    "industry_chain": """
-请撰写关于半导体产业链的深度分析章节，包括：
-1. 产业链全景图：上游（设备、材料、EDA）、中游（设计、制造、封测）、下游（终端应用）
-2. 上游：设备与材料：光刻机、刻蚀机、薄膜沉积设备、清洗设备；硅片、光刻胶、电子气体、CMP材料
-3. 中游：设计、制造与封测：IC设计流程、主要企业、技术趋势；晶圆制造制程节点、产能分布、代工模式；封装测试技术、发展趋势
-4. 下游：终端应用：消费电子、汽车电子、工业控制、人工智能
-5. 产业链瓶颈与机遇：瓶颈分析、机遇分析、国产替代路径
-
-要求：
-- 使用专业咨询公司风格
-- 段落式写作，避免列表和要点
-- 每个主要观点需要详细阐述，不少于200字
-- 引用权威数据
-- 总字数不少于3000字
-""",
-    "competitive_landscape": """
-请撰写关于半导体竞争格局的分析章节，包括：
-1. 全球竞争格局：市场份额分布、主要企业分析、竞争态势
-2. 中国竞争格局：国内企业分布、区域集群分析（长三角、珠三角、京津冀等）、竞争特点
-3. 主要企业深度分析：台积电、三星、英特尔、英伟达、高通、联发科、中芯国际、华为海思等企业的业务领域、营收规模、技术水平、竞争优势、发展战略
-4. 竞争态势分析：波特五力分析、SWOT分析、竞争策略
-5. 并购重组趋势：近年并购案例、并购动因、未来趋势
-
-要求：
-- 使用专业咨询公司风格
-- 段落式写作，避免列表和要点
-- 每个主要观点需要详细阐述，不少于200字
-- 引用权威数据
-- 总字数不少于3000字
-""",
-    "technology_trends": """
-请撰写关于半导体技术趋势的分析章节，包括：
-1. 制程技术演进：摩尔定律演进、先进制程发展（3nm、2nm、1nm）、成熟制程优化
-2. 封装技术发展：先进封装技术（Fan-out、2.5D/3D）、Chiplet技术、3D封装
-3. 新兴技术方向：第三代半导体（SiC、GaN）、异构集成、存算一体、量子计算芯片
-4. 技术突破点：光刻技术（EUV、High-NA EUV）、刻蚀技术、薄膜技术
-5. 技术路线图：短期、中期、长期技术路线
-
-要求：
-- 使用专业咨询公司风格
-- 段落式写作，避免列表和要点
-- 每个主要观点需要详细阐述，不少于200字
-- 引用权威数据
-- 总字数不少于3000字
-""",
-    "policy_environment": """
-请撰写关于半导体政策环境与监管分析的章节，包括：
-1. 全球政策环境：美国政策（CHIPS法案、出口管制）、欧洲政策（欧洲芯片法案）、日韩政策
-2. 中国政策环境：国家政策（国家集成电路产业投资基金、"十四五"规划）、地方政策、产业政策
-3. 政策影响分析：正面影响（资金支持、人才引进）、负面影响（技术封锁、供应链断裂）、政策风险
-4. 监管趋势：出口管制、技术封锁、供应链安全
-
-要求：
-- 使用专业咨询公司风格
-- 段落式写作，避免列表和要点
-- 每个主要观点需要详细阐述，不少于200字
-- 引用权威数据
-- 总字数不少于3000字
-""",
-    "risk_analysis": """
-请撰写关于半导体行业风险分析的章节，包括：
-1. 市场风险：周期性风险、需求波动风险、价格竞争风险
-2. 技术风险：技术路线风险、研发失败风险、技术迭代风险
-3. 政策风险：地缘政治风险、出口管制风险、政策变化风险
-4. 供应链风险：供应链中断风险、原材料价格波动、物流风险
-5. 财务风险：投资回报风险、资金链风险、汇率风险
-
-要求：
-- 使用专业咨询公司风格
-- 段落式写作，避免列表和要点
-- 每个主要观点需要详细阐述，不少于200字
-- 引用权威数据
-- 总字数不少于3000字
-""",
-    "investment_recommendations": """
-请撰写关于半导体行业投资建议与策略的章节，包括：
-1. 投资机会分析：高成长领域（AI芯片、汽车芯片）、国产替代领域（设备、材料、EDA）、技术突破领域（先进制程、先进封装）
-2. 投资策略建议：短期策略（关注业绩确定性标的）、中期策略（布局国产替代龙头）、长期策略（投资技术突破企业）
-3. 重点投资标的：分析5-8家重点投资企业的投资逻辑、预期收益、风险等级、投资建议
-4. 风险提示：主要风险因素、风险应对措施、退出机制
-
-要求：
-- 使用专业咨询公司风格
-- 段落式写作，避免列表和要点
-- 每个主要观点需要详细阐述，不少于200字
-- 引用权威数据
-- 总字数不少于3000字
-"""
-}
+OUTPUT_DIR = Path(__file__).resolve().parent.parent / "output" / "full_research"
 
 
-def generate_research_data():
-    """生成半导体行业研究数据"""
-    print("开始生成半导体行业研究数据...")
+async def run_research():
+    """执行完整研究流程"""
+    from src.core.orchestrator.orchestrator import ResearchOrchestrator
     
-    research_result = {
-        "title": research_framework["title"],
-        "subtitle": research_framework["subtitle"],
-        "institution": research_framework["institution"],
-        "date": research_framework["date"],
-        "sections": []
-    }
+    print("=" * 60)
+    print("半导体行业深度研究")
+    print(f"主题: {TOPIC}")
+    print(f"章节数: {len(CHAPTERS)}")
+    print("=" * 60)
     
-    for section in research_framework["sections"]:
-        print(f"处理章节: {section['title']}")
-        
-        # 这里应该调用LLM生成内容
-        # 由于是示例，我们使用占位符内容
-        content = f"""
-## {section['title']}
-
-### 行业背景
-
-{section['description']}
-
-### 市场数据
-
-根据权威机构数据，全球半导体市场规模在2023年达到约5,200亿美元，预计到2025年将增长至约6,000亿美元，年复合增长率约为7.2%。中国半导体市场规模在2023年达到约1.5万亿元人民币，占全球市场份额的约30%。
-
-### 发展趋势
-
-半导体行业正处于技术变革的关键时期，先进制程技术持续演进，AI芯片需求爆发式增长，汽车芯片成为新的增长点。同时，全球供应链重构和地缘政治因素对行业格局产生深远影响。
-
-### 未来展望
-
-展望未来，半导体行业将继续保持稳健增长，技术创新和市场需求双轮驱动行业发展。中国半导体产业在国产替代政策支持下，有望在设备、材料、EDA等关键领域实现突破。
-
-### 投资建议
-
-建议关注AI芯片、汽车芯片、先进封装等高成长领域，以及设备、材料、EDA等国产替代领域。同时，注意防范地缘政治风险、技术迭代风险和市场周期性风险。
-"""
-        
-        research_result["sections"].append({
-            "id": section["id"],
-            "title": section["title"],
-            "content": content.strip()
-        })
+    # 创建输出目录
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    
+    # 创建研究编排器
+    orchestrator = ResearchOrchestrator(use_intelligent_routing=True)
+    
+    # 执行研究
+    print("\n[1/4] 正在执行研究...")
+    result = await orchestrator.research(
+        user_input={
+            "session_id": f"semiconductor_research_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            "topic": TOPIC,
+            "aspects": CHAPTERS,
+            "output_type": "industry_report",
+            "output_format": "html",
+        },
+        user_id="commercial_demo",
+        interaction_mode=False,
+        output_type="industry_report",
+        custom_aspects=CHAPTERS,
+        framework="standard",
+        output_format="html",
+    )
+    
+    if result.status not in ("completed", "completed_with_warnings"):
+        print(f"研究失败: {result.status}")
+        return None
+    
+    print(f"研究完成! 状态: {result.status}")
     
     # 保存研究结果
-    output_dir = ROOT / 'output' / 'full_research'
-    output_dir.mkdir(parents=True, exist_ok=True)
+    report = result.report
+    if report:
+        # 保存JSON
+        json_file = OUTPUT_DIR / "semiconductor_research_result.json"
+        json_file.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"研究结果已保存: {json_file}")
+        
+        # 统计内容
+        total_chars = 0
+        for section in report.get("sections", []):
+            content = section.get("content", "")
+            total_chars += len(content)
+        
+        print(f"总字符数: {total_chars}")
+        print(f"章节数: {len(report.get('sections', []))}")
     
-    output_file = output_dir / 'semiconductor_research_result.json'
-    with open(output_file, 'w', encoding='utf-8') as f:
-        json.dump(research_result, f, ensure_ascii=False, indent=2)
+    return result
+
+
+def generate_html_report(result):
+    """生成HTML报告"""
+    import re
     
-    print(f"研究数据已保存: {output_file}")
-    return research_result
+    print("\n[2/4] 正在生成HTML报告...")
+    
+    ROOT = Path(__file__).resolve().parent.parent
+    
+    report = result.report
+    if not report:
+        print("无报告数据")
+        return None
+    
+    # 读取模板
+    template_path = ROOT / "templates" / "professional_report.html"
+    template = template_path.read_text(encoding="utf-8")
+    
+    # 生成目录
+    toc_lines = []
+    page_num = 3
+    for i, section in enumerate(report.get("sections", []), 1):
+        title = section.get("title", f"第{i}章")
+        toc_lines.append(
+            '<p class="toc-item-level1">{:02d}  {}  ......  {}</p>'.format(
+                i, title, page_num
+            )
+        )
+        # 提取二级标题
+        content = section.get("content", "")
+        sub_items = []
+        for line in content.split("\n"):
+            line = line.strip()
+            if line.startswith("## "):
+                sub_title = line[3:].strip()
+                sub_items.append(sub_title)
+        for j, sub_title in enumerate(sub_items[:5]):
+            toc_lines.append(
+                '<p class="toc-item-level2">    {:02d}.{} {}</p>'.format(
+                    i, j + 1, sub_title
+                )
+            )
+        page_num += max(2, len(sub_items) + 1)
+    toc_html = "\n".join(toc_lines)
+    
+    # 生成内容
+    content_parts = []
+    
+    # 关键发现
+    key_findings = report.get("key_findings", [])
+    if key_findings:
+        content_parts.append('<div class="key-findings"><h2>关键发现</h2><ul>')
+        for finding in key_findings:
+            finding = re.sub(r"\*\*", "", finding).strip()
+            if finding:
+                content_parts.append("<li>{}</li>".format(finding))
+        content_parts.append("</ul></div>")
+    
+    # 各章节
+    for i, section in enumerate(report.get("sections", []), 1):
+        title = section.get("title", f"第{i}章")
+        content_parts.append('<h1 class="chapter-title">{:02d} {}</h1>'.format(i, title))
+        
+        content = section.get("content", "")
+        lines = content.split("\n")
+        
+        in_table = False
+        table_headers = []
+        table_rows = []
+        
+        for line in lines:
+            line = line.strip()
+            if not line or "全球与中国市场统计口径不同" in line:
+                continue
+            
+            # 表格处理
+            if line.startswith("|"):
+                if line.endswith("|"):
+                    cells = [c.strip() for c in line.split("|")[1:-1]]
+                else:
+                    cells = [c.strip() for c in line.split("|")[1:]]
+                    if in_table and table_rows:
+                        last_row = table_rows[-1]
+                        for c in cells:
+                            if last_row:
+                                last_row[-1] = last_row[-1] + " " + c
+                        continue
+                    else:
+                        continue
+                
+                # 跳过分隔行
+                if all(set(c.strip()) <= set("- :") for c in cells if c.strip()):
+                    continue
+                # 清理单元格
+                cleaned = [re.sub(r"\*\*", "", c).strip() for c in cells]
+                if not in_table:
+                    in_table = True
+                    table_headers = cleaned
+                else:
+                    table_rows.append(cleaned)
+                continue
+            
+            # 非表格行，输出之前的表格
+            if in_table and table_headers:
+                content_parts.append("<table><thead><tr>")
+                for h in table_headers:
+                    content_parts.append("<th>{}</th>".format(h))
+                content_parts.append("</tr></thead><tbody>")
+                for row in table_rows:
+                    content_parts.append("<tr>")
+                    for cell in row:
+                        content_parts.append("<td>{}</td>".format(cell))
+                    content_parts.append("</tr>")
+                content_parts.append("</tbody></table>")
+                in_table = False
+                table_headers = []
+                table_rows = []
+            
+            # 标题
+            if line.startswith("#"):
+                level = len(line) - len(line.lstrip("#"))
+                t = line.lstrip("#").strip()
+                if level == 1:
+                    content_parts.append('<h2 class="section-title">{}</h2>'.format(t))
+                elif level == 2:
+                    content_parts.append('<h3 class="subsection-title">{}</h3>'.format(t))
+                elif level == 3:
+                    content_parts.append('<h4 class="sub-subsection-title">{}</h4>'.format(t))
+                continue
+            
+            # 列表
+            if line.startswith("- ") or line.startswith("* "):
+                text = line[2:]
+                text = re.sub(r"\*\*", "", text).strip()
+                if text:
+                    content_parts.append("<li>{}</li>".format(text))
+                continue
+            
+            # 数字列表
+            m = re.match(r"^(\d+)[.、]\s*(.+)$", line)
+            if m:
+                text = m.group(2)
+                text = re.sub(r"\*\*", "", text).strip()
+                if text:
+                    content_parts.append("<li>{}</li>".format(text))
+                continue
+            
+            # 普通段落
+            text = re.sub(r"\*\*", "", line)
+            text = re.sub(r"<[^>]+>", "", text).strip()
+            if text:
+                content_parts.append("<p>{}</p>".format(text))
+        
+        # 处理最后一个表格
+        if in_table and table_headers:
+            content_parts.append("<table><thead><tr>")
+            for h in table_headers:
+                content_parts.append("<th>{}</th>".format(h))
+            content_parts.append("</tr></thead><tbody>")
+            for row in table_rows:
+                content_parts.append("<tr>")
+                for cell in row:
+                    content_parts.append("<td>{}</td>".format(cell))
+                content_parts.append("</tr>")
+            content_parts.append("</tbody></table>")
+    
+    content_html = "\n".join(content_parts)
+    
+    # 替换模板变量
+    html = template.replace("{{title}}", TOPIC)
+    html = html.replace("{{subtitle}}", "{}报告".format(TOPIC))
+    html = html.replace("{{date}}", datetime.now().strftime("%Y年%m月"))
+    html = html.replace("{{report_type}}", "行业深度研究")
+    html = html.replace("{{toc_items}}", toc_html)
+    html = html.replace("{{content}}", content_html)
+    html = html.replace("{{page_num}}", "1")
+    
+    # 保存HTML
+    html_file = OUTPUT_DIR / "semiconductor_report.html"
+    html_file.write_text(html, encoding="utf-8")
+    print(f"HTML报告已保存: {html_file}")
+    
+    return html
+
+
+def convert_to_word(html):
+    """转换为Word文档"""
+    print("\n[3/4] 正在转换为Word文档...")
+    
+    from src.converters.html_to_word import HTMLToWordConverter
+    
+    converter = HTMLToWordConverter()
+    result = converter.convert(
+        html=html,
+        output_path=str(OUTPUT_DIR / "semiconductor_report.docx")
+    )
+    
+    if result.success:
+        print(f"Word文档已保存: {result.output_path}")
+        print(f"文件大小: {result.file_size / 1024:.1f} KB")
+        print(f"预计页数: {result.pages_estimate}")
+        return result
+    else:
+        print(f"转换失败: {result.error}")
+        return None
+
+
+def verify_report():
+    """验证报告质量"""
+    print("\n[4/4] 正在验证报告质量...")
+    
+    from docx import Document
+    
+    docx_path = OUTPUT_DIR / "semiconductor_report.docx"
+    if not docx_path.exists():
+        print("Word文档不存在")
+        return
+    
+    doc = Document(str(docx_path))
+    
+    # 统计信息
+    para_count = len(doc.paragraphs)
+    table_count = len(doc.tables)
+    
+    # 计算总字符数
+    total_chars = sum(len(p.text) for p in doc.paragraphs)
+    
+    # 估算页数（每页约2000字符）
+    estimated_pages = max(1, total_chars // 2000)
+    
+    print("=" * 60)
+    print("报告质量验证")
+    print("=" * 60)
+    print(f"段落数量: {para_count}")
+    print(f"表格数量: {table_count}")
+    print(f"总字符数: {total_chars}")
+    print(f"估算页数: {estimated_pages} 页")
+    print("=" * 60)
+    
+    # 检查是否达到30-40页
+    if estimated_pages >= 30:
+        print("✓ 达到30-40页目标")
+    else:
+        print(f"✗ 未达到30-40页目标 (当前{estimated_pages}页)")
+    
+    return {
+        "para_count": para_count,
+        "table_count": table_count,
+        "total_chars": total_chars,
+        "estimated_pages": estimated_pages
+    }
+
+
+async def main():
+    """主函数"""
+    print("\n" + "=" * 60)
+    print("半导体行业深度研究 - 完整流程")
+    print("=" * 60)
+    
+    # 步骤1：执行研究
+    result = await run_research()
+    if not result:
+        print("研究失败，退出")
+        return
+    
+    # 步骤2：生成HTML报告
+    html = generate_html_report(result)
+    if not html:
+        print("HTML生成失败，退出")
+        return
+    
+    # 步骤3：转换为Word文档
+    docx_result = convert_to_word(html)
+    if not docx_result:
+        print("Word转换失败，退出")
+        return
+    
+    # 步骤4：验证报告质量
+    verify_report()
+    
+    print("\n" + "=" * 60)
+    print("半导体行业深度研究完成!")
+    print("=" * 60)
+    print(f"报告位置: {OUTPUT_DIR / 'semiconductor_report.docx'}")
+    print(f"HTML版本: {OUTPUT_DIR / 'semiconductor_report.html'}")
 
 
 if __name__ == "__main__":
-    generate_research_data()
+    asyncio.run(main())
