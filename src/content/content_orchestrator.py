@@ -859,10 +859,29 @@ class ContentOrchestrator:
             
             parsed = ContentOrchestrator._parse_markdown_title(raw_content)
             
-            # Title priority: API provided title > title parsed from content
+            # Title priority: API provided title > title parsed from content > section_id fallback
             api_title = data.get("title", "")
+            section_id = data.get("section_id", "")
             final_title = api_title if api_title else parsed["title"] or ""
             final_content = parsed["body"] if parsed["title"] else raw_content
+            
+            # If still no title, try to extract from content or use section_id
+            if not final_title or not final_title.strip():
+                # Try to extract title from content (e.g., **核心结论：** or 第一章 市场概况)
+                # Look for bold text at the start
+                bold_match = re.match(r'^\*\*(.+?)[:：]\*\*', raw_content)
+                if bold_match:
+                    final_title = bold_match.group(1).strip()
+                # Look for numbered heading
+                elif re.match(r'^第[一二三四五六七八九十]+章', raw_content):
+                    title_match = re.match(r'^(第[一二三四五六七八九十]+章\s*.+?)(?:\n|$)', raw_content)
+                    if title_match:
+                        final_title = title_match.group(1).strip()
+                # Use section_id as last resort
+                elif section_id:
+                    final_title = section_id.replace("_", " ")
+                else:
+                    final_title = f"Section {len(sections) + 1}"
             
             # P2 fix: Skip sections with empty titles to avoid generating blank sections
             if not final_title or not final_title.strip():
@@ -1160,7 +1179,6 @@ class ContentOrchestrator:
         """
         if not full_content or not point_title:
             return ""
-        import re
         escaped = re.escape(point_title)
         pattern = rf'^#{{1,4}}\s+{escaped}\s*$'
         lines = full_content.split('\n')

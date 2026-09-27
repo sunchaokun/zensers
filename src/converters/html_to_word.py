@@ -644,8 +644,15 @@ class HTMLToWordConverter:
                     if current_div_class == "cover-page":
                         para.alignment = WD_ALIGN_PARAGRAPH.CENTER
                         
+                        # Badge style (RESEARCH REPORT)
+                        if para_class == "cover-badge":
+                            run = para.add_run(text)
+                            run.font.size = Pt(11)
+                            run.font.name = "Microsoft YaHei"
+                            run._element.rPr.rFonts.set(qn('w:eastAsia'), "Microsoft YaHei")
+                            run.font.color.rgb = RGBColor(0xC9, 0xA2, 0x27)
                         # Subtitle style
-                        if para_class == "subtitle":
+                        elif para_class == "cover-subtitle" or para_class == "subtitle":
                             run = para.add_run(text)
                             run.font.size = Pt(14)
                             run.font.name = "Microsoft YaHei"
@@ -654,8 +661,13 @@ class HTMLToWordConverter:
                             rgb = self._parse_color_to_rgb("#2C4A5A")
                             if rgb:
                                 run.font.color.rgb = RGBColor(*rgb)
+                        # Divider style
+                        elif para_class == "cover-divider":
+                            run = para.add_run(text)
+                            run.font.size = Pt(14)
+                            run.font.color.rgb = RGBColor(0xC9, 0xA2, 0x27)
                         # Metadata style (author, date)
-                        elif para_class == "meta":
+                        elif para_class == "cover-meta" or para_class == "meta":
                             run = para.add_run(text)
                             run.font.size = Pt(11)
                             run.font.name = "Microsoft YaHei"
@@ -664,11 +676,26 @@ class HTMLToWordConverter:
                             rgb = self._parse_color_to_rgb("#888888")
                             if rgb:
                                 run.font.color.rgb = RGBColor(*rgb)
+                        # Logo style
+                        elif para_class == "cover-logo":
+                            run = para.add_run(text)
+                            run.font.size = Pt(14)
+                            run.font.bold = True
+                            run.font.name = "Microsoft YaHei"
+                            run._element.rPr.rFonts.set(qn('w:eastAsia'), "Microsoft YaHei")
+                            run.font.color.rgb = RGBColor(0xC9, 0xA2, 0x27)
+                        # GitHub style
+                        elif para_class == "cover-github":
+                            run = para.add_run(text)
+                            run.font.size = Pt(9)
+                            run.font.name = "Microsoft YaHei"
+                            run._element.rPr.rFonts.set(qn('w:eastAsia'), "Microsoft YaHei")
+                            run.font.color.rgb = RGBColor(0x99, 0x99, 0x99)
                         else:
                             self._add_formatted_run(para, text, element.get("formats", []))
                     
                     # TOC area special handling
-                    elif current_div_class == "toc":
+                    elif current_div_class in ("toc", "toc-page"):
                         # All paragraphs in TOC are TOC items (template rendering ensures this)
                         run = para.add_run(text)
                         run.font.size = Pt(12)
@@ -796,6 +823,52 @@ class HTMLToWordConverter:
                         paragraph_count += 1
                     except Exception as e:
                         logger.warning(f"Failed to add image {img_path}: {e}")
+        
+        # 添加页眉页脚
+        if len(doc.sections) > 0:
+            section = doc.sections[0]
+            
+            # 从HTML中提取报告标题
+            report_title = ""
+            title_match = re.search(r'<title>(.*?)</title>', html, re.DOTALL)
+            if title_match:
+                report_title = title_match.group(1).strip()
+            if not report_title:
+                cover_title_match = re.search(r'class="cover-title"[^>]*>(.*?)</h1>', html, re.DOTALL)
+                if cover_title_match:
+                    report_title = cover_title_match.group(1).strip()
+            if not report_title:
+                report_title = "zensers Research Report"
+            
+            # 页眉
+            header = section.header
+            header.is_linked_to_previous = False
+            header_para = header.paragraphs[0]
+            header_para.alignment = WD_ALIGN_PARAGRAPH.LEFT
+            
+            # 左侧Logo
+            run = header_para.add_run("ZENSERS")
+            run.font.size = Pt(8)
+            run.font.bold = True
+            run.font.color.rgb = RGBColor(0, 51, 102)
+            run.font.name = "Microsoft YaHei"
+            
+            # 右侧标题（动态获取）
+            run = header_para.add_run("    |    " + report_title)
+            run.font.size = Pt(8)
+            run.font.color.rgb = RGBColor(100, 100, 100)
+            run.font.name = "Microsoft YaHei"
+            
+            # 页脚
+            footer = section.footer
+            footer.is_linked_to_previous = False
+            footer_para = footer.paragraphs[0]
+            footer_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            
+            run = footer_para.add_run("© 2026 zensers Research. github.com/sunchaokun/zensers")
+            run.font.size = Pt(8)
+            run.font.color.rgb = RGBColor(100, 100, 100)
+            run.font.name = "Microsoft YaHei"
         
         # Atomic save
         logger.info(f"[CONVERT] Saving document, total paragraphs: {paragraph_count}")

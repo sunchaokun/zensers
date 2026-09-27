@@ -1,0 +1,615 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Zensers · 案例画廊</title>
+  <meta name="description" content="Zensers AI 驱动的自动化行业研究平台 - 精选案例展示">
+  <link rel="icon" type="image/svg+xml" href="../Logo.png">
+  <style>
+    /* ============ Reset & Base ============ */
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+    
+    :root {
+      --bg: #fafafa;
+      --fg: #0a0a0a;
+      --card: #ffffff;
+      --border: #e5e5e5;
+      --muted: #f5f5f5;
+      --muted-fg: #737373;
+      --primary: #2563eb;
+      --primary-fg: #ffffff;
+      --radius: 12px;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0a0a0a;
+        --fg: #fafafa;
+        --card: #171717;
+        --border: #262626;
+        --muted: #1a1a1a;
+        --muted-fg: #a3a3a3;
+        --primary: #3b82f6;
+        --primary-fg: #ffffff;
+      }
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Noto Sans SC', sans-serif;
+      background: var(--bg);
+      color: var(--fg);
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    a { color: inherit; text-decoration: none; }
+
+    /* ============ Header ============ */
+    .header {
+      text-align: center;
+      padding: 80px 24px 48px;
+      background: linear-gradient(180deg, rgba(37, 99, 235, 0.05) 0%, transparent 100%);
+    }
+
+    .header .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 16px;
+      background: rgba(37, 99, 235, 0.1);
+      color: var(--primary);
+      border-radius: 9999px;
+      font-size: 14px;
+      font-weight: 500;
+      margin-bottom: 24px;
+    }
+
+    .header h1 {
+      font-size: 48px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      margin-bottom: 16px;
+    }
+
+    .header p {
+      font-size: 18px;
+      color: var(--muted-fg);
+      max-width: 640px;
+      margin: 0 auto 32px;
+    }
+
+    .stats {
+      display: flex;
+      justify-content: center;
+      gap: 48px;
+      flex-wrap: wrap;
+    }
+
+    .stat { text-align: center; }
+    .stat-value { font-size: 32px; font-weight: 700; color: var(--primary); }
+    .stat-label { font-size: 14px; color: var(--muted-fg); }
+
+    /* ============ Filter Nav ============ */
+    .nav {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      background: var(--bg);
+      border-bottom: 1px solid var(--border);
+      padding: 12px 24px;
+    }
+
+    .nav-content {
+      display: flex;
+      gap: 8px;
+      max-width: 1200px;
+      margin: 0 auto;
+      overflow-x: auto;
+      scrollbar-width: none;
+    }
+
+    .nav-content::-webkit-scrollbar { display: none; }
+
+    .filter-btn {
+      padding: 8px 16px;
+      border: none;
+      background: transparent;
+      color: var(--muted-fg);
+      font-size: 14px;
+      font-weight: 500;
+      border-radius: 8px;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: all 0.2s;
+    }
+
+    .filter-btn:hover { background: var(--muted); color: var(--fg); }
+    .filter-btn.active { background: var(--primary); color: var(--primary-fg); }
+
+    /* ============ Grid ============ */
+    .main {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 48px 24px;
+    }
+
+    .section-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 32px;
+    }
+
+    .section-title { font-size: 24px; font-weight: 600; }
+    .section-count { font-size: 14px; color: var(--muted-fg); }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 24px;
+    }
+
+    @media (max-width: 1024px) { .grid { grid-template-columns: repeat(2, 1fr); } }
+    @media (max-width: 640px) { .grid { grid-template-columns: 1fr; } }
+
+    /* ============ Card ============ */
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+      transition: all 0.3s;
+    }
+
+    .card:hover {
+      box-shadow: 0 8px 30px rgba(0, 0, 0, 0.08);
+      border-color: var(--primary);
+      transform: translateY(-2px);
+    }
+
+    .card-thumb {
+      position: relative;
+      height: 180px;
+      background: linear-gradient(135deg, rgba(37, 99, 235, 0.08) 0%, rgba(37, 99, 235, 0.02) 100%);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+
+    .card-thumb svg { width: 80px; height: 80px; opacity: 0.3; }
+
+    .card-overlay {
+      position: absolute;
+      inset: 0;
+      background: rgba(37, 99, 235, 0.9);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+
+    .card:hover .card-overlay { opacity: 1; }
+
+    .card-overlay button {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 20px;
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .btn-preview {
+      background: rgba(255, 255, 255, 0.2);
+      color: white;
+      backdrop-filter: blur(4px);
+    }
+
+    .btn-preview:hover { background: rgba(255, 255, 255, 0.3); }
+
+    .btn-download {
+      background: white;
+      color: var(--primary);
+    }
+
+    .btn-download:hover { background: #f0f0f0; }
+
+    .format-badge {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 12px;
+      background: var(--card);
+      border-radius: 9999px;
+      font-size: 12px;
+      font-weight: 500;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    }
+
+    .format-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+    }
+
+    .format-dot.docx { background: #2563eb; }
+    .format-dot.pdf { background: #ef4444; }
+    .format-dot.both { background: linear-gradient(135deg, #2563eb 50%, #ef4444 50%); }
+
+    .card-body { padding: 20px; }
+
+    .card-title {
+      font-size: 16px;
+      font-weight: 600;
+      margin-bottom: 8px;
+      display: -webkit-box;
+      -webkit-line-clamp: 1;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+
+    .card-desc {
+      font-size: 14px;
+      color: var(--muted-fg);
+      margin-bottom: 16px;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+
+    .card-stats {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+      margin-bottom: 16px;
+    }
+
+    .card-stat {
+      text-align: center;
+      padding: 8px;
+      background: var(--muted);
+      border-radius: 8px;
+    }
+
+    .card-stat-label { font-size: 11px; color: var(--muted-fg); }
+    .card-stat-value { font-size: 14px; font-weight: 600; }
+
+    .card-highlights {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 12px;
+    }
+
+    .highlight-tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 4px 10px;
+      background: rgba(37, 99, 235, 0.1);
+      color: var(--primary);
+      border-radius: 6px;
+      font-size: 12px;
+    }
+
+    .card-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .tag {
+      padding: 4px 10px;
+      background: var(--muted);
+      border-radius: 9999px;
+      font-size: 12px;
+      color: var(--muted-fg);
+    }
+
+    /* ============ Footer ============ */
+    .footer {
+      border-top: 1px solid var(--border);
+      padding: 32px 24px;
+      margin-top: 48px;
+    }
+
+    .footer-content {
+      max-width: 1200px;
+      margin: 0 auto;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 16px;
+    }
+
+    .footer-brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .footer-brand img { height: 24px; }
+    .footer-brand span { font-weight: 600; }
+    .footer-brand small { color: var(--muted-fg); font-size: 14px; }
+
+    .footer-links {
+      display: flex;
+      gap: 24px;
+      font-size: 14px;
+      color: var(--muted-fg);
+    }
+
+    .footer-links a:hover { color: var(--fg); }
+
+    /* ============ Empty State ============ */
+    .empty {
+      text-align: center;
+      padding: 80px 24px;
+      color: var(--muted-fg);
+    }
+
+    .empty svg { width: 48px; height: 48px; margin-bottom: 16px; opacity: 0.5; }
+  </style>
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <div class="badge">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+        <polyline points="14 2 14 8 20 8"></polyline>
+        <line x1="16" y1="13" x2="8" y2="13"></line>
+        <line x1="16" y1="17" x2="8" y2="17"></line>
+        <polyline points="10 9 9 9 8 9"></polyline>
+      </svg>
+      AI 驱动 · 多智能体协作
+    </div>
+    <h1>Zensers 案例画廊</h1>
+    <p>从行业深度研究到竞品分析，每一份报告都经过多智能体协作、数据交叉验证和专业排版，输出真正可交付的专业级 Word/PDF 文档。</p>
+    <div class="stats">
+      <div class="stat">
+        <div class="stat-value">6</div>
+        <div class="stat-label">精选案例</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value">120K+</div>
+        <div class="stat-label">总字数</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value">45</div>
+        <div class="stat-label">专业图表</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value">Word/PDF</div>
+        <div class="stat-label">输出格式</div>
+      </div>
+    </div>
+  </header>
+
+  <!-- Filter Nav -->
+  <nav class="nav">
+    <div class="nav-content" id="filters"></div>
+  </nav>
+
+  <!-- Cases Grid -->
+  <main class="main">
+    <div class="section-header">
+      <div>
+        <h2 class="section-title">精选案例</h2>
+        <p class="section-count">原生可编辑 · 专业排版 · 数据可溯源</p>
+      </div>
+      <div class="section-count" id="case-count"></div>
+    </div>
+    <div class="grid" id="grid"></div>
+    <div class="empty" id="empty" style="display:none;">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M9 17H7A5 5 0 0 1 7 7h2"></path>
+        <path d="M15 7h2a5 5 0 1 1 0 10h-2"></path>
+        <line x1="8" y1="12" x2="16" y2="12"></line>
+      </svg>
+      <p>该分类暂无案例</p>
+    </div>
+  </main>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <div class="footer-content">
+      <div class="footer-brand">
+        <img src="../Logo.png" alt="Zensers">
+        <span>Zensers</span>
+        <small>· AI 驱动的自动化行业研究平台</small>
+      </div>
+      <div class="footer-links">
+        <a href="https://github.com/sunchaokun/zensers" target="_blank" rel="noreferrer">GitHub</a>
+        <a href="https://github.com/sunchaokun/zensers#快速开始">快速开始</a>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    // ============ Case Data ============
+    const cases = [
+      {
+        id: 'new-energy-vehicle',
+        title: '中国新能源汽车行业深度研究',
+        desc: '全面分析中国新能源汽车市场规模、竞争格局、技术路线及未来发展趋势，覆盖比亚迪、特斯拉、蔚来等主要玩家。',
+        category: 'industry',
+        format: 'both',
+        tags: ['新能源', '汽车', '市场规模', '竞争格局'],
+        stats: { words: '25,000+', sections: 12, charts: 8 },
+        highlights: ['市场规模预测至2030年', '五力模型竞争分析', '技术路线对比矩阵'],
+        icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 17H7A5 5 0 0 1 7 7h2"/><path d="M15 7h2a5 5 0 1 1 0 10h-2"/><line x1="8" y1="12" x2="16" y2="12"/></svg>'
+      },
+      {
+        id: 'smartphone',
+        title: '中国智能手机行业研究报告',
+        desc: '深入分析中国智能手机市场格局，包括华为、小米、OPPO、vivo等品牌的市场份额、产品策略及出海布局。',
+        category: 'industry',
+        format: 'docx',
+        tags: ['智能手机', '消费电子', '品牌竞争'],
+        stats: { words: '18,000+', sections: 10, charts: 6 },
+        highlights: ['品牌份额趋势分析', '折叠屏市场机遇', 'AI手机渗透率预测'],
+        icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="5" y="2" width="14" height="20" rx="2" ry="2"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg>'
+      },
+      {
+        id: 'lithium-battery',
+        title: '全球锂电池产业链深度报告',
+        desc: '从原材料到终端应用，全景式解读全球锂电池产业链，涵盖正极材料、负极材料、电解液、隔膜等核心环节。',
+        category: 'industry',
+        format: 'both',
+        tags: ['锂电池', '新能源', '产业链', '储能'],
+        stats: { words: '30,000+', sections: 14, charts: 10 },
+        highlights: ['产业链全景图谱', '产能供需平衡分析', '固态电池技术突破'],
+        icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1" y="6" width="18" height="12" rx="2" ry="2"/><line x1="23" y1="13" x2="23" y2="11"/></svg>'
+      },
+      {
+        id: 'ai-chip',
+        title: 'AI芯片行业竞争格局分析',
+        desc: '对比分析NVIDIA、AMD、Intel、华为昇腾等AI芯片产品线，评估各厂商技术路线、市场定位及增长潜力。',
+        category: 'competitive',
+        format: 'docx',
+        tags: ['AI芯片', '半导体', '算力', '竞争分析'],
+        stats: { words: '15,000+', sections: 8, charts: 7 },
+        highlights: ['芯片性能基准对比', '生态壁垒分析', '国产替代进程评估'],
+        icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="4" y="4" width="16" height="16" rx="2" ry="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></svg>'
+      },
+      {
+        id: 'healthcare-ai',
+        title: '医疗AI政策环境与市场机遇',
+        desc: '解读中国医疗AI相关政策法规，分析AI在医学影像、药物研发、辅助诊断等领域的应用前景与合规要求。',
+        category: 'policy',
+        format: 'pdf',
+        tags: ['医疗AI', '政策', '合规', '医学影像'],
+        stats: { words: '12,000+', sections: 9, charts: 5 },
+        highlights: ['政策时间线梳理', '三类医疗器械审批', '数据合规框架'],
+        icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>'
+      },
+      {
+        id: 'ev-battery',
+        title: '动力电池技术路线对比研究',
+        desc: '系统对比磷酸铁锂、三元锂、钠离子、固态电池等技术路线的性能参数、成本结构及产业化进程。',
+        category: 'academic',
+        format: 'both',
+        tags: ['动力电池', '技术路线', '材料科学', '产业化'],
+        stats: { words: '20,000+', sections: 11, charts: 9 },
+        highlights: ['能量密度对比分析', '成本下降曲线预测', '专利布局热力图'],
+        icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>'
+      }
+    ];
+
+    const categories = [
+      { id: 'all', label: '全部' },
+      { id: 'industry', label: '行业研究' },
+      { id: 'company', label: '公司研究' },
+      { id: 'competitive', label: '竞品分析' },
+      { id: 'policy', label: '政策简报' },
+      { id: 'market', label: '市场简报' },
+      { id: 'academic', label: '学术研究' }
+    ];
+
+    const formatLabels = { docx: 'Word', pdf: 'PDF', both: 'Word + PDF' };
+
+    // ============ Render ============
+    let activeCategory = 'all';
+
+    function renderFilters() {
+      const el = document.getElementById('filters');
+      el.innerHTML = categories.map(cat => 
+        `<button class="filter-btn ${cat.id === activeCategory ? 'active' : ''}" data-cat="${cat.id}">${cat.label}</button>`
+      ).join('');
+      
+      el.querySelectorAll('.filter-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          activeCategory = btn.dataset.cat;
+          renderFilters();
+          renderGrid();
+        });
+      });
+    }
+
+    function renderGrid() {
+      const filtered = activeCategory === 'all' 
+        ? cases 
+        : cases.filter(c => c.category === activeCategory);
+      
+      const grid = document.getElementById('grid');
+      const empty = document.getElementById('empty');
+      const count = document.getElementById('case-count');
+      
+      count.textContent = `${filtered.length} 个案例`;
+      
+      if (filtered.length === 0) {
+        grid.style.display = 'none';
+        empty.style.display = 'block';
+        return;
+      }
+      
+      grid.style.display = 'grid';
+      empty.style.display = 'none';
+      
+      grid.innerHTML = filtered.map(c => `
+        <div class="card" data-id="${c.id}">
+          <div class="card-thumb">
+            ${c.icon}
+            <div class="card-overlay">
+              <button class="btn-preview">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                预览
+              </button>
+              <button class="btn-download">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                下载
+              </button>
+            </div>
+            <div class="format-badge">
+              <span class="format-dot ${c.format}"></span>
+              ${formatLabels[c.format]}
+            </div>
+          </div>
+          <div class="card-body">
+            <h3 class="card-title">${c.title}</h3>
+            <p class="card-desc">${c.desc}</p>
+            <div class="card-stats">
+              <div class="card-stat">
+                <div class="card-stat-label">字数</div>
+                <div class="card-stat-value">${c.stats.words}</div>
+              </div>
+              <div class="card-stat">
+                <div class="card-stat-label">章节</div>
+                <div class="card-stat-value">${c.stats.sections}</div>
+              </div>
+              <div class="card-stat">
+                <div class="card-stat-label">图表</div>
+                <div class="card-stat-value">${c.stats.charts}</div>
+              </div>
+            </div>
+            <div class="card-highlights">
+              ${c.highlights.map(h => `<span class="highlight-tag">${h}</span>`).join('')}
+            </div>
+            <div class="card-tags">
+              ${c.tags.map(t => `<span class="tag">${t}</span>`).join('')}
+            </div>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    // Init
+    renderFilters();
+    renderGrid();
+  </script>
+</body>
+</html>

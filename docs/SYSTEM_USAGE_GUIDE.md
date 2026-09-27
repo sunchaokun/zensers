@@ -125,7 +125,18 @@ python -m src.cli.main survey regions
 ]
 ```
 
-### 2.4 Output Location
+### 2.4 Case Gallery
+
+The system provides a case showcase page deployed via GitHub Pages at `https://sunchaokun.github.io/zensers/cases/` with a 3×2 grid layout displaying sample reports:
+
+- **Industry Research**: New energy vehicles, smartphones, lithium batteries
+- **Competitive Analysis**: AI chip market landscape
+- **Policy Brief**: Healthcare AI regulations
+- **Academic Research**: Battery technology comparison
+
+Each case includes word count, section count, chart count, and format (Word/PDF).
+
+### 2.5 Output Location
 
 All outputs are uniformly stored in the `output/reports/{task_id}/` directory:
 

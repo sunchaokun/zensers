@@ -32,19 +32,19 @@ zensers_report_template.docx
 
 ### 页眉
 ```
-[zensers]   XX行业研究报告   第X页
+ZENSERS   |   {报告标题}
 ```
 
 ### 页脚
 ```
-────────────────────────────────────────────────────────────
-github.com/sunchaokun/zensers  |  © 2026 zensers. 保留所有权利。
+© 2026 zensers. 保留所有权利。   |   github.com/sunchaokun/zensers   |   第 X 页
 ```
 
 ### 封面
-- Logo 位置：顶部居中
-- GitHub 标识：`⭐ GitHub: sunchaokun/zensers ⭐`
-- 主色调：深蓝色 (#1a365d) + 金色点缀 (#d69e2e)
+- Logo 位置：底部居中
+- GitHub 标识：`github.com/sunchaokun/zensers`
+- 主色调：德勤蓝 (#0076A8) + 深蓝 (#003366) + 金色 (#C9A227)
+- 设计风格：德勤（Deloitte）咨询公司风格
 
 ## 使用方法
 

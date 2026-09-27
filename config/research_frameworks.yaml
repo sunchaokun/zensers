@@ -48,11 +48,14 @@ industry_report:
 
     # Content requirements - high quality
     content:
-      min_section_length: 2000    # Minimum word count per section (significantly increased)
+      min_section_length: 5000    # Minimum word count per section (increased for 30-40 page report)
       require_data_points: true   # Must have data support
       require_charts: true        # Must include charts
       require_sources: true       # Must include source citations
       require_multiple_sources: true  # Each data point requires multiple source verification
+      require_tables: true        # Must include data tables
+      require_analysis: true      # Must include detailed analysis
+      require_implications: true  # Must include strategic implications
 
   # Section weights (affect Agent resource allocation)
   section_weights:

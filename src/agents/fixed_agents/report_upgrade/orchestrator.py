@@ -3530,7 +3530,7 @@ class ReportOrchestrator:
                 for iss in quality_issues[:20]
             )
 
-        prompt = self._prompt_manager.get(
+        prompt = self._prompts.get(
             "revision_locate",
             topic=self._task_structure.get('topic', ''),
             chapter_index=chapter_index,

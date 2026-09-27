@@ -76,6 +76,7 @@ secrets/
 /data/
 /cache/
 /tmp/
+/temp/
 
 # 临时文件
 *.tmp
@@ -90,6 +91,7 @@ s1_export.docx
 # 报告草稿
 *.docx
 !docs/*.docx
+!templates/*.docx
 
 # 示例数据
 examples/output/
@@ -99,6 +101,9 @@ examples/output/
 # ═══════════════════════════════════════════════════════════════════
 graphify-out/
 MagicMock/
+research_*_opt/
+research_github_industry_skills/
+research_industry_report_benchmark/
 
 # Local runtime databases and SQLite sidecars
 data/**/*.db
