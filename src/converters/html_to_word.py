@@ -24,6 +24,7 @@ Usage example:
 
 import logging
 import os
+import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -256,7 +257,7 @@ class HTMLToWordConverter:
             logger.info("[CONVERT] Step 5: Creating Word document")
             if self._docx_available:
                 logger.info("[CONVERT] Using python-docx for document creation")
-                result = self._create_docx_document(elements, output_path, final_styles)
+                result = self._create_docx_document(elements, output_path, final_styles, html)
             else:
                 logger.warning("[CONVERT] python-docx not available, using fallback")
                 result = self._create_fallback_document(elements, output_path, final_styles)
@@ -507,7 +508,8 @@ class HTMLToWordConverter:
         self,
         elements: List[Dict[str, Any]],
         output_path: str,
-        styles: Dict[str, Any]
+        styles: Dict[str, Any],
+        html: str = ""
     ) -> ConversionResult:
         """
         Create Word document using python-docx
