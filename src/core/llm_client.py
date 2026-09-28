@@ -680,6 +680,10 @@ def _parse_response(response: Dict[str, Any], model: str) -> Dict[str, Any]:
                 ):
                     content = json.dumps(parsed, ensure_ascii=False)
                     break
+        # If still no content but reasoning_content exists, use it as content
+        # (MIMO 2.5 and similar models may put the answer in reasoning_content)
+        if not content.strip() and reasoning_content.strip():
+            content = reasoning_content.strip()
         if not content.strip():
             return {
                 "success": False,

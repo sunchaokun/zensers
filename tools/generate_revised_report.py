@@ -12,7 +12,7 @@ sys.path.insert(0, str(ROOT))
 
 from src.converters.html_to_word import HTMLToWordConverter
 
-with open(ROOT / 'output' / 'full_research' / 'revised_report_llm.json', 'r', encoding='utf-8') as f:
+with open(ROOT / 'output' / 'full_research' / 'semiconductor_revised_report_llm.json', 'r', encoding='utf-8') as f:
     data = json.load(f)
 
 template = (ROOT / 'templates' / 'professional_report.html').read_text(encoding='utf-8')

@@ -82,7 +82,7 @@ class LLMConfig:
     cheap_model: str = "gpt-3.5-turbo"
     embedding_model: str = "text-embedding-3-small"
     temperature: float = 0.7
-    max_tokens: int = 4096
+    max_tokens: int = 8192
     top_p: float = 1.0
     frequency_penalty: float = 0.0
     presence_penalty: float = 0.0

@@ -59,7 +59,7 @@ async def revise_report():
     print("=" * 60)
     
     # 加载研究结果
-    research_file = Path("output/full_research/research_result.json")
+    research_file = Path("output/full_research/semiconductor_research_result.json")
     if not research_file.exists():
         print("研究结果文件不存在")
         return
