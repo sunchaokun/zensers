@@ -201,8 +201,8 @@ for i, section in enumerate(data.get('sections', []), 1):
 
 content_html = '\n'.join(content_parts)
 
-html = template.replace('{{title}}', '中国新能源汽车行业深度研究')
-html = html.replace('{{subtitle}}', '中国新能源汽车行业深度研究报告')
+html = template.replace('{{title}}', data.get('topic', '中国新能源汽车行业深度研究'))
+html = html.replace('{{subtitle}}', data.get('topic', '中国新能源汽车行业深度研究报告'))
 html = html.replace('{{date}}', datetime.now().strftime('%Y年%m月'))
 html = html.replace('{{report_type}}', '行业深度研究')
 html = html.replace('{{toc_items}}', toc_html)

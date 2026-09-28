@@ -23,16 +23,16 @@ from src.core.llm_client import init_llm_infrastructure
 init_llm_infrastructure(settings.llm_profiles)
 
 # 研究配置
-TOPIC = "中国新能源汽车行业深度研究"
+TOPIC = "全球半导体行业深度研究报告"
 CHAPTERS = [
     "行业概览",
     "市场规模深度分析",
     "产业链深度分析", 
-    "竞争格局深度分析",
-    "技术发展趋势",
-    "政策环境分析",
+    "竞争格局分析",
+    "技术趋势分析",
+    "政策环境与监管分析",
     "风险分析",
-    "投资建议与展望",
+    "投资建议与策略",
 ]
 
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "output" / "full_research"
